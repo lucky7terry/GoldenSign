@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check server Python syntax
+        run: |
+          if [ -d "server" ]; then
+            python -m compileall server
+          else
+            echo "server/ not found. skipped."
+          fi
+
+      - name: Validate contracts JSON
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          contracts_dir = Path("contracts")
+
+          if not contracts_dir.exists():
+              print("contracts/ not found. skipped.")
+              raise SystemExit(0)
+
+          json_files = list(contracts_dir.rglob("*.json"))
+
+          if not json_files:
+              print("No JSON files in contracts/. skipped.")
+              raise SystemExit(0)
+
+          for file in json_files:
+              with file.open("r", encoding="utf-8") as f:
+                  json.load(f)
+              print(f"valid json: {file}")
+
+          print("contracts JSON validation passed.")
+          PY
+
+      - name: Set up Node.js
+        if: ${{ hashFiles('mentra/package.json') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check Mentra MiniApp build
+        if: ${{ hashFiles('mentra/package.json') != '' }}
+        working-directory: mentra
+        run: |
+          if [ -f "package-lock.json" ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+          npm run build --if-present
