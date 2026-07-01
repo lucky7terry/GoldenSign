@@ -1,0 +1,24 @@
+# environment
+.env
+.env.*
+.venv/
+__pycache__/
+
+# node
+node_modules/
+dist/
+build/
+coverage/
+
+# model / data
+models/
+data/
+logs/
+*.keras
+*.h5
+*.tflite
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
