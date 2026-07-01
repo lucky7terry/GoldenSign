@@ -1,0 +1,19 @@
+language: "ko-KR"
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  poem: false
+  in_progress_fortune: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+  path_filters:
+    - "!models/**"
+    - "!data/**"
+    - "!logs/**"
+    - "!**/*.keras"
+    - "!**/*.h5"
+    - "!**/*.tflite"
