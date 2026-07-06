@@ -1,9 +1,6 @@
 ---
 name: "🐛 Bug Report"
 description: "코드 에러, 빌드 오류 등 수정이 필요한 버그를 제보합니다."
-title: "[BUG] "
-labels: ["bug"]
-assignees: ""
 ---
 
 ## 🚨 문제 상황
