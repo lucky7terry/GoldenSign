@@ -31,6 +31,16 @@ export class User {
   /** Button presses and touchpad gestures */
   input: InputManager;
 
+  /**
+   * Golden Sign 세션 상태. onSession의 health→createSession 흐름 결과를 담아
+   * 웹뷰(/api/session-status)가 Ready/실패 문구를 렌더링하는 데 쓴다.
+   * 초기값은 "connecting" (아직 흐름 미완료).
+   */
+  sessionStatus: { state: "connecting" | "ready" | "failed"; modelVersion: string | null } = {
+    state: "connecting",
+    modelVersion: null,
+  };
+
   constructor(public readonly userId: string) {
     this.photo = new PhotoManager(this);
     this.transcription = new TranscriptionManager(this);

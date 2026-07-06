@@ -19,10 +19,19 @@ interface HomePageProps {
   userId: string;
 }
 
+interface SessionStatus {
+  state: "connecting" | "ready" | "failed";
+  modelVersion: string | null;
+}
+
 export default function HomePage({ userId }: HomePageProps) {
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [transcriptions, setTranscriptions] = useState<Transcription[]>([]);
   const [logs, setLogs] = useState<Log[]>([]);
+  const [sessionStatus, setSessionStatus] = useState<SessionStatus>({
+    state: "connecting",
+    modelVersion: null,
+  });
   const logIdCounter = useRef(Date.now());
 
   const addLog = useCallback((message: string) => {
@@ -146,6 +155,61 @@ export default function HomePage({ userId }: HomePageProps) {
     return () => eventSource?.close();
   }, [addLog, userId]);
 
+  // Golden Sign 세션 상태 폴링.
+  // onSession(glasses)에서 흐름이 끝나면 /api/session-status가 ready/failed를 반환한다.
+  // 아직 connecting이면 짧게 재조회하고, ready/failed로 확정되면 폴링을 멈춘다 (무한 로딩 방지).
+  useEffect(() => {
+    if (!userId) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(
+          `/api/session-status?userId=${encodeURIComponent(userId)}`,
+        );
+        const data = (await res.json()) as SessionStatus;
+        if (stopped) return;
+        setSessionStatus(data);
+        if (data.state === "connecting") {
+          timer = setTimeout(poll, 2000);
+        }
+      } catch {
+        // 조회 실패는 표시 상태를 바꾸지 않고 다음 tick에서 재시도
+        if (!stopped) timer = setTimeout(poll, 2000);
+      }
+    };
+
+    poll();
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [userId]);
+
+  const statusLines =
+    sessionStatus.state === "ready"
+      ? [
+          "Golden Sign Ready",
+          "MiniApp Server: OK",
+          "AI Server: OK",
+          `Model: ${sessionStatus.modelVersion ?? ""} loaded`,
+        ]
+      : sessionStatus.state === "failed"
+        ? [
+            "Golden Sign",
+            "AI 서버 연결 실패",
+            "서버 주소 또는 실행 상태를 확인하세요.",
+          ]
+        : ["Golden Sign", "MiniApp 실행됨", "AI 서버 상태 확인 중..."];
+
+  const statusClass =
+    sessionStatus.state === "ready"
+      ? "border-green-500/40 bg-green-500/10 text-foreground"
+      : sessionStatus.state === "failed"
+        ? "border-destructive/40 bg-destructive/10 text-destructive"
+        : "border-muted bg-muted/30 text-muted-foreground";
+
   return (
     <div className="max-w-5xl mx-auto p-4 md:p-6 space-y-4">
       {/* Header */}
@@ -162,6 +226,15 @@ export default function HomePage({ userId }: HomePageProps) {
         <Badge variant="outline" className="font-mono text-xs mt-2">
           {userId && userId.length > 20 ? `${userId.substring(0, 20)}...` : userId}
         </Badge>
+      </div>
+
+      {/* Golden Sign 세션 상태 (health → createSession 흐름 결과) */}
+      <div className={`rounded-xl border p-4 text-sm ${statusClass}`}>
+        {statusLines.map((line, i) => (
+          <div key={i} className={i === 0 ? "font-semibold" : ""}>
+            {line}
+          </div>
+        ))}
       </div>
 
       {/* Photo Stream */}

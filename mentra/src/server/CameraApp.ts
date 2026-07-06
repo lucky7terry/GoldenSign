@@ -7,6 +7,7 @@
 
 import { AppServer, AppSession } from "@mentra/sdk";
 import { sessions } from "./manager/SessionManager";
+import { AIServerClient } from "../services/ai-server-client";
 
 export interface CameraAppConfig {
   packageName: string;
@@ -31,9 +32,63 @@ export class CameraApp extends AppServer {
     sessionId: string,
     userId: string,
   ): Promise<void> {
+    // 템플릿 기본 카메라 세션 배선 (삭제 금지, 상태 흐름과 무관하게 항상 유지)
     console.log(`📸 Camera session started for ${userId}`);
     const user = sessions.getOrCreate(userId);
     user.setAppSession(session);
+
+    // ----- Golden Sign 세션 상태 흐름 -----
+    session.logger.info(`[GoldenSign] session start user=${userId}`);
+
+    // 1) 초기 표시 (HUD + 웹뷰 상태)
+    user.sessionStatus = { state: "connecting", modelVersion: null };
+    const initialText =
+      "Golden Sign\nMiniApp 실행됨\nAI 서버 상태 확인 중...";
+    session.layouts.showTextWall(initialText);
+
+    // 2) health 확인
+    const health = await AIServerClient.checkHealth();
+    if (!health.ok) {
+      session.logger.warn(
+        `[GoldenSign] health failed kind=${health.error.kind} msg=${health.error.message}`,
+      );
+      user.sessionStatus = { state: "failed", modelVersion: null };
+      session.layouts.showTextWall(
+        "Golden Sign\nAI 서버 연결 실패\n서버 주소 또는 실행 상태를 확인하세요.",
+      );
+      return;
+    }
+    session.logger.info(
+      `[GoldenSign] health ok model=${health.data.model.version}`,
+    );
+
+    // 3) 세션 생성
+    const created = await AIServerClient.createSession(userId);
+    if (!created.ok) {
+      session.logger.warn(
+        `[GoldenSign] createSession failed kind=${created.error.kind} msg=${created.error.message}`,
+      );
+      user.sessionStatus = { state: "failed", modelVersion: null };
+      session.layouts.showTextWall(
+        "Golden Sign\nAI 서버 연결 실패\n서버 주소 또는 실행 상태를 확인하세요.",
+      );
+      return;
+    }
+    session.logger.info(
+      `[GoldenSign] session created id=${created.data.session_id}`,
+    );
+
+    // 4) Ready 표시 (HUD + 웹뷰 상태)
+    user.sessionStatus = {
+      state: "ready",
+      modelVersion: health.data.model.version,
+    };
+    const readyText =
+      `Golden Sign Ready\n` +
+      `MiniApp Server: OK\n` +
+      `AI Server: OK\n` +
+      `Model: ${health.data.model.version} loaded`;
+    session.layouts.showTextWall(readyText);
   }
 
   /** Called when a user closes the app or disconnects */

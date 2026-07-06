@@ -6,7 +6,7 @@
  */
 
 import { Hono } from "hono";
-import { getHealth } from "../api/health";
+import { getHealth, getSessionStatus } from "../api/health";
 import { photoStream, transcriptionStream } from "../api/stream";
 import { speak, stopAudio } from "../api/audio";
 import { getThemePreference, setThemePreference } from "../api/storage";
@@ -16,6 +16,7 @@ export const api = new Hono();
 
 // Health
 api.get("/health", getHealth);
+api.get("/session-status", getSessionStatus);
 
 // SSE streams
 api.get("/photo-stream", photoStream);
