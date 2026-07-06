@@ -20,7 +20,7 @@
         "react-dom": "^19",
         "tailwind-merge": "^3.2.0",
         "tw-animate-css": "^1.3.8",
-        "ws": "^8.18.1",
+        "ws": "^8.18.1"
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -28,9 +28,9 @@
         "@types/react-dom": "^19",
         "@types/ws": "^8.18.0",
         "tailwindcss": "^4.1.17",
-        "typescript": "^5.0.0",
-      },
-    },
+        "typescript": "^5.0.0"
+      }
+    }
   },
   "packages": {
     "@jimp/core": ["@jimp/core@1.6.0", "", { "dependencies": { "@jimp/file-ops": "1.6.0", "@jimp/types": "1.6.0", "@jimp/utils": "1.6.0", "await-to-js": "^3.0.0", "exif-parser": "^0.1.12", "file-type": "^16.0.0", "mime": "3" } }, "sha512-EQQlKU3s9QfdJqiSrZWNTxBs3rKXgO2W+GxNXDtwchF3a4IqxDheFX1ti+Env9hdJXDiYLp2jTRjlxhPthsk8w=="],
@@ -209,7 +209,7 @@
 
     "buffer-equal-constant-time": ["buffer-equal-constant-time@1.0.1", "", {}, "sha512-zRpUiDwd/xk6ADqPMATG8vc9VPrkck7T07OIx0gnjmJAnHnTVXNQG3vfvWNuiZIkwu9KrKdA1iJKfsfTVxE6NA=="],
 
-    "bun": ["bun@1.3.9", "", { "optionalDependencies": { "@oven/bun-darwin-aarch64": "1.3.9", "@oven/bun-darwin-x64": "1.3.9", "@oven/bun-darwin-x64-baseline": "1.3.9", "@oven/bun-linux-aarch64": "1.3.9", "@oven/bun-linux-aarch64-musl": "1.3.9", "@oven/bun-linux-x64": "1.3.9", "@oven/bun-linux-x64-baseline": "1.3.9", "@oven/bun-linux-x64-musl": "1.3.9", "@oven/bun-linux-x64-musl-baseline": "1.3.9", "@oven/bun-windows-x64": "1.3.9", "@oven/bun-windows-x64-baseline": "1.3.9" }, "os": [ "linux", "win32", "darwin", ], "cpu": [ "x64", "arm64", ], "bin": { "bun": "bin/bun.exe", "bunx": "bin/bunx.exe" } }, "sha512-v5hkh1us7sMNjfimWE70flYbD5I1/qWQaqmJ45q2qk5H/7muQVa478LSVRSFyGTBUBog2LsPQnfIRdjyWJRY+A=="],
+    "bun": ["bun@1.3.9", "", { "optionalDependencies": { "@oven/bun-darwin-aarch64": "1.3.9", "@oven/bun-darwin-x64": "1.3.9", "@oven/bun-darwin-x64-baseline": "1.3.9", "@oven/bun-linux-aarch64": "1.3.9", "@oven/bun-linux-aarch64-musl": "1.3.9", "@oven/bun-linux-x64": "1.3.9", "@oven/bun-linux-x64-baseline": "1.3.9", "@oven/bun-linux-x64-musl": "1.3.9", "@oven/bun-linux-x64-musl-baseline": "1.3.9", "@oven/bun-windows-x64": "1.3.9", "@oven/bun-windows-x64-baseline": "1.3.9" }, "os": [ "linux", "win32", "darwin" ], "cpu": [ "x64", "arm64" ], "bin": { "bun": "bin/bun.exe", "bunx": "bin/bunx.exe" } }, "sha512-v5hkh1us7sMNjfimWE70flYbD5I1/qWQaqmJ45q2qk5H/7muQVa478LSVRSFyGTBUBog2LsPQnfIRdjyWJRY+A=="],
 
     "bun-plugin-tailwind": ["bun-plugin-tailwind@0.1.2", "", { "peerDependencies": { "bun": ">=1.0.0" } }, "sha512-41jNC1tZRSK3s1o7pTNrLuQG8kL/0vR/JgiTmZAJ1eHwe0w5j6HFPKeqEk0WAD13jfrUC7+ULuewFBBCoADPpg=="],
 
@@ -453,6 +453,6 @@
 
     "image-q/@types/node": ["@types/node@16.9.1", "", {}, "sha512-QpLcX9ZSsq3YYUUnD3nFDY8H7wctAhQj/TFKL8Ya8v5fMm3CFXxo8zStsLAl780ltoYoo1WvKUVGBQK+1ifr7g=="],
 
-    "pixelmatch/pngjs": ["pngjs@6.0.0", "", {}, "sha512-TRzzuFRRmEoSW/p1KVAmiOgPco2Irlah+bGFCeNfJXxxYGwSw7YwAOAcd7X28K/m5bjBWKsC29KyoMfHbypayg=="],
+    "pixelmatch/pngjs": ["pngjs@6.0.0", "", {}, "sha512-TRzzuFRRmEoSW/p1KVAmiOgPco2Irlah+bGFCeNfJXxxYGwSw7YwAOAcd7X28K/m5bjBWKsC29KyoMfHbypayg=="]
   }
 }
