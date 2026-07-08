@@ -28,13 +28,26 @@ function parseNumber(name: string, defaultValue: number): number {
   return n;
 }
 
+// mock 여부를 먼저 파싱해야 AI_SERVER_URL 검증을 조건부로 적용할 수 있다.
+const mockAiServer = parseBool("MOCK_AI_SERVER", true);
+
+// mock 모드에서는 실제 AI 서버로 요청을 보내지 않으므로 AI_SERVER_URL이 없어도 된다.
+// mock이 아닐 때만 기존처럼 필수값으로 검증한다.
+const aiServerUrl = mockAiServer ? (process.env.AI_SERVER_URL ?? "") : required("AI_SERVER_URL");
+
 export const env = {
   packageName: required("PACKAGE_NAME"),
   mentraApiKey: required("MENTRAOS_API_KEY"),
   port: parseNumber("PORT", 3000),
-  aiServerUrl: required("AI_SERVER_URL"),
-  mockAiServer: parseBool("MOCK_AI_SERVER", true),
+  // mockAiServer가 true이면 사용되지 않는다(빈 문자열일 수 있음). false일 때만 유효한 URL이 보장된다.
+  aiServerUrl,
+  mockAiServer,
   healthCheckTimeoutMs: parseNumber("HEALTH_CHECK_TIMEOUT_MS", 5000),
 } as const;
+
+console.log(
+  `[env] mode=${mockAiServer ? "mock" : "live"} ` +
+    `aiServerUrl=${aiServerUrl || "(none)"} port=${env.port}`,
+);
 
 export type Env = typeof env;
