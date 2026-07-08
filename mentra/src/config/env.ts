@@ -20,10 +20,25 @@ function parseBool(name: string, defaultValue: boolean): boolean {
 
 function parseNumber(name: string, defaultValue: number): number {
   const v = process.env[name];
-  if (v === undefined) return defaultValue;
-  const n = Number(v);
+  // 미설정/빈 값/공백은 기본값으로 처리한다.
+  // Number("")===0, Number(" ")===0 함정 때문에 빈 값이 0으로 파싱되는 걸 막는다.
+  if (typeof v !== "string" || v.trim() === "") return defaultValue;
+  const n = Number(v.trim());
+  // 명시적으로 잘못된 값은 조용히 폴백하지 않고 던진다(required/parseBool과 동일한 fail-loud 정책).
   if (!Number.isFinite(n)) {
     throw new Error(`Invalid number for ${name}: ${v}`);
+  }
+  return n;
+}
+
+// 포트 전용: parseNumber 결과가 유효 포트 범위(1~65535 정수)인지 검증한다.
+// 빈 값은 parseNumber가 기본값으로 처리하고, PORT="0"/"70000" 같은 명시적 잘못된 값은 던진다.
+function parsePort(name: string, defaultValue: number): number {
+  const n = parseNumber(name, defaultValue);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    throw new Error(
+      `Invalid port for ${name}: ${n} (유효 범위 1-65535)`,
+    );
   }
   return n;
 }
@@ -38,7 +53,7 @@ const aiServerUrl = mockAiServer ? (process.env.AI_SERVER_URL ?? "") : required(
 export const env = {
   packageName: required("PACKAGE_NAME"),
   mentraApiKey: required("MENTRAOS_API_KEY"),
-  port: parseNumber("PORT", 3000),
+  port: parsePort("PORT", 3000),
   // mockAiServer가 true이면 사용되지 않는다(빈 문자열일 수 있음). false일 때만 유효한 URL이 보장된다.
   aiServerUrl,
   mockAiServer,
