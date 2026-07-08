@@ -50,51 +50,74 @@ export class CameraApp extends AppServer {
       "Golden Sign\nMiniApp 실행됨\nAI 서버 상태 확인 중...";
     session.layouts.showTextWall(initialText);
 
-    // 2) health 확인
-    const health = await AIServerClient.checkHealth();
-    if (!health.ok) {
-      session.logger.warn(
-        `[GoldenSign] health failed kind=${health.error.kind} msg=${health.error.message}`,
+    // AI 서버 초기화(health + createSession).
+    // 참고: checkHealth/createSession은 네트워크·HTTP·timeout 오류를 내부에서 잡아
+    // { ok: false } 결과로 반환하므로 이 경로에서 throw되지 않는다.
+    // 아래 try/catch는 SDK 레이아웃 호출 등 예기치 못한 예외에 대한 안전망이며,
+    // 정상 실패는 여전히 !health.ok / !created.ok 분기에서 처리한다.
+    try {
+      // 2) health 확인
+      const health = await AIServerClient.checkHealth();
+      if (!health.ok) {
+        session.logger.warn(
+          `[GoldenSign] health failed kind=${health.error.kind} msg=${health.error.message}`,
+        );
+        user.sessionStatus = { state: "failed", modelVersion: null };
+        session.layouts.showTextWall(
+          "Golden Sign\nAI 서버 연결 실패\n서버 주소 또는 실행 상태를 확인하세요.",
+        );
+        return;
+      }
+      session.logger.info(
+        `[GoldenSign] health ok model=${health.data.model.version}`,
+      );
+
+      // 3) 세션 생성
+      const created = await AIServerClient.createSession(userId);
+      if (!created.ok) {
+        session.logger.warn(
+          `[GoldenSign] createSession failed kind=${created.error.kind} msg=${created.error.message}`,
+        );
+        user.sessionStatus = { state: "failed", modelVersion: null };
+        session.layouts.showTextWall(
+          "Golden Sign\nAI 서버 연결 실패\n서버 주소 또는 실행 상태를 확인하세요.",
+        );
+        return;
+      }
+      // stopSession 호출을 위해 AI 서버 session_id를 sessionId에 매핑해 저장.
+      this.aiSessionIds.set(sessionId, created.data.session_id);
+      session.logger.info(
+        `[GoldenSign] session created id=${created.data.session_id}`,
+      );
+
+      // 4) Ready 표시 (HUD + 웹뷰 상태)
+      user.sessionStatus = {
+        state: "ready",
+        modelVersion: health.data.model.version,
+      };
+      const readyText =
+        `Golden Sign Ready\n` +
+        `MiniApp Server: OK\n` +
+        `AI Server: OK\n` +
+        `Model: ${health.data.model.version} loaded`;
+      session.layouts.showTextWall(readyText);
+    } catch (err) {
+      // 예기치 못한 예외에 대한 안전한 종료(throw 재전파하지 않음).
+      console.error(
+        `[CameraApp] AI 서버 초기화 실패 (session=${sessionId})`,
+        err,
       );
       user.sessionStatus = { state: "failed", modelVersion: null };
-      session.layouts.showTextWall(
-        "Golden Sign\nAI 서버 연결 실패\n서버 주소 또는 실행 상태를 확인하세요.",
-      );
+      // 부분적으로 저장된 매핑 정리(리소스 누수 방지).
+      this.aiSessionIds.delete(sessionId);
+      // 사용자 안내. showTextWall 자체가 실패해도 무시.
+      try {
+        session.layouts.showTextWall("Golden Sign\nAI 서버 연결 실패");
+      } catch {
+        // 안내 표시 실패는 무시하고 안전하게 종료.
+      }
       return;
     }
-    session.logger.info(
-      `[GoldenSign] health ok model=${health.data.model.version}`,
-    );
-
-    // 3) 세션 생성
-    const created = await AIServerClient.createSession(userId);
-    if (!created.ok) {
-      session.logger.warn(
-        `[GoldenSign] createSession failed kind=${created.error.kind} msg=${created.error.message}`,
-      );
-      user.sessionStatus = { state: "failed", modelVersion: null };
-      session.layouts.showTextWall(
-        "Golden Sign\nAI 서버 연결 실패\n서버 주소 또는 실행 상태를 확인하세요.",
-      );
-      return;
-    }
-    // stopSession 호출을 위해 AI 서버 session_id를 sessionId에 매핑해 저장.
-    this.aiSessionIds.set(sessionId, created.data.session_id);
-    session.logger.info(
-      `[GoldenSign] session created id=${created.data.session_id}`,
-    );
-
-    // 4) Ready 표시 (HUD + 웹뷰 상태)
-    user.sessionStatus = {
-      state: "ready",
-      modelVersion: health.data.model.version,
-    };
-    const readyText =
-      `Golden Sign Ready\n` +
-      `MiniApp Server: OK\n` +
-      `AI Server: OK\n` +
-      `Model: ${health.data.model.version} loaded`;
-    session.layouts.showTextWall(readyText);
   }
 
   /** Called when a user closes the app or disconnects */
