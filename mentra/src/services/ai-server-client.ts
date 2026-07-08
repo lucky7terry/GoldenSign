@@ -147,7 +147,7 @@ export const AIServerClient = {
           },
           body: JSON.stringify(body),
         },
-        env.healthCheckTimeoutMs,
+        env.requestTimeoutMs,
       );
       if (!res.ok) return { ok: false, error: httpError(res) };
       const data = (await res.json()) as SessionResponse;
@@ -172,7 +172,7 @@ export const AIServerClient = {
       const res = await fetchWithTimeout(
         `${env.aiServerUrl}/v1/sessions/${encodeURIComponent(sessionId)}/stop`,
         { method: "POST", headers: { "Accept": "application/json" } },
-        env.healthCheckTimeoutMs,
+        env.requestTimeoutMs,
       );
       if (!res.ok) return { ok: false, error: httpError(res) };
       const data = (await res.json()) as StopSessionResponse;

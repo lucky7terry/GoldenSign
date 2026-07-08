@@ -58,6 +58,8 @@ export const env = {
   aiServerUrl,
   mockAiServer,
   healthCheckTimeoutMs: parseNumber("HEALTH_CHECK_TIMEOUT_MS", 5000),
+  // AI 서버 일반 요청(세션 생성/종료 등 헬스체크 제외) 타임아웃.
+  requestTimeoutMs: parseNumber("REQUEST_TIMEOUT_MS", 10000),
 } as const;
 
 console.log(
