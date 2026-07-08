@@ -17,6 +17,10 @@ export interface CameraAppConfig {
 }
 
 export class CameraApp extends AppServer {
+  // MentraOS sessionId → AI 서버 session_id 매핑.
+  // onStop 시 이 매핑을 조회해 AI 서버 세션을 정리한다(리소스 누수 방지).
+  private readonly aiSessionIds = new Map<string, string>();
+
   constructor(config: CameraAppConfig) {
     super({
       packageName: config.packageName,
@@ -74,6 +78,8 @@ export class CameraApp extends AppServer {
       );
       return;
     }
+    // stopSession 호출을 위해 AI 서버 session_id를 sessionId에 매핑해 저장.
+    this.aiSessionIds.set(sessionId, created.data.session_id);
     session.logger.info(
       `[GoldenSign] session created id=${created.data.session_id}`,
     );
@@ -98,6 +104,34 @@ export class CameraApp extends AppServer {
     reason: string,
   ): Promise<void> {
     console.log(`👋 Camera session ended for ${userId}: ${reason}`);
+
+    // AI 서버 세션 정리 (리소스 누수 방지).
+    // mock 모드에서도 stopSession이 동일한 형태로 동작한다.
+    const aiSessionId = this.aiSessionIds.get(sessionId);
+    if (aiSessionId) {
+      try {
+        const stopped = await AIServerClient.stopSession(aiSessionId);
+        if (stopped.ok) {
+          console.log(
+            `[GoldenSign] AI session stopped id=${aiSessionId} status=${stopped.data.status}`,
+          );
+        } else {
+          console.error(
+            `[GoldenSign] AI session stop failed id=${aiSessionId} kind=${stopped.error.kind} msg=${stopped.error.message}`,
+          );
+        }
+      } catch (err) {
+        // stopSession은 내부적으로 에러를 result로 반환하지만, 예기치 못한 예외에도 앱이 죽지 않도록 방어.
+        console.error(
+          `[GoldenSign] AI session stop threw id=${aiSessionId}:`,
+          err,
+        );
+      } finally {
+        // 성공/실패와 무관하게 매핑 제거.
+        this.aiSessionIds.delete(sessionId);
+      }
+    }
+
     try {
       sessions.remove(userId);
       console.log(`Cleaned up session for ${userId}`);
