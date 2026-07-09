@@ -1,6 +1,8 @@
 # environment
 .env
 .env.*
+!.env.example
+!**/.env.example
 .venv/
 __pycache__/
 
@@ -9,6 +11,10 @@ node_modules/
 dist/
 build/
 coverage/
+
+# bun / typescript
+.bun/
+*.tsbuildinfo
 
 # model / data
 models/

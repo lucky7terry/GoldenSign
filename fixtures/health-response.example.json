@@ -1,0 +1,10 @@
+{
+  "status": "ok",
+  "api": "ready",
+  "model": {
+    "loaded": true,
+    "mode": "mock",
+    "version": "mock-0.1"
+  },
+  "time": "2026-07-06T00:00:00Z"
+}
