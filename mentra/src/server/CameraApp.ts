@@ -8,6 +8,7 @@
 import { AppServer, AppSession } from "@mentra/sdk";
 import { sessions } from "./manager/SessionManager";
 import { AIServerClient } from "../services/ai-server-client";
+import { AIServerStreamClient } from "../services/ai-server-stream-client";
 
 export interface CameraAppConfig {
   packageName: string;
@@ -90,6 +91,25 @@ export class CameraApp extends AppServer {
         `[GoldenSign] session created id=${created.data.session_id}`,
       );
 
+      if (created.data.ws_url) {
+        const aiStream = new AIServerStreamClient({
+          session: created.data,
+          userId,
+          onResult: (text) => {
+            try {
+              session.layouts.showTextWall(`Golden Sign\n${text}`);
+            } catch (err) {
+              console.error("[GoldenSign] failed to show AI result:", err);
+            }
+          },
+        });
+        user.aiStream = aiStream;
+        const streamConnected = await aiStream.connect();
+        session.logger.info(
+          `[GoldenSign] websocket stream ${streamConnected ? "connected" : "unavailable"}`,
+        );
+      }
+
       // 4) Ready 표시 (HUD + 웹뷰 상태)
       user.sessionStatus = {
         state: "ready",
@@ -131,6 +151,10 @@ export class CameraApp extends AppServer {
     // AI 서버 세션 정리 (리소스 누수 방지).
     // mock 모드에서도 stopSession이 동일한 형태로 동작한다.
     const aiSessionId = this.aiSessionIds.get(sessionId);
+    const user = sessions.get(userId);
+    user?.aiStream?.stop(reason);
+    if (user) user.aiStream = null;
+
     if (aiSessionId) {
       try {
         const stopped = await AIServerClient.stopSession(aiSessionId);

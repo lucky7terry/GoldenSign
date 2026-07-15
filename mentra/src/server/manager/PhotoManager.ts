@@ -44,6 +44,7 @@ export class PhotoManager {
 
     this.photos.set(photo.requestId, stored);
     this.broadcastPhoto(stored);
+    this.user.aiStream?.sendFrame(stored);
     console.log(
       `📸 Photo captured for ${this.user.userId} (${photo.size} bytes)`,
     );
