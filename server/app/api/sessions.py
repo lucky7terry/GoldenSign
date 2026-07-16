@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import binascii
 from datetime import datetime, timezone
@@ -77,6 +78,47 @@ def _validate_common_message(message: dict, session_id: str):
     return None
 
 
+async def _send_json(websocket: WebSocket, send_lock: asyncio.Lock, payload: dict):
+    async with send_lock:
+        await websocket.send_json(payload)
+
+
+async def _run_frame_recognition(
+    websocket: WebSocket,
+    send_lock: asyncio.Lock,
+    session_id: str,
+    frame_message: dict,
+):
+    client_message_id = frame_message.get("client_message_id")
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, recognize_frame, frame_message)
+        payload = {
+            "type": "result",
+            "schema_version": SCHEMA_VERSION,
+            "session_id": session_id,
+            "client_message_id": client_message_id,
+            "request_id": frame_message.get("request_id"),
+            "frame_index": frame_message.get("frame_index"),
+            "result": result,
+            "model": get_model_health_status(),
+            "processed_at": _utc_now_iso(),
+        }
+    except Exception:
+        payload = _error_message(
+            session_id,
+            "model_unavailable",
+            "Frame recognition failed.",
+            client_message_id,
+            retryable=True,
+        )
+
+    try:
+        await _send_json(websocket, send_lock, payload)
+    except RuntimeError:
+        return
+
+
 @router.post(
     "/v1/sessions",
     response_model=SessionCreateResponse,
@@ -126,13 +168,17 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         return
 
     await websocket.accept()
+    send_lock = asyncio.Lock()
+    recognition_tasks: set[asyncio.Task] = set()
 
     try:
         while True:
             try:
                 message = await websocket.receive_json()
             except ValueError:
-                await websocket.send_json(
+                await _send_json(
+                    websocket,
+                    send_lock,
                     _error_message(
                         session_id,
                         "invalid_json",
@@ -142,7 +188,9 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                 continue
 
             if not isinstance(message, dict):
-                await websocket.send_json(
+                await _send_json(
+                    websocket,
+                    send_lock,
                     _error_message(
                         session_id,
                         "invalid_schema",
@@ -153,7 +201,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
 
             validation_error = _validate_common_message(message, session_id)
             if validation_error is not None:
-                await websocket.send_json(validation_error)
+                await _send_json(websocket, send_lock, validation_error)
                 continue
 
             message_type = message["type"]
@@ -161,7 +209,9 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
 
             if message_type == "hello":
                 session.status = "active"
-                await websocket.send_json(
+                await _send_json(
+                    websocket,
+                    send_lock,
                     {
                         "type": "ready",
                         "schema_version": SCHEMA_VERSION,
@@ -174,7 +224,9 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                 image = message.get("image")
                 image_data = image.get("data") if isinstance(image, dict) else None
                 if not isinstance(image_data, str):
-                    await websocket.send_json(
+                    await _send_json(
+                        websocket,
+                        send_lock,
                         _error_message(
                             session_id,
                             "invalid_schema",
@@ -186,7 +238,9 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                 try:
                     decoded_image = base64.b64decode(image_data, validate=True)
                 except (binascii.Error, ValueError):
-                    await websocket.send_json(
+                    await _send_json(
+                        websocket,
+                        send_lock,
                         _error_message(
                             session_id,
                             "invalid_schema",
@@ -196,7 +250,9 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     )
                     continue
                 if len(decoded_image) > MAX_FRAME_BYTES:
-                    await websocket.send_json(
+                    await _send_json(
+                        websocket,
+                        send_lock,
                         _error_message(
                             session_id,
                             "frame_too_large",
@@ -206,7 +262,9 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     )
                     continue
 
-                await websocket.send_json(
+                await _send_json(
+                    websocket,
+                    send_lock,
                     {
                         "type": "ack",
                         "schema_version": SCHEMA_VERSION,
@@ -216,21 +274,20 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                         "received_at": _utc_now_iso(),
                     }
                 )
-                await websocket.send_json(
-                    {
-                        "type": "result",
-                        "schema_version": SCHEMA_VERSION,
-                        "session_id": session_id,
-                        "client_message_id": client_message_id,
-                        "request_id": message.get("request_id"),
-                        "frame_index": message.get("frame_index"),
-                        "result": recognize_frame(message),
-                        "model": get_model_health_status(),
-                        "processed_at": _utc_now_iso(),
-                    }
+                task = asyncio.create_task(
+                    _run_frame_recognition(
+                        websocket,
+                        send_lock,
+                        session_id,
+                        message,
+                    )
                 )
+                recognition_tasks.add(task)
+                task.add_done_callback(recognition_tasks.discard)
             elif message_type == "ping":
-                await websocket.send_json(
+                await _send_json(
+                    websocket,
+                    send_lock,
                     {
                         "type": "pong",
                         "schema_version": SCHEMA_VERSION,
@@ -244,7 +301,9 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                 await websocket.close(code=1000)
                 return
             else:
-                await websocket.send_json(
+                await _send_json(
+                    websocket,
+                    send_lock,
                     _error_message(
                         session_id,
                         "unknown_message_type",
@@ -254,3 +313,9 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                 )
     except WebSocketDisconnect:
         return
+    finally:
+        tasks = list(recognition_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
