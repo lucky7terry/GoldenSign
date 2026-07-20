@@ -11,3 +11,8 @@ class SessionCreateResponse(BaseModel):
     status: str
     schema_version: str
     ws_url: str | None
+
+
+class SessionStopResponse(BaseModel):
+    session_id: str
+    status: str

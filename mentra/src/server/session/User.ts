@@ -4,6 +4,7 @@ import { TranscriptionManager } from "../manager/TranscriptionManager";
 import { AudioManager } from "../manager/AudioManager";
 import { StorageManager } from "../manager/StorageManager";
 import { InputManager } from "../manager/InputManager";
+import type { AIServerStreamClient } from "../../services/ai-server-stream-client";
 
 /**
  * User — per-user state container.
@@ -30,6 +31,9 @@ export class User {
 
   /** Button presses and touchpad gestures */
   input: InputManager;
+
+  /** AI server WebSocket stream for frame transfer */
+  aiStream: AIServerStreamClient | null = null;
 
   /**
    * Golden Sign 세션 상태. onSession의 health→createSession 흐름 결과를 담아
@@ -65,6 +69,8 @@ export class User {
 
   /** Nuke everything — call on full disconnect */
   cleanup(): void {
+    this.aiStream?.stop("user_cleanup");
+    this.aiStream = null;
     this.transcription.destroy();
     this.photo.destroy();
     this.appSession = null;
