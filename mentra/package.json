@@ -1,5 +1,5 @@
 {
-  "name": "mentraos-camera-app",
+  "name": "goldensign-miniapp",
   "version": "1.0.0",
   "type": "module",
   "module": "src/index.ts",
@@ -9,7 +9,7 @@
   },
   "author": "Aryan Farhang",
   "license": "ISC",
-  "description": "Camera app for taking photos with MentraOS",
+  "description": "Golden Sign — 수어-자연어 변환 MentraOS 미니앱",
   "dependencies": {
     "@mentra/react": "2.1.2",
     "@mentra/sdk": "3.0.0-hono.6",
