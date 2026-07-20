@@ -10,8 +10,6 @@ GET  /photo-stream           → photoStream (SSE)
 GET  /transcription-stream   → transcriptionStream (SSE)
 POST /speak                  → speak
 POST /stop-audio             → stopAudio
-GET  /theme-preference       → getThemePreference
-POST /theme-preference       → setThemePreference
 GET  /latest-photo           → getLatestPhoto
 GET  /photo/:requestId       → getPhotoData
 GET  /photo-base64/:requestId → getPhotoBase64
