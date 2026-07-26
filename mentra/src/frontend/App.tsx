@@ -44,32 +44,6 @@ export default function App() {
     document.documentElement.classList.toggle("dark", theme === "dark");
   }, [theme]);
 
-  // Sync theme with backend when user authenticates
-  useEffect(() => {
-    if (isAuthenticated && userId) {
-      fetch(`/api/theme-preference?userId=${encodeURIComponent(userId)}`)
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.theme === "dark" || data.theme === "light") {
-            setTheme(data.theme);
-            localStorage.setItem("theme", data.theme);
-          }
-        })
-        .catch(() => {});
-    }
-  }, [isAuthenticated, userId]);
-
-  // Save theme to backend on change
-  useEffect(() => {
-    if (isAuthenticated && userId) {
-      fetch("/api/theme-preference", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, theme }),
-      }).catch(() => {});
-    }
-  }, [theme, isAuthenticated, userId]);
-
   // Keyboard shortcut: Cmd+Shift+D to toggle theme
   useEffect(() => {
     const down = (e: KeyboardEvent) => {

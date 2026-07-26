@@ -2,7 +2,6 @@ import { AppSession } from "@mentra/sdk";
 import { PhotoManager } from "../manager/PhotoManager";
 import { TranscriptionManager } from "../manager/TranscriptionManager";
 import { AudioManager } from "../manager/AudioManager";
-import { StorageManager } from "../manager/StorageManager";
 import { InputManager } from "../manager/InputManager";
 import type { AIServerStreamClient } from "../../services/ai-server-stream-client";
 
@@ -26,9 +25,6 @@ export class User {
   /** Text-to-speech and audio control */
   audio: AudioManager;
 
-  /** User preferences via MentraOS Simple Storage */
-  storage: StorageManager;
-
   /** Button presses and touchpad gestures */
   input: InputManager;
 
@@ -49,7 +45,6 @@ export class User {
     this.photo = new PhotoManager(this);
     this.transcription = new TranscriptionManager(this);
     this.audio = new AudioManager(this);
-    this.storage = new StorageManager(this);
     this.input = new InputManager(this);
   }
 

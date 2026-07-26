@@ -9,7 +9,6 @@ import { Hono } from "hono";
 import { getHealth, getSessionStatus } from "../api/health";
 import { photoStream, transcriptionStream } from "../api/stream";
 import { speak, stopAudio } from "../api/audio";
-import { getThemePreference, setThemePreference } from "../api/storage";
 import { getLatestPhoto, getPhotoData, getPhotoBase64 } from "../api/photo";
 
 export const api = new Hono();
@@ -25,10 +24,6 @@ api.get("/transcription-stream", transcriptionStream);
 // Audio
 api.post("/speak", speak);
 api.post("/stop-audio", stopAudio);
-
-// Storage / preferences
-api.get("/theme-preference", getThemePreference);
-api.post("/theme-preference", setThemePreference);
 
 // Photos
 api.get("/latest-photo", getLatestPhoto);

@@ -219,8 +219,8 @@ export default function HomePage({ userId }: HomePageProps) {
             <Camera className="w-4 h-4 text-primary-foreground" />
           </div>
           <div>
-            <h1 className="text-lg font-semibold">Camera Example App</h1>
-            <p className="text-xs text-muted-foreground">MentraOS</p>
+            <h1 className="text-lg font-semibold">Golden Sign</h1>
+            <p className="text-xs text-muted-foreground">수어-자연어 변환</p>
           </div>
         </div>
         <Badge variant="outline" className="font-mono text-xs mt-2">
