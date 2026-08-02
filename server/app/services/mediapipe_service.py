@@ -252,6 +252,7 @@ class MediaPipeService:
         left_hand_score: float | None = None
         right_hand_score: float | None = None
         pose: list[dict[str, float | None]] = []
+        image_height, image_width = image.shape[:2]
 
         # 손 결과 분류
         for index, landmarks in enumerate(
@@ -303,9 +304,13 @@ class MediaPipeService:
             )
 
         return {
+            "face": [],
             "pose": pose,
             "left_hand": left_hand,
             "right_hand": right_hand,
+            "image_width": int(image_width),
+            "image_height": int(image_height),
+            "face_detected": False,
             "pose_detected": bool(pose),
             "left_hand_detected": bool(left_hand),
             "right_hand_detected": bool(right_hand),

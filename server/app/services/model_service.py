@@ -2,6 +2,7 @@ from app.services.mediapipe_service import (
     MediaPipeProcessingError,
     get_mediapipe_service,
 )
+from app.services.openpose_converter import convert_to_openpose
 
 
 class FrameValidationError(ValueError):
@@ -42,7 +43,7 @@ def recognize_frame(frame_message: dict):
         )
 
     try:
-        keypoints = (
+        extracted_keypoints = (
             get_mediapipe_service().extract_keypoints_from_base64(
                 image_data
             )
@@ -50,11 +51,13 @@ def recognize_frame(frame_message: dict):
     except MediaPipeProcessingError as exc:
         _raise_frame_validation_error_if_client_error(exc)
 
+    keypoints = convert_to_openpose(extracted_keypoints)
+
     return {
         "text": "keypoints_extracted",
         "confidence": 0.0,
         "is_final": False,
-        "keypoints": keypoints,
+        "keypoints": keypoints.model_dump(by_alias=True),
     }
 
 
@@ -65,15 +68,17 @@ def recognize_frame_from_image_bytes(image_bytes: bytes):
         )
 
     try:
-        keypoints = get_mediapipe_service().extract_keypoints_from_bytes(
+        extracted_keypoints = get_mediapipe_service().extract_keypoints_from_bytes(
             image_bytes
         )
     except MediaPipeProcessingError as exc:
         _raise_frame_validation_error_if_client_error(exc)
 
+    keypoints = convert_to_openpose(extracted_keypoints)
+
     return {
         "text": "keypoints_extracted",
         "confidence": 0.0,
         "is_final": False,
-        "keypoints": keypoints,
+        "keypoints": keypoints.model_dump(by_alias=True),
     }
