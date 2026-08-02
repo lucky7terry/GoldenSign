@@ -69,8 +69,36 @@ def _use_redis() -> bool:
     return SESSION_STORE_BACKEND == "redis"
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _remaining_ttl_seconds(session: RecognitionSession) -> int:
+    return int((session.expires_at - _utc_now()).total_seconds())
+
+
+def _persist_session(session: RecognitionSession) -> RecognitionSession | None:
+    ttl = _remaining_ttl_seconds(session)
+
+    if _use_redis():
+        redis_client = _get_redis_client()
+        key = _session_key(session.session_id)
+        if ttl <= 0:
+            redis_client.delete(key)
+            return None
+        redis_client.setex(key, ttl, _serialize_session(session))
+        return session
+
+    if ttl <= 0:
+        _sessions.pop(session.session_id, None)
+        return None
+
+    _sessions[session.session_id] = session
+    return session
+
+
 def create_session(session_id: str, client: str, user_id: str) -> RecognitionSession:
-    created_at = datetime.now(timezone.utc)
+    created_at = _utc_now()
     session = RecognitionSession(
         session_id=session_id,
         client=client,
@@ -98,9 +126,19 @@ def get_session(session_id: str) -> RecognitionSession | None:
         value = _get_redis_client().get(_session_key(session_id))
         if value is None:
             return None
-        return _deserialize_session(value)
+        session = _deserialize_session(value)
+        if _remaining_ttl_seconds(session) <= 0:
+            _get_redis_client().delete(_session_key(session_id))
+            return None
+        return session
 
-    return _sessions.get(session_id)
+    session = _sessions.get(session_id)
+    if session is None:
+        return None
+    if _remaining_ttl_seconds(session) <= 0:
+        _sessions.pop(session_id, None)
+        return None
+    return session
 
 
 def stop_session(session_id: str) -> RecognitionSession | None:
@@ -109,20 +147,9 @@ def stop_session(session_id: str) -> RecognitionSession | None:
         return None
 
     session.status = "stopped"
-    session.stopped_at = datetime.now(timezone.utc)
+    session.stopped_at = _utc_now()
 
-    if _use_redis():
-        redis_client = _get_redis_client()
-        key = _session_key(session_id)
-        ttl = redis_client.ttl(key)
-        if ttl > 0:
-            redis_client.setex(key, ttl, _serialize_session(session))
-        else:
-            redis_client.set(key, _serialize_session(session))
-        return session
-
-    _sessions[session_id] = session
-    return session
+    return _persist_session(session)
 
 
 def activate_session(session_id: str) -> RecognitionSession | None:
@@ -132,15 +159,4 @@ def activate_session(session_id: str) -> RecognitionSession | None:
 
     session.status = "active"
 
-    if _use_redis():
-        redis_client = _get_redis_client()
-        key = _session_key(session_id)
-        ttl = redis_client.ttl(key)
-        if ttl > 0:
-            redis_client.setex(key, ttl, _serialize_session(session))
-        else:
-            redis_client.set(key, _serialize_session(session))
-        return session
-
-    _sessions[session_id] = session
-    return session
+    return _persist_session(session)

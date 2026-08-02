@@ -9,11 +9,28 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
+from app.constants import MAX_FRAME_BYTES
+
 logger = logging.getLogger(__name__)
 
 
 class MediaPipeProcessingError(Exception):
     """이미지 디코딩 또는 MediaPipe 처리 실패 예외."""
+
+
+def decode_base64_image_data(encoded_image: str) -> bytes:
+    if "," in encoded_image:
+        encoded_image = encoded_image.split(",", 1)[1]
+
+    try:
+        return base64.b64decode(
+            encoded_image,
+            validate=True,
+        )
+    except (binascii.Error, ValueError) as exc:
+        raise MediaPipeProcessingError(
+            "Invalid base64 image data."
+        ) from exc
 
 
 class MediaPipeService:
@@ -89,7 +106,7 @@ class MediaPipeService:
     def decode_base64_image(
         self,
         encoded_image: str,
-        max_bytes: int = 262_144,
+        max_bytes: int = MAX_FRAME_BYTES,
     ) -> np.ndarray:
         """
         Base64 문자열을 OpenCV BGR 이미지로 변환한다.
@@ -100,18 +117,7 @@ class MediaPipeService:
             )
 
         # data:image/jpeg;base64,... 형태도 허용
-        if "," in encoded_image:
-            encoded_image = encoded_image.split(",", 1)[1]
-
-        try:
-            image_bytes = base64.b64decode(
-                encoded_image,
-                validate=True,
-            )
-        except (binascii.Error, ValueError) as exc:
-            raise MediaPipeProcessingError(
-                "Invalid base64 image data."
-            ) from exc
+        image_bytes = decode_base64_image_data(encoded_image)
 
         if len(image_bytes) > max_bytes:
             raise MediaPipeProcessingError(
@@ -123,7 +129,13 @@ class MediaPipeService:
     @staticmethod
     def decode_image_bytes(
         image_bytes: bytes,
+        max_bytes: int = MAX_FRAME_BYTES,
     ) -> np.ndarray:
+        if len(image_bytes) > max_bytes:
+            raise MediaPipeProcessingError(
+                f"Decoded image exceeds {max_bytes} bytes."
+            )
+
         image_array = np.frombuffer(
             image_bytes,
             dtype=np.uint8,
@@ -321,10 +333,13 @@ class MediaPipeService:
 
 
 _mediapipe_service: MediaPipeService | None = None
+_mediapipe_service_lock = threading.Lock()
 
 
 def get_mediapipe_service() -> MediaPipeService:
     global _mediapipe_service
     if _mediapipe_service is None:
-        _mediapipe_service = MediaPipeService()
+        with _mediapipe_service_lock:
+            if _mediapipe_service is None:
+                _mediapipe_service = MediaPipeService()
     return _mediapipe_service

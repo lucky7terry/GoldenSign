@@ -1,4 +1,5 @@
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from urllib.request import urlretrieve
 
 
@@ -9,7 +10,7 @@ MODELS = {
     ),
     "pose_landmarker_lite.task": (
         "https://storage.googleapis.com/mediapipe-models/"
-        "pose_landmarker/pose_landmarker_lite/float16/latest/"
+        "pose_landmarker/pose_landmarker_lite/float16/1/"
         "pose_landmarker_lite.task"
     ),
 }
@@ -27,7 +28,19 @@ def main() -> None:
             continue
 
         print(f"Downloading {filename}...")
-        urlretrieve(url, target)
+        with NamedTemporaryFile(
+            delete=False,
+            dir=models_directory,
+            suffix=".tmp",
+        ) as temporary_file:
+            temporary_target = Path(temporary_file.name)
+
+        try:
+            urlretrieve(url, temporary_target)
+            temporary_target.replace(target)
+        except Exception:
+            temporary_target.unlink(missing_ok=True)
+            raise
         print(f"Saved: {target}")
 
 

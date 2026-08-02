@@ -24,6 +24,7 @@ export class AIServerStreamClient {
   private frameIndex = 0;
   private shouldReconnect = true;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingConnectSettler: ((connected: boolean) => void) | null = null;
 
   constructor(private readonly options: AIServerStreamClientOptions) {}
 
@@ -64,6 +65,7 @@ export class AIServerStreamClient {
     return new Promise((resolve) => {
       let settled = false;
       const socket = new WebSocket(wsUrl);
+      let timeout: ReturnType<typeof setTimeout>;
       const connectionTimeoutMs =
         this.options.connectionTimeoutMs ?? DEFAULT_CONNECTION_TIMEOUT_MS;
       this.socket = socket;
@@ -72,6 +74,9 @@ export class AIServerStreamClient {
         clearTimeout(timeout);
         socket.off("open", handleOpen);
         socket.off("error", handleError);
+        if (this.pendingConnectSettler === settle) {
+          this.pendingConnectSettler = null;
+        }
       };
 
       const settle = (connected: boolean) => {
@@ -82,6 +87,10 @@ export class AIServerStreamClient {
       };
 
       const handleError = (error: Error) => {
+        if (this.socket !== socket) {
+          settle(false);
+          return;
+        }
         this.state = "failed";
         console.error(
           `[AIServerStream] connection attempt ${attempt + 1} failed:`,
@@ -92,6 +101,10 @@ export class AIServerStreamClient {
       };
 
       const handleOpen = () => {
+        if (this.socket !== socket) {
+          settle(false);
+          return;
+        }
         this.send({
           type: "hello",
           schema_version: SCHEMA_VERSION,
@@ -107,7 +120,11 @@ export class AIServerStreamClient {
         settle(true);
       };
 
-      const timeout = setTimeout(() => {
+      timeout = setTimeout(() => {
+        if (this.socket !== socket) {
+          settle(false);
+          return;
+        }
         this.state = "failed";
         console.error(
           `[AIServerStream] connection attempt ${attempt + 1} timed out`,
@@ -116,10 +133,14 @@ export class AIServerStreamClient {
         settle(false);
       }, connectionTimeoutMs);
 
+      this.pendingConnectSettler = settle;
       socket.once("error", handleError);
       socket.once("open", handleOpen);
       socket.on("message", (raw) => this.handleMessage(raw.toString()));
       socket.on("close", () => {
+        if (this.socket !== socket) {
+          return;
+        }
         const wasReady = this.state === "ready";
         this.state = this.state === "failed" ? "failed" : "closed";
         this.socket = null;
@@ -130,6 +151,9 @@ export class AIServerStreamClient {
         }
       });
       socket.on("error", (error) => {
+        if (this.socket !== socket) {
+          return;
+        }
         this.state = "failed";
         console.error("[AIServerStream] error:", error.message);
       });
@@ -192,6 +216,7 @@ export class AIServerStreamClient {
   stop(reason = "app_stopped"): void {
     this.shouldReconnect = false;
     this.clearReconnectTimer();
+    this.pendingConnectSettler?.(false);
 
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       this.socket?.terminate();

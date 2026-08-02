@@ -1,15 +1,17 @@
 import asyncio
-import base64
-import binascii
 import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
-from app.constants import SCHEMA_VERSION
+from app.constants import MAX_FRAME_BYTES, SCHEMA_VERSION
 from app.error import error_message
 from app.schemas.websocket import FrameMessage, WebSocketMessage
+from app.services.mediapipe_service import (
+    MediaPipeProcessingError,
+    decode_base64_image_data,
+)
 from app.services.model_service import (
     FrameValidationError,
     get_model_health_status,
@@ -23,7 +25,6 @@ from app.services.session_store import stop_session
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-MAX_FRAME_BYTES = 262_144
 
 
 def _utc_now_iso():
@@ -115,9 +116,7 @@ async def _run_frame_recognition(
 
 
 def _decode_frame_image_data(image_data: str) -> bytes:
-    if "," in image_data:
-        image_data = image_data.split(",", 1)[1]
-    return base64.b64decode(image_data, validate=True)
+    return decode_base64_image_data(image_data)
 
 
 @router.websocket("/v1/sessions/{session_id}/ws")
@@ -201,6 +200,11 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     }
                 )
             elif message_type == "frame":
+                session = validate_recognition_session(session_id)
+                if session is None:
+                    await websocket.close(code=1008)
+                    return
+
                 try:
                     frame_message = FrameMessage.model_validate(raw_message)
                 except ValidationError:
@@ -218,7 +222,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     continue
                 try:
                     decoded_image = _decode_frame_image_data(frame_message.image.data)
-                except (binascii.Error, ValueError):
+                except (MediaPipeProcessingError, ValueError):
                     await _send_json(
                         websocket,
                         send_lock,
