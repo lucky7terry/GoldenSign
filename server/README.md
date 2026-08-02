@@ -1,31 +1,60 @@
 # Golden Sign AI Server
 
-## 실행 환경
+## Runtime
 
-- Python 3.13
+- Python 3.12
 - FastAPI
 - Uvicorn
+- MediaPipe
 
-## 설치
+## Setup
 
+```bash
 pip install -r requirements.txt
+python scripts/download_mediapipe_models.py
+```
 
-## 실행
+The model download script prepares:
 
+- `server/models/hand_landmarker.task`
+- `server/models/pose_landmarker_lite.task`
+
+## Run
+
+```bash
 python -m uvicorn app.main:app --reload
+```
+
+## Session Store
+
+The server uses the in-memory session store by default.
+
+```bash
+SESSION_STORE_BACKEND=memory
+```
+
+To store sessions in Redis:
+
+```bash
+SESSION_STORE_BACKEND=redis
+REDIS_URL=redis://localhost:6379/0
+SESSION_TTL_SECONDS=3600
+```
+
+Set a public WebSocket base URL when the server runs behind HTTPS or a reverse
+proxy:
+
+```bash
+PUBLIC_WS_BASE_URL=wss://api.example.com
+```
 
 ## Swagger
 
 http://127.0.0.1:8000/docs
 
-## 구현 API
+## Implemented APIs
 
-GET /health
-
-POST /v1/sessions
-
-## 현재 상태
-
-- Mock Model 사용
-- 실제 MediaPipe 미연동
-- 실제 AI Model 미연동
+- `GET /health`
+- `POST /v1/sessions`
+- `POST /v1/sessions/{session_id}/stop`
+- `WS /v1/sessions/{session_id}/ws`

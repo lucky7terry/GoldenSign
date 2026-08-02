@@ -1,5 +1,6 @@
 import base64
 import binascii
+import logging
 import threading
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,8 @@ from typing import Any
 import cv2
 import mediapipe as mp
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class MediaPipeProcessingError(Exception):
@@ -115,6 +118,12 @@ class MediaPipeService:
                 f"Decoded image exceeds {max_bytes} bytes."
             )
 
+        return self.decode_image_bytes(image_bytes)
+
+    @staticmethod
+    def decode_image_bytes(
+        image_bytes: bytes,
+    ) -> np.ndarray:
         image_array = np.frombuffer(
             image_bytes,
             dtype=np.uint8,
@@ -162,6 +171,33 @@ class MediaPipeService:
             for landmark in landmarks
         ]
 
+    @staticmethod
+    def _handedness_label_and_score(
+        handedness: Any,
+    ) -> tuple[str, float | None]:
+        if not handedness:
+            return "", None
+
+        category = handedness[0]
+        return (
+            getattr(category, "category_name", "").lower(),
+            getattr(category, "score", None),
+        )
+
+    @staticmethod
+    def _should_replace_hand(
+        current_hand: list[dict[str, float | None]],
+        current_score: float | None,
+        candidate_score: float | None,
+    ) -> bool:
+        if not current_hand:
+            return True
+        if candidate_score is None:
+            return False
+        if current_score is None:
+            return True
+        return candidate_score > current_score
+
     def extract_keypoints_from_image(
         self,
         image: np.ndarray,
@@ -201,6 +237,8 @@ class MediaPipeService:
 
         left_hand: list[dict[str, float | None]] = []
         right_hand: list[dict[str, float | None]] = []
+        left_hand_score: float | None = None
+        right_hand_score: float | None = None
         pose: list[dict[str, float | None]] = []
 
         # 손 결과 분류
@@ -212,19 +250,39 @@ class MediaPipeService:
             )
 
             handedness_name = ""
+            handedness_score = None
 
             if index < len(hand_result.handedness):
-                categories = hand_result.handedness[index]
-
-                if categories:
-                    handedness_name = (
-                        categories[0].category_name.lower()
+                handedness_name, handedness_score = (
+                    self._handedness_label_and_score(
+                        hand_result.handedness[index]
                     )
+                )
 
             if handedness_name == "left":
-                left_hand = serialized
+                if left_hand:
+                    logger.warning(
+                        "Duplicate left hand detected; preserving higher score"
+                    )
+                if self._should_replace_hand(
+                    left_hand,
+                    left_hand_score,
+                    handedness_score,
+                ):
+                    left_hand = serialized
+                    left_hand_score = handedness_score
             elif handedness_name == "right":
-                right_hand = serialized
+                if right_hand:
+                    logger.warning(
+                        "Duplicate right hand detected; preserving higher score"
+                    )
+                if self._should_replace_hand(
+                    right_hand,
+                    right_hand_score,
+                    handedness_score,
+                ):
+                    right_hand = serialized
+                    right_hand_score = handedness_score
 
         # Pose 결과
         if pose_result.pose_landmarks:
@@ -249,9 +307,24 @@ class MediaPipeService:
 
         return self.extract_keypoints_from_image(image)
 
+    def extract_keypoints_from_bytes(
+        self,
+        image_bytes: bytes,
+    ) -> dict[str, Any]:
+        image = self.decode_image_bytes(image_bytes)
+
+        return self.extract_keypoints_from_image(image)
+
     def close(self) -> None:
         self._hand_landmarker.close()
         self._pose_landmarker.close()
 
 
-mediapipe_service = MediaPipeService()
+_mediapipe_service: MediaPipeService | None = None
+
+
+def get_mediapipe_service() -> MediaPipeService:
+    global _mediapipe_service
+    if _mediapipe_service is None:
+        _mediapipe_service = MediaPipeService()
+    return _mediapipe_service
