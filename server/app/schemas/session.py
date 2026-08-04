@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel
 
 
@@ -11,6 +13,7 @@ class SessionCreateResponse(BaseModel):
     status: str
     schema_version: str
     ws_url: str | None
+    expires_at: datetime
 
 
 class SessionStopResponse(BaseModel):
