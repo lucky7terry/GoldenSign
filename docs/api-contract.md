@@ -172,6 +172,7 @@ The server owns WHEP connection retry. The MiniApp sends `stream_start` after `o
   "type": "error",
   "schema_version": "dev-0.3",
   "session_id": "abc-123",
+  "client_message_id": "stream-start-001",
   "code": "stream_unavailable",
   "message": "WebRTC stream is not available yet.",
   "retryable": true
