@@ -259,6 +259,20 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                         )
                     )
                     continue
+                if frame_queue.full():
+                    await _send_json(
+                        websocket,
+                        send_lock,
+                        error_message(
+                            SCHEMA_VERSION,
+                            session_id,
+                            "frame_queue_full",
+                            "Frame queue is full. Please slow down.",
+                            client_message_id,
+                            retryable=True,
+                        )
+                    )
+                    continue
                 try:
                     decoded_image = _decode_frame_image_data(frame_message.image.data)
                 except (MediaPipeProcessingError, ValueError):
