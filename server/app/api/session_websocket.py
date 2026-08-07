@@ -7,9 +7,19 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from app.config import FRAME_QUEUE_MAX_SIZE, MAX_CONCURRENT_RECOGNITIONS
-from app.constants import MAX_FRAME_BYTES, SCHEMA_VERSION
+from app.constants import (
+    MAX_FRAME_BYTES,
+    SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
+    WEBRTC_SCHEMA_VERSION,
+)
 from app.error import error_message
-from app.schemas.websocket import FrameMessage, WebSocketMessage
+from app.schemas.websocket import (
+    FrameMessage,
+    StreamStartMessage,
+    StreamStopMessage,
+    WebSocketMessage,
+)
 from app.services.mediapipe_service import (
     MediaPipeProcessingError,
     decode_base64_image_data,
@@ -41,12 +51,12 @@ def _utc_now_iso():
 
 
 def _validate_common_message(message: WebSocketMessage, session_id: str):
-    if message.schema_version != SCHEMA_VERSION:
+    if message.schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         return error_message(
             SCHEMA_VERSION,
             session_id,
             "unsupported_schema_version",
-            f"Only {SCHEMA_VERSION} is supported.",
+            f"Supported schema versions: {', '.join(sorted(SUPPORTED_SCHEMA_VERSIONS))}.",
             message.client_message_id,
         )
     if message.session_id != session_id:
@@ -359,6 +369,93 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                         "session_id": session_id,
                         "client_message_id": client_message_id,
                         "server_time": _utc_now_iso(),
+                    }
+                )
+            elif message_type == "stream_start":
+                try:
+                    stream_message = StreamStartMessage.model_validate(raw_message)
+                except ValidationError:
+                    await _send_json(
+                        websocket,
+                        send_lock,
+                        error_message(
+                            WEBRTC_SCHEMA_VERSION,
+                            session_id,
+                            "invalid_schema",
+                            "Stream webrtc_url and stream_id are required.",
+                            client_message_id,
+                        )
+                    )
+                    continue
+                if stream_message.schema_version != WEBRTC_SCHEMA_VERSION:
+                    await _send_json(
+                        websocket,
+                        send_lock,
+                        error_message(
+                            WEBRTC_SCHEMA_VERSION,
+                            session_id,
+                            "unsupported_schema_version",
+                            f"stream_start requires {WEBRTC_SCHEMA_VERSION}.",
+                            client_message_id,
+                        )
+                    )
+                    continue
+
+                # WHEP pull is implemented in a follow-up issue.
+                await _send_json(
+                    websocket,
+                    send_lock,
+                    {
+                        "type": "ack",
+                        "schema_version": WEBRTC_SCHEMA_VERSION,
+                        "session_id": session_id,
+                        "client_message_id": client_message_id,
+                        "stream_id": stream_message.stream_id,
+                        "status": "stream_start_accepted",
+                        "received_at": _utc_now_iso(),
+                    }
+                )
+            elif message_type == "stream_stop":
+                try:
+                    stream_message = StreamStopMessage.model_validate(raw_message)
+                except ValidationError:
+                    await _send_json(
+                        websocket,
+                        send_lock,
+                        error_message(
+                            WEBRTC_SCHEMA_VERSION,
+                            session_id,
+                            "invalid_schema",
+                            "Stream stream_id is required.",
+                            client_message_id,
+                        )
+                    )
+                    continue
+                if stream_message.schema_version != WEBRTC_SCHEMA_VERSION:
+                    await _send_json(
+                        websocket,
+                        send_lock,
+                        error_message(
+                            WEBRTC_SCHEMA_VERSION,
+                            session_id,
+                            "unsupported_schema_version",
+                            f"stream_stop requires {WEBRTC_SCHEMA_VERSION}.",
+                            client_message_id,
+                        )
+                    )
+                    continue
+
+                await _send_json(
+                    websocket,
+                    send_lock,
+                    {
+                        "type": "ack",
+                        "schema_version": WEBRTC_SCHEMA_VERSION,
+                        "session_id": session_id,
+                        "client_message_id": client_message_id,
+                        "stream_id": stream_message.stream_id,
+                        "status": "stream_stop_accepted",
+                        "received_at": _utc_now_iso(),
                     }
                 )
             elif message_type == "stop":

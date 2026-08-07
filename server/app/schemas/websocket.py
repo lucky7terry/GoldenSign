@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class WebSocketMessage(BaseModel):
@@ -36,3 +36,14 @@ class PingMessage(WebSocketMessage):
 
 class StopMessage(WebSocketMessage):
     type: Literal["stop"]
+
+
+class StreamStartMessage(WebSocketMessage):
+    type: Literal["stream_start"]
+    webrtc_url: str = Field(min_length=1)
+    stream_id: str = Field(min_length=1)
+
+
+class StreamStopMessage(WebSocketMessage):
+    type: Literal["stream_stop"]
+    stream_id: str = Field(min_length=1)
