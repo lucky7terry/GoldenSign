@@ -41,6 +41,13 @@ REDIS_URL=redis://localhost:6379/0
 SESSION_TTL_SECONDS=3600
 ```
 
+Frame recognition runs with small global and per-connection limits by default:
+
+```bash
+MAX_CONCURRENT_RECOGNITIONS=2
+FRAME_QUEUE_MAX_SIZE=30
+```
+
 Set a public WebSocket base URL when the server runs behind HTTPS or a reverse
 proxy:
 

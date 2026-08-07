@@ -1,10 +1,12 @@
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from app.config import FRAME_QUEUE_MAX_SIZE, MAX_CONCURRENT_RECOGNITIONS
 from app.constants import MAX_FRAME_BYTES, SCHEMA_VERSION
 from app.error import error_message
 from app.schemas.websocket import FrameMessage, WebSocketMessage
@@ -25,6 +27,13 @@ from app.services.session_store import stop_session
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+_recognition_semaphore = asyncio.Semaphore(MAX_CONCURRENT_RECOGNITIONS)
+
+
+@dataclass
+class FrameRecognitionJob:
+    message: FrameMessage
+    image_bytes: bytes
 
 
 def _utc_now_iso():
@@ -60,17 +69,18 @@ async def _run_frame_recognition(
     websocket: WebSocket,
     send_lock: asyncio.Lock,
     session_id: str,
-    frame_message: FrameMessage,
-    image_bytes: bytes,
+    job: FrameRecognitionJob,
 ):
+    frame_message = job.message
     client_message_id = frame_message.client_message_id
     try:
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            recognize_frame_from_image_bytes,
-            image_bytes,
-        )
+        async with _recognition_semaphore:
+            result = await loop.run_in_executor(
+                None,
+                recognize_frame_from_image_bytes,
+                job.image_bytes,
+            )
         payload = {
             "type": "result",
             "schema_version": SCHEMA_VERSION,
@@ -115,6 +125,25 @@ async def _run_frame_recognition(
         return
 
 
+async def _recognition_worker(
+    websocket: WebSocket,
+    send_lock: asyncio.Lock,
+    session_id: str,
+    frame_queue: asyncio.Queue[FrameRecognitionJob],
+):
+    while True:
+        job = await frame_queue.get()
+        try:
+            await _run_frame_recognition(
+                websocket,
+                send_lock,
+                session_id,
+                job,
+            )
+        finally:
+            frame_queue.task_done()
+
+
 def _decode_frame_image_data(image_data: str) -> bytes:
     return decode_base64_image_data(image_data)
 
@@ -128,7 +157,17 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
 
     await websocket.accept()
     send_lock = asyncio.Lock()
-    recognition_tasks: set[asyncio.Task] = set()
+    frame_queue: asyncio.Queue[FrameRecognitionJob] = asyncio.Queue(
+        maxsize=FRAME_QUEUE_MAX_SIZE,
+    )
+    recognition_worker = asyncio.create_task(
+        _recognition_worker(
+            websocket,
+            send_lock,
+            session_id,
+            frame_queue,
+        )
+    )
 
     try:
         while True:
@@ -220,6 +259,20 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                         )
                     )
                     continue
+                if frame_queue.full():
+                    await _send_json(
+                        websocket,
+                        send_lock,
+                        error_message(
+                            SCHEMA_VERSION,
+                            session_id,
+                            "frame_queue_full",
+                            "Frame queue is full. Please slow down.",
+                            client_message_id,
+                            retryable=True,
+                        )
+                    )
+                    continue
                 try:
                     decoded_image = _decode_frame_image_data(frame_message.image.data)
                 except (MediaPipeProcessingError, ValueError):
@@ -262,6 +315,28 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     )
                     continue
 
+                try:
+                    frame_queue.put_nowait(
+                        FrameRecognitionJob(
+                            message=frame_message,
+                            image_bytes=decoded_image,
+                        )
+                    )
+                except asyncio.QueueFull:
+                    await _send_json(
+                        websocket,
+                        send_lock,
+                        error_message(
+                            SCHEMA_VERSION,
+                            session_id,
+                            "frame_queue_full",
+                            "Frame queue is full. Please slow down.",
+                            client_message_id,
+                            retryable=True,
+                        )
+                    )
+                    continue
+
                 await _send_json(
                     websocket,
                     send_lock,
@@ -274,17 +349,6 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                         "received_at": _utc_now_iso(),
                     }
                 )
-                task = asyncio.create_task(
-                    _run_frame_recognition(
-                        websocket,
-                        send_lock,
-                        session_id,
-                        frame_message,
-                        decoded_image,
-                    )
-                )
-                recognition_tasks.add(task)
-                task.add_done_callback(recognition_tasks.discard)
             elif message_type == "ping":
                 await _send_json(
                     websocket,
@@ -316,8 +380,5 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
     except WebSocketDisconnect:
         return
     finally:
-        tasks = list(recognition_tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        recognition_worker.cancel()
+        await asyncio.gather(recognition_worker, return_exceptions=True)
