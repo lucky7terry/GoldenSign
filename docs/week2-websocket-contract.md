@@ -185,6 +185,7 @@ WebSocket 스트림 종료 의도를 알린다.
   "client_message_id": "frame-000001",
   "request_id": "mentra-photo-request-id",
   "frame_index": 1,
+  "captured_at": "2026-07-15T12:00:00.000Z",
   "result": {
     "text": "안녕하세요",
     "confidence": 0.92,
