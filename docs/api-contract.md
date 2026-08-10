@@ -86,3 +86,97 @@ Mentra MiniApp(`mentra/`)과 FastAPI AI 서버(`server/`) 사이의 통신 계�
 - 위 4개 엔드포인트를 이 문서 형태 그대로 구현하면 MiniApp과 바로 연결된다.
 - `schema_version`, `ws_url` 같은 필드는 아직 미확정 상태를 표현하는 placeholder다. 실제 구현하면서 값을 채우거나 형태를 바꿔야 하면 이 문서도 같이 업데이트해서 PR로 올려주면 된다.
 - MediaPipe 좌표 추출, 문장 시작/종료 판단, 모델 추론 등 내부 로직은 이 계약과 무관하게 자유롭게 구현하면 된다 — 위 요청/응답 형태만 지키면 됨.
+
+---
+
+## 5. WebRTC/WHEP Stream Contract (dev-0.3)
+
+**Purpose**: Define the app-server contract for moving smart-glass video input from Base64 WebSocket frame push to Cloudflare Stream WebRTC/WHEP pull.
+
+Only the input path changes:
+
+```text
+Before: MiniApp sends Base64 frame messages over WebSocket.
+After: MiniApp sends a WHEP URL, and the AI server pulls frames from that stream.
+```
+
+The session creation HTTP API and the existing WebSocket result channel are reused.
+
+### Flow
+
+```text
+Smart glasses
+-> MentraOS / Cloudflare Stream
+-> MiniApp sends webrtc_url + stream_id to AI server
+-> AI server pulls frames from the WHEP URL
+-> MediaPipe / OpenPose / model pipeline
+-> AI server sends result messages over the existing WebSocket
+```
+
+### Client -> Server: stream_start
+
+```json
+{
+  "type": "stream_start",
+  "schema_version": "dev-0.3",
+  "session_id": "abc-123",
+  "client_message_id": "stream-start-001",
+  "webrtc_url": "https://example.cloudflarestream.com/webRTC/play",
+  "stream_id": "cf-stream-123"
+}
+```
+
+### Client -> Server: stream_stop
+
+```json
+{
+  "type": "stream_stop",
+  "schema_version": "dev-0.3",
+  "session_id": "abc-123",
+  "client_message_id": "stream-stop-001",
+  "stream_id": "cf-stream-123"
+}
+```
+
+### Server -> Client: WebRTC result
+
+WebRTC results are stream-based, not one result per client frame request. Therefore `request_id` and `frame_index` are not part of the dev-0.3 WebRTC result contract.
+
+```json
+{
+  "type": "result",
+  "schema_version": "dev-0.3",
+  "session_id": "abc-123",
+  "stream_id": "cf-stream-123",
+  "sequence_index": 12,
+  "result": {
+    "text": "안녕하세요",
+    "confidence": 0.9,
+    "is_final": false
+  },
+  "processed_at": "2026-08-07T12:00:00Z"
+}
+```
+
+- `stream_id`: identifies the Cloudflare/Mentra managed stream.
+- `sequence_index`: optional server-generated result sequence number.
+- `is_final: false`: interim recognition result.
+- `is_final: true`: finalized sentence or signing segment.
+
+### Server -> Client: stream_unavailable
+
+The server owns WHEP connection retry. The MiniApp sends `stream_start` after `onManagedStreamStatus` reports ready. If the server cannot connect after bounded retry, it returns:
+
+```json
+{
+  "type": "error",
+  "schema_version": "dev-0.3",
+  "session_id": "abc-123",
+  "client_message_id": "stream-start-001",
+  "code": "stream_unavailable",
+  "message": "WebRTC stream is not available yet.",
+  "retryable": true
+}
+```
+
+Actual aiortc/WHEP frame pulling is implemented in a follow-up issue.

@@ -266,3 +266,113 @@ MiniApp:
 - 사진 단위 전송인지 연속 프레임 스트림인지
 - 모델 결과가 한글 문장 하나인지, 토큰/글자 단위 누적인지
 - 인증 토큰이 필요한지 여부
+
+---
+
+## WebRTC/WHEP Control Messages (dev-0.3)
+
+This section extends the existing WebSocket channel for WebRTC/WHEP input. The WebSocket connection is still created from `POST /v1/sessions`, but video frames are no longer pushed as Base64 JSON messages. Instead, the client sends a managed stream URL and the AI server pulls frames from WHEP in a follow-up implementation.
+
+### Client -> Server: stream_start
+
+```json
+{
+  "type": "stream_start",
+  "schema_version": "dev-0.3",
+  "session_id": "abc-123",
+  "client_message_id": "stream-start-001",
+  "webrtc_url": "https://example.cloudflarestream.com/webRTC/play",
+  "stream_id": "cf-stream-123"
+}
+```
+
+Required fields:
+
+| field | meaning |
+| --- | --- |
+| `type` | Must be `stream_start`. |
+| `schema_version` | Must be `dev-0.3`. |
+| `session_id` | Existing recognition session ID. |
+| `webrtc_url` | WHEP playback URL returned by the managed stream provider. |
+| `stream_id` | Managed stream identifier returned with the WebRTC URL. |
+
+Current #22 behavior: the server validates the message and returns an ack. Actual aiortc/WHEP connection is implemented in a follow-up issue.
+
+```json
+{
+  "type": "ack",
+  "schema_version": "dev-0.3",
+  "session_id": "abc-123",
+  "client_message_id": "stream-start-001",
+  "stream_id": "cf-stream-123",
+  "status": "stream_start_accepted",
+  "received_at": "2026-08-07T12:00:00Z"
+}
+```
+
+### Client -> Server: stream_stop
+
+```json
+{
+  "type": "stream_stop",
+  "schema_version": "dev-0.3",
+  "session_id": "abc-123",
+  "client_message_id": "stream-stop-001",
+  "stream_id": "cf-stream-123"
+}
+```
+
+Current #22 behavior: the server validates the message and returns an ack. Actual WHEP stream shutdown is implemented in a follow-up issue.
+
+```json
+{
+  "type": "ack",
+  "schema_version": "dev-0.3",
+  "session_id": "abc-123",
+  "client_message_id": "stream-stop-001",
+  "stream_id": "cf-stream-123",
+  "status": "stream_stop_accepted",
+  "received_at": "2026-08-07T12:00:05Z"
+}
+```
+
+### Server -> Client: WebRTC result
+
+WebRTC results are stream-based. A result can be produced from many pulled frames, so dev-0.3 WebRTC result messages do not include `request_id` or `frame_index`.
+
+```json
+{
+  "type": "result",
+  "schema_version": "dev-0.3",
+  "session_id": "abc-123",
+  "stream_id": "cf-stream-123",
+  "sequence_index": 12,
+  "result": {
+    "text": "안녕하세요",
+    "confidence": 0.9,
+    "is_final": false
+  },
+  "processed_at": "2026-08-07T12:00:00Z"
+}
+```
+
+- `stream_id` is required for stream-level tracking.
+- `sequence_index` is an optional server-generated result sequence number.
+- `is_final: false` means an interim recognition result.
+- `is_final: true` means a finalized sentence or signing segment.
+
+### Server -> Client: stream_unavailable
+
+The server owns WHEP connection retry. The app should send `stream_start` after `onManagedStreamStatus` reports ready. If the server still cannot connect after bounded retry, it returns this error:
+
+```json
+{
+  "type": "error",
+  "schema_version": "dev-0.3",
+  "session_id": "abc-123",
+  "client_message_id": "stream-start-001",
+  "code": "stream_unavailable",
+  "message": "WebRTC stream is not available yet.",
+  "retryable": true
+}
+```
