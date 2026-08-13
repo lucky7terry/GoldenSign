@@ -106,13 +106,7 @@ export class CameraApp extends AppServer {
             session.logger.warn(
               `[GoldenSign] WebRTC stream error code=${code} msg=${message ?? ""}`,
             );
-            try {
-              session.layouts.showTextWall(
-                `Golden Sign\nWebRTC stream unavailable\n${message ?? "Please try again."}`,
-              );
-            } catch (err) {
-              console.error("[GoldenSign] failed to show stream error:", err);
-            }
+            user.webrtcStream.handleAiStreamError(code, message);
           },
         });
         user.aiStream = aiStream;
