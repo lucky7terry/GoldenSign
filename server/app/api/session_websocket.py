@@ -405,13 +405,48 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     )
                     continue
 
-                await whep_pull_service.start_stream(
-                    session_id=session_id,
-                    stream_id=stream_message.stream_id,
-                    webrtc_url=stream_message.webrtc_url,
-                    client_message_id=client_message_id,
-                    send_json=send_stream_payload,
-                )
+                try:
+                    await whep_pull_service.start_stream(
+                        session_id=session_id,
+                        stream_id=stream_message.stream_id,
+                        webrtc_url=stream_message.webrtc_url,
+                        client_message_id=client_message_id,
+                        send_json=send_stream_payload,
+                    )
+                except ValueError as exc:
+                    await _send_json(
+                        websocket,
+                        send_lock,
+                        error_message(
+                            WEBRTC_SCHEMA_VERSION,
+                            session_id,
+                            "invalid_schema",
+                            str(exc),
+                            client_message_id,
+                        )
+                    )
+                    continue
+                except Exception:
+                    logger.exception(
+                        "Failed to start WHEP stream",
+                        extra={
+                            "session_id": session_id,
+                            "stream_id": stream_message.stream_id,
+                        },
+                    )
+                    await _send_json(
+                        websocket,
+                        send_lock,
+                        error_message(
+                            WEBRTC_SCHEMA_VERSION,
+                            session_id,
+                            "stream_unavailable",
+                            "WHEP stream is unavailable. Please try again.",
+                            client_message_id,
+                            retryable=True,
+                        )
+                    )
+                    continue
                 await _send_json(
                     websocket,
                     send_lock,
