@@ -224,6 +224,8 @@ class WhepPullService:
             await self._cleanup_connection(session, peer_connection, resource_url)
 
     async def _receive_video_frames(self, handle: WhepStreamHandle, video_track) -> None:
+        from av.error import MediaStreamError
+
         frame_count = 0
         last_log_at = monotonic()
 
@@ -232,6 +234,16 @@ class WhepPullService:
                 await asyncio.wait_for(video_track.recv(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
+            except MediaStreamError:
+                logger.info(
+                    "WHEP video track ended",
+                    extra={
+                        "session_id": handle.session_id,
+                        "stream_id": handle.stream_id,
+                        "frame_count": frame_count,
+                    },
+                )
+                return
 
             frame_count += 1
             now = monotonic()

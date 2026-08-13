@@ -1,3 +1,4 @@
+import math
 import os
 
 
@@ -24,7 +25,7 @@ def _env_float(name: str, default: float) -> float:
         value = float(raw_value)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number.") from exc
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be greater than 0.")
     return value
 
