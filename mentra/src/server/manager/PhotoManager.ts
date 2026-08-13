@@ -44,7 +44,11 @@ export class PhotoManager {
 
     this.photos.set(photo.requestId, stored);
     this.broadcastPhoto(stored);
-    this.user.aiStream?.sendFrame(stored);
+    if (this.user.webrtcStream.isActive()) {
+      console.log("[PhotoManager] AI frame push skipped; WebRTC stream is active");
+    } else {
+      this.user.aiStream?.sendFrame(stored);
+    }
     console.log(
       `📸 Photo captured for ${this.user.userId} (${photo.size} bytes)`,
     );

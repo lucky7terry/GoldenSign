@@ -3,6 +3,7 @@ import { PhotoManager } from "../manager/PhotoManager";
 import { TranscriptionManager } from "../manager/TranscriptionManager";
 import { AudioManager } from "../manager/AudioManager";
 import { InputManager } from "../manager/InputManager";
+import { WebRTCStreamManager } from "../manager/WebRTCStreamManager";
 import type { AIServerStreamClient } from "../../services/ai-server-stream-client";
 
 /**
@@ -28,6 +29,9 @@ export class User {
   /** Button presses and touchpad gestures */
   input: InputManager;
 
+  /** Managed WebRTC stream lifecycle */
+  webrtcStream: WebRTCStreamManager;
+
   /** AI server WebSocket stream for frame transfer */
   aiStream: AIServerStreamClient | null = null;
 
@@ -46,6 +50,7 @@ export class User {
     this.transcription = new TranscriptionManager(this);
     this.audio = new AudioManager(this);
     this.input = new InputManager(this);
+    this.webrtcStream = new WebRTCStreamManager(this);
   }
 
   /** Wire up a glasses connection — sets up all event listeners */
@@ -53,17 +58,20 @@ export class User {
     this.appSession = session;
     this.transcription.setup(session);
     this.input.setup(session);
+    this.webrtcStream.setup(session);
     console.log(`📸 Camera ready for ${this.userId}`);
   }
 
   /** Disconnect glasses but keep user alive (photos, SSE clients stay) */
   clearAppSession(): void {
+    this.webrtcStream.destroy();
     this.transcription.destroy();
     this.appSession = null;
   }
 
   /** Nuke everything — call on full disconnect */
   cleanup(): void {
+    this.webrtcStream.destroy();
     this.aiStream?.stop("user_cleanup");
     this.aiStream = null;
     this.transcription.destroy();
