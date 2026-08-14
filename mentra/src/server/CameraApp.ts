@@ -108,6 +108,9 @@ export class CameraApp extends AppServer {
             );
             user.webrtcStream.handleAiStreamError(code, message);
           },
+          onReady: () => {
+            user.webrtcStream.handleAiStreamReady();
+          },
         });
         user.aiStream = aiStream;
         const streamConnected = await aiStream.connect();

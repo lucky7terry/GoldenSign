@@ -15,6 +15,7 @@ interface AIServerStreamClientOptions {
   userId: string;
   onResult?: (text: string) => void;
   onStreamError?: (code: string, message?: string) => void;
+  onReady?: () => void;
   connectionTimeoutMs?: number;
   maxRetries?: number;
   retryDelayMs?: number;
@@ -322,6 +323,7 @@ export class AIServerStreamClient {
     if (typedMessage.type === "ready") {
       this.state = "ready";
       console.log("[AIServerStream] ready");
+      this.options.onReady?.();
       return;
     }
     if (typedMessage.type === "ack") {

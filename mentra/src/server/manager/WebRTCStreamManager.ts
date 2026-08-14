@@ -65,11 +65,12 @@ export class WebRTCStreamManager {
   }
 
   destroy(): void {
+    const session = this.user.appSession;
     this.destroyed = true;
     this.stopRequested = true;
     this.cleanupStatusListener?.();
     this.cleanupStatusListener = null;
-    void this.enqueue(() => this.stopInternal("cleanup", false));
+    void this.enqueue(() => this.stopInternal("cleanup", false, session));
   }
 
   handleAiStreamError(code: string, message?: string): void {
@@ -82,6 +83,17 @@ export class WebRTCStreamManager {
     );
     this.stopRequested = true;
     void this.enqueue(() => this.stopInternal("stream_unavailable", false));
+  }
+
+  handleAiStreamReady(): void {
+    if (this.state !== "active" || !this.activeStream) {
+      return;
+    }
+
+    this.activeStream.streamStartSent = false;
+    this.sentStreamStartIds.delete(this.activeStream.streamId);
+    this.sentStreamStopIds.delete(this.activeStream.streamId);
+    this.sendStreamStartIfReady("ai_stream_ready");
   }
 
   private enqueue(operation: () => Promise<void>): Promise<void> {
@@ -124,6 +136,7 @@ export class WebRTCStreamManager {
       }
 
       if (!stream.webrtcUrl) {
+        await this.stopManagedStream(session, "missing_webrtc_url");
         this.state = "error";
         this.showStatus("Golden Sign\nWebRTC URL was not returned");
         console.error("[WebRTCStream] managed stream did not include webrtcUrl");
@@ -143,8 +156,12 @@ export class WebRTCStreamManager {
     }
   }
 
-  private async stopInternal(reason: string, showStoppedStatus = true): Promise<void> {
-    const session = this.user.appSession;
+  private async stopInternal(
+    reason: string,
+    showStoppedStatus = true,
+    sessionOverride?: AppSession | null,
+  ): Promise<void> {
+    const session = sessionOverride ?? this.user.appSession;
     const streamId = this.getCurrentStreamId();
 
     this.sendStreamStopOnce(streamId);
@@ -156,7 +173,16 @@ export class WebRTCStreamManager {
     }
 
     this.state = "stopping";
-    await this.stopManagedStream(session, reason);
+    const stopped = await this.stopManagedStream(session, reason);
+    if (!stopped) {
+      this.stopRequested = false;
+      this.state = this.destroyed ? "stopped" : "error";
+      if (showStoppedStatus && !this.destroyed) {
+        this.showStatus("Golden Sign\nWebRTC stream stop failed");
+      }
+      return;
+    }
+
     this.clearStream(streamId);
     this.stopRequested = false;
     this.state = "stopped";
@@ -258,11 +284,18 @@ export class WebRTCStreamManager {
   private async stopManagedStream(
     session: AppSession | null | undefined,
     reason: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    if (!session) {
+      console.error(`[WebRTCStream] failed to stop managed stream (${reason}): no session`);
+      return false;
+    }
+
     try {
-      await session?.camera.stopManagedStream();
+      await session.camera.stopManagedStream();
+      return true;
     } catch (error) {
       console.error(`[WebRTCStream] failed to stop managed stream (${reason}):`, error);
+      return false;
     }
   }
 

@@ -34,6 +34,7 @@ from app.services.session_service import (
     validate_recognition_session,
 )
 from app.services.session_store import stop_session
+from app.services.whep_service import whep_pull_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -178,6 +179,9 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
             frame_queue,
         )
     )
+
+    async def send_stream_payload(payload: dict):
+        await _send_json(websocket, send_lock, payload)
 
     try:
         while True:
@@ -401,7 +405,48 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     )
                     continue
 
-                # WHEP pull is implemented in a follow-up issue.
+                try:
+                    await whep_pull_service.start_stream(
+                        session_id=session_id,
+                        stream_id=stream_message.stream_id,
+                        webrtc_url=stream_message.webrtc_url,
+                        client_message_id=client_message_id,
+                        send_json=send_stream_payload,
+                    )
+                except ValueError as exc:
+                    await _send_json(
+                        websocket,
+                        send_lock,
+                        error_message(
+                            WEBRTC_SCHEMA_VERSION,
+                            session_id,
+                            "invalid_schema",
+                            str(exc),
+                            client_message_id,
+                        )
+                    )
+                    continue
+                except Exception:
+                    logger.exception(
+                        "Failed to start WHEP stream",
+                        extra={
+                            "session_id": session_id,
+                            "stream_id": stream_message.stream_id,
+                        },
+                    )
+                    await _send_json(
+                        websocket,
+                        send_lock,
+                        error_message(
+                            WEBRTC_SCHEMA_VERSION,
+                            session_id,
+                            "stream_unavailable",
+                            "WHEP stream is unavailable. Please try again.",
+                            client_message_id,
+                            retryable=True,
+                        )
+                    )
+                    continue
                 await _send_json(
                     websocket,
                     send_lock,
@@ -445,6 +490,10 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     )
                     continue
 
+                await whep_pull_service.stop_stream(
+                    session_id,
+                    stream_message.stream_id,
+                )
                 await _send_json(
                     websocket,
                     send_lock,
@@ -477,5 +526,6 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
     except WebSocketDisconnect:
         return
     finally:
+        await whep_pull_service.stop_session(session_id)
         recognition_worker.cancel()
         await asyncio.gather(recognition_worker, return_exceptions=True)
