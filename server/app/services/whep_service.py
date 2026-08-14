@@ -9,6 +9,7 @@ from urllib.parse import urljoin, urlparse
 from app.config import (
     WHEP_ALLOWED_HOST_SUFFIXES,
     WHEP_CONNECT_TIMEOUT_SECONDS,
+    WHEP_FRAME_IDLE_TIMEOUT_SECONDS,
     WHEP_MAX_RETRIES,
     WHEP_RETRY_DELAY_SECONDS,
 )
@@ -172,11 +173,17 @@ class WhepPullService:
 
         try:
             video_track_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+            connection_closed = asyncio.Event()
 
             @peer_connection.on("track")
             def on_track(track):
                 if track.kind == "video" and video_track_queue.empty():
                     video_track_queue.put_nowait(track)
+
+            @peer_connection.on("connectionstatechange")
+            def on_connection_state_change():
+                if peer_connection.connectionState in {"failed", "closed"}:
+                    connection_closed.set()
 
             peer_connection.addTransceiver("video", direction="recvonly")
             peer_connection.addTransceiver("audio", direction="recvonly")
@@ -202,8 +209,9 @@ class WhepPullService:
                 answer_sdp = await response.text()
                 location = response.headers.get("Location")
                 if location:
-                    resource_url = urljoin(handle.webrtc_url, location)
-                    self._validate_whep_url(resource_url)
+                    candidate_resource_url = urljoin(handle.webrtc_url, location)
+                    self._validate_whep_url(candidate_resource_url)
+                    resource_url = candidate_resource_url
 
             await peer_connection.setRemoteDescription(
                 RTCSessionDescription(sdp=answer_sdp, type="answer")
@@ -220,34 +228,55 @@ class WhepPullService:
                 video_track_queue.get(),
                 timeout=WHEP_CONNECT_TIMEOUT_SECONDS,
             )
-            await self._receive_video_frames(handle, video_track)
+            await self._receive_video_frames(handle, video_track, connection_closed)
         finally:
             await self._cleanup_connection(session, peer_connection, resource_url)
 
-    async def _receive_video_frames(self, handle: WhepStreamHandle, video_track) -> None:
+    async def _receive_video_frames(
+        self,
+        handle: WhepStreamHandle,
+        video_track,
+        connection_closed: asyncio.Event,
+    ) -> None:
         from av.error import MediaStreamError
 
         frame_count = 0
         last_log_at = monotonic()
+        last_frame_at = monotonic()
 
         while not handle.stop_event.is_set():
             try:
                 await asyncio.wait_for(video_track.recv(), timeout=1.0)
             except asyncio.TimeoutError:
+                if connection_closed.is_set():
+                    raise RuntimeError("WHEP connection closed while waiting for frames.")
+                if monotonic() - last_frame_at >= WHEP_FRAME_IDLE_TIMEOUT_SECONDS:
+                    raise RuntimeError("WHEP video frames stopped.")
                 continue
-            except MediaStreamError:
+            except MediaStreamError as exc:
+                if handle.stop_event.is_set():
+                    logger.info(
+                        "WHEP video track ended",
+                        extra={
+                            "session_id": handle.session_id,
+                            "stream_id": handle.stream_id,
+                            "frame_count": frame_count,
+                        },
+                    )
+                    return
                 logger.info(
-                    "WHEP video track ended",
+                    "WHEP video track ended unexpectedly",
                     extra={
                         "session_id": handle.session_id,
                         "stream_id": handle.stream_id,
                         "frame_count": frame_count,
                     },
                 )
-                return
+                raise RuntimeError("WHEP video track ended unexpectedly.") from exc
 
             frame_count += 1
             now = monotonic()
+            last_frame_at = now
             if frame_count == 1 or now - last_log_at >= 5.0:
                 logger.info(
                     "Received WHEP video frames",

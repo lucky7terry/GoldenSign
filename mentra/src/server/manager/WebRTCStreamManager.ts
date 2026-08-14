@@ -176,8 +176,10 @@ export class WebRTCStreamManager {
     const stopped = await this.stopManagedStream(session, reason);
     if (!stopped) {
       this.stopRequested = false;
-      this.state = "error";
-      this.showStatus("Golden Sign\nWebRTC stream stop failed");
+      this.state = this.destroyed ? "stopped" : "error";
+      if (showStoppedStatus && !this.destroyed) {
+        this.showStatus("Golden Sign\nWebRTC stream stop failed");
+      }
       return;
     }
 
