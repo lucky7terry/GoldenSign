@@ -39,6 +39,11 @@ class _SessionSequenceState:
     frames: list[list[float]] = field(default_factory=list)
     frame_count: int = 0
     window_count: int = 0
+    generation: int = 0
+
+
+class SequenceSessionClosed(RuntimeError):
+    """Raised when a stale recognition task tries to append after cleanup."""
 
 
 def _coerce_openpose_result(openpose_result: OpenPoseResult | dict[str, Any]):
@@ -81,17 +86,49 @@ class SlidingWindowSequenceStore:
         self.window_size = window_size
         self.stride = stride
         self._states: dict[str, _SessionSequenceState] = {}
+        self._generations: dict[str, int] = {}
         self._lock = threading.Lock()
+
+    def start_session(self, session_id: str) -> int:
+        with self._lock:
+            generation = self._generations.get(session_id, 0) + 1
+            self._generations[session_id] = generation
+            self._states[session_id] = _SessionSequenceState(
+                generation=generation,
+            )
+            return generation
+
+    def current_generation(self, session_id: str) -> int | None:
+        with self._lock:
+            state = self._states.get(session_id)
+            if state is None:
+                return None
+            return state.generation
 
     def append_openpose_result(
         self,
         session_id: str,
         openpose_result: OpenPoseResult | dict[str, Any],
+        generation: int | None = None,
     ) -> SequenceAppendResult:
         feature_vector = build_openpose_feature_vector(openpose_result)
 
         with self._lock:
-            state = self._states.setdefault(session_id, _SessionSequenceState())
+            state = self._states.get(session_id)
+            current_generation = state.generation if state is not None else None
+            if generation is not None and generation != current_generation:
+                raise SequenceSessionClosed(
+                    "Cannot append keypoints to a closed recognition session."
+                )
+
+            if current_generation is None:
+                current_generation = 1
+                self._generations[session_id] = current_generation
+
+            state = self._states.setdefault(
+                session_id,
+                _SessionSequenceState(generation=current_generation),
+            )
             state.frames.append(feature_vector)
             state.frame_count += 1
 
@@ -137,6 +174,7 @@ class SlidingWindowSequenceStore:
     def clear_session(self, session_id: str) -> None:
         with self._lock:
             self._states.pop(session_id, None)
+            self._generations[session_id] = self._generations.get(session_id, 0) + 1
 
 
 sequence_store = SlidingWindowSequenceStore()

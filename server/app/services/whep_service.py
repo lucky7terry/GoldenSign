@@ -26,13 +26,28 @@ def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _recognize_whep_frame(session_id: str, image):
+def _recognize_whep_frame(session_id: str, sequence_generation: int, image):
     from app.services.model_service import (
         get_model_health_status,
         recognize_frame_from_image,
     )
 
-    return recognize_frame_from_image(image, session_id), get_model_health_status()
+    return (
+        recognize_frame_from_image(image, session_id, sequence_generation),
+        get_model_health_status(),
+    )
+
+
+def _current_sequence_generation(session_id: str) -> int | None:
+    from app.services.sequence_service import sequence_store
+
+    return sequence_store.current_generation(session_id)
+
+
+def _is_sequence_session_closed(error: Exception) -> bool:
+    from app.services.sequence_service import SequenceSessionClosed
+
+    return isinstance(error, SequenceSessionClosed)
 
 
 @dataclass
@@ -352,11 +367,15 @@ class WhepPullService:
 
             try:
                 image = video_frame.to_ndarray(format="bgr24")
+                sequence_generation = _current_sequence_generation(handle.session_id)
+                if sequence_generation is None:
+                    continue
                 loop = asyncio.get_running_loop()
                 result, model_status = await loop.run_in_executor(
                     None,
                     _recognize_whep_frame,
                     handle.session_id,
+                    sequence_generation,
                     image,
                 )
             except ValueError:
@@ -369,7 +388,9 @@ class WhepPullService:
                     },
                 )
                 continue
-            except Exception:
+            except Exception as exc:
+                if _is_sequence_session_closed(exc):
+                    return
                 logger.exception(
                     "WHEP frame processing failed",
                     extra={

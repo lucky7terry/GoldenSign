@@ -34,7 +34,11 @@ def get_model_health_status():
     }
 
 
-def _recognition_result(keypoints, session_id: str | None = None):
+def _recognition_result(
+    keypoints,
+    session_id: str | None = None,
+    sequence_generation: int | None = None,
+):
     payload = {
         "text": "keypoints_extracted",
         "confidence": 0.0,
@@ -46,6 +50,7 @@ def _recognition_result(keypoints, session_id: str | None = None):
         sequence_result = sequence_store.append_openpose_result(
             session_id,
             keypoints,
+            sequence_generation,
         )
         payload["sequence"] = sequence_result.metadata()
 
@@ -78,6 +83,7 @@ def recognize_frame(frame_message: dict):
 def recognize_frame_from_image_bytes(
     image_bytes: bytes,
     session_id: str | None = None,
+    sequence_generation: int | None = None,
 ):
     if not image_bytes:
         raise FrameValidationError(
@@ -93,10 +99,14 @@ def recognize_frame_from_image_bytes(
 
     keypoints = convert_to_openpose(extracted_keypoints)
 
-    return _recognition_result(keypoints, session_id)
+    return _recognition_result(keypoints, session_id, sequence_generation)
 
 
-def recognize_frame_from_image(image, session_id: str | None = None):
+def recognize_frame_from_image(
+    image,
+    session_id: str | None = None,
+    sequence_generation: int | None = None,
+):
     if image is None or image.size == 0:
         raise FrameValidationError(
             "Frame image data is required."
@@ -111,4 +121,4 @@ def recognize_frame_from_image(image, session_id: str | None = None):
 
     keypoints = convert_to_openpose(extracted_keypoints)
 
-    return _recognition_result(keypoints, session_id)
+    return _recognition_result(keypoints, session_id, sequence_generation)
