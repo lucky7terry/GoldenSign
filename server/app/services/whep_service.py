@@ -179,6 +179,7 @@ class WhepPullService:
                     video_track_queue.put_nowait(track)
 
             peer_connection.addTransceiver("video", direction="recvonly")
+            peer_connection.addTransceiver("audio", direction="recvonly")
             offer = await peer_connection.createOffer()
             await peer_connection.setLocalDescription(offer)
             await self._wait_for_ice_gathering(peer_connection)

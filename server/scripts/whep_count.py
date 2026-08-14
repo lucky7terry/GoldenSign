@@ -37,6 +37,7 @@ async def count_whep_frames(whep_url: str, timeout_seconds: float) -> None:
                 track_queue.put_nowait(track)
 
         peer_connection.addTransceiver("video", direction="recvonly")
+        peer_connection.addTransceiver("audio", direction="recvonly")
         offer = await peer_connection.createOffer()
         await peer_connection.setLocalDescription(offer)
         await wait_for_ice_gathering(peer_connection, timeout_seconds)
