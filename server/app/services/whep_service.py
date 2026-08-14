@@ -26,13 +26,13 @@ def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _recognize_whep_frame(image):
+def _recognize_whep_frame(session_id: str, image):
     from app.services.model_service import (
         get_model_health_status,
         recognize_frame_from_image,
     )
 
-    return recognize_frame_from_image(image), get_model_health_status()
+    return recognize_frame_from_image(image, session_id), get_model_health_status()
 
 
 @dataclass
@@ -356,6 +356,7 @@ class WhepPullService:
                 result, model_status = await loop.run_in_executor(
                     None,
                     _recognize_whep_frame,
+                    handle.session_id,
                     image,
                 )
             except ValueError:

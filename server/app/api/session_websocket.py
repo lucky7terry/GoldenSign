@@ -29,6 +29,7 @@ from app.services.model_service import (
     get_model_health_status,
     recognize_frame_from_image_bytes,
 )
+from app.services.sequence_service import sequence_store
 from app.services.session_service import (
     activate_recognition_session,
     validate_recognition_session,
@@ -91,6 +92,7 @@ async def _run_frame_recognition(
                 None,
                 recognize_frame_from_image_bytes,
                 job.image_bytes,
+                session_id,
             )
         payload = {
             "type": "result",
@@ -527,5 +529,6 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         return
     finally:
         await whep_pull_service.stop_session(session_id)
+        sequence_store.clear_session(session_id)
         recognition_worker.cancel()
         await asyncio.gather(recognition_worker, return_exceptions=True)
