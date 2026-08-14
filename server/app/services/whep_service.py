@@ -3,6 +3,7 @@ import ipaddress
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from time import monotonic
 from urllib.parse import urljoin, urlparse
 
@@ -19,6 +20,19 @@ from app.error import error_message
 logger = logging.getLogger(__name__)
 
 SendJson = Callable[[dict], Awaitable[None]]
+
+
+def _utc_now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _recognize_whep_frame(image):
+    from app.services.model_service import (
+        get_model_health_status,
+        recognize_frame_from_image,
+    )
+
+    return recognize_frame_from_image(image), get_model_health_status()
 
 
 @dataclass
@@ -241,12 +255,16 @@ class WhepPullService:
         from av.error import MediaStreamError
 
         frame_count = 0
+        processed_frame_count = 0
         last_log_at = monotonic()
+        last_processed_log_at = last_log_at
+        last_processed_frame_count = 0
         last_frame_at = monotonic()
+        last_error_sent_at = 0.0
 
         while not handle.stop_event.is_set():
             try:
-                await asyncio.wait_for(video_track.recv(), timeout=1.0)
+                video_frame = await asyncio.wait_for(video_track.recv(), timeout=1.0)
             except asyncio.TimeoutError:
                 if connection_closed.is_set():
                     raise RuntimeError("WHEP connection closed while waiting for frames.")
@@ -277,6 +295,83 @@ class WhepPullService:
             frame_count += 1
             now = monotonic()
             last_frame_at = now
+
+            try:
+                image = video_frame.to_ndarray(format="bgr24")
+                loop = asyncio.get_running_loop()
+                result, model_status = await loop.run_in_executor(
+                    None,
+                    _recognize_whep_frame,
+                    image,
+                )
+            except ValueError:
+                logger.exception(
+                    "WHEP frame validation failed",
+                    extra={
+                        "session_id": handle.session_id,
+                        "stream_id": handle.stream_id,
+                        "frame_count": frame_count,
+                    },
+                )
+                continue
+            except Exception:
+                logger.exception(
+                    "WHEP frame processing failed",
+                    extra={
+                        "session_id": handle.session_id,
+                        "stream_id": handle.stream_id,
+                        "frame_count": frame_count,
+                    },
+                )
+                now = monotonic()
+                if now - last_error_sent_at >= 5.0:
+                    last_error_sent_at = now
+                    await handle.send_json(
+                        error_message(
+                            WEBRTC_SCHEMA_VERSION,
+                            handle.session_id,
+                            "model_unavailable",
+                            "WHEP frame processing failed.",
+                            handle.client_message_id,
+                            retryable=True,
+                        )
+                    )
+                continue
+
+            processed_frame_count += 1
+            await handle.send_json(
+                {
+                    "type": "result",
+                    "schema_version": WEBRTC_SCHEMA_VERSION,
+                    "session_id": handle.session_id,
+                    "client_message_id": handle.client_message_id,
+                    "stream_id": handle.stream_id,
+                    "sequence_index": processed_frame_count,
+                    "result": result,
+                    "model": model_status,
+                    "processed_at": _utc_now_iso(),
+                }
+            )
+
+            now = monotonic()
+            if processed_frame_count == 1 or now - last_processed_log_at >= 5.0:
+                elapsed = max(now - last_processed_log_at, 0.001)
+                interval_processed_frames = (
+                    processed_frame_count - last_processed_frame_count
+                )
+                logger.info(
+                    "Processed WHEP video frames",
+                    extra={
+                        "session_id": handle.session_id,
+                        "stream_id": handle.stream_id,
+                        "frame_count": frame_count,
+                        "processed_frame_count": processed_frame_count,
+                        "fps": round(interval_processed_frames / elapsed, 2),
+                    },
+                )
+                last_processed_log_at = now
+                last_processed_frame_count = processed_frame_count
+
             if frame_count == 1 or now - last_log_at >= 5.0:
                 logger.info(
                     "Received WHEP video frames",

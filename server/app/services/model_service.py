@@ -82,3 +82,26 @@ def recognize_frame_from_image_bytes(image_bytes: bytes):
         "is_final": False,
         "keypoints": keypoints.model_dump(by_alias=True),
     }
+
+
+def recognize_frame_from_image(image):
+    if image is None or image.size == 0:
+        raise FrameValidationError(
+            "Frame image data is required."
+        )
+
+    try:
+        extracted_keypoints = get_mediapipe_service().extract_keypoints_from_image(
+            image
+        )
+    except MediaPipeProcessingError as exc:
+        _raise_frame_validation_error_if_client_error(exc)
+
+    keypoints = convert_to_openpose(extracted_keypoints)
+
+    return {
+        "text": "keypoints_extracted",
+        "confidence": 0.0,
+        "is_final": False,
+        "keypoints": keypoints.model_dump(by_alias=True),
+    }
