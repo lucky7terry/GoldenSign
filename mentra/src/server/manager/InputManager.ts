@@ -22,7 +22,7 @@ export class InputManager {
       console.log(`[Button] ${this.user.userId}: ${button.buttonId} (${button.pressType})`);
 
       if (button.pressType === "long") {
-        // Reserved for future use
+        await this.user.webrtcStream.toggle();
         return;
       }
 

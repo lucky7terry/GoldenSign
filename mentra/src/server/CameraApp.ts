@@ -102,6 +102,12 @@ export class CameraApp extends AppServer {
               console.error("[GoldenSign] failed to show AI result:", err);
             }
           },
+          onStreamError: (code, message) => {
+            session.logger.warn(
+              `[GoldenSign] WebRTC stream error code=${code} msg=${message ?? ""}`,
+            );
+            user.webrtcStream.handleAiStreamError(code, message);
+          },
         });
         user.aiStream = aiStream;
         const streamConnected = await aiStream.connect();

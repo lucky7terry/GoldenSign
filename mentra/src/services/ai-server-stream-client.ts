@@ -2,7 +2,8 @@ import WebSocket from "ws";
 import type { StoredPhoto } from "../server/manager/PhotoManager";
 import type { SessionResponse } from "../types/api";
 
-const SCHEMA_VERSION = "dev-0.2";
+const FRAME_SCHEMA_VERSION = "dev-0.2";
+const WEBRTC_SCHEMA_VERSION = "dev-0.3";
 const DEFAULT_CONNECTION_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_DELAY_MS = 1000;
@@ -13,6 +14,7 @@ interface AIServerStreamClientOptions {
   session: SessionResponse;
   userId: string;
   onResult?: (text: string) => void;
+  onStreamError?: (code: string, message?: string) => void;
   connectionTimeoutMs?: number;
   maxRetries?: number;
   retryDelayMs?: number;
@@ -107,7 +109,7 @@ export class AIServerStreamClient {
         }
         this.send({
           type: "hello",
-          schema_version: SCHEMA_VERSION,
+          schema_version: FRAME_SCHEMA_VERSION,
           session_id: this.options.session.session_id,
           client_message_id: `hello-${Date.now()}`,
           client: "mentra",
@@ -198,7 +200,7 @@ export class AIServerStreamClient {
     const frameIndex = ++this.frameIndex;
     this.send({
       type: "frame",
-      schema_version: SCHEMA_VERSION,
+      schema_version: FRAME_SCHEMA_VERSION,
       session_id: this.options.session.session_id,
       client_message_id: `frame-${frameIndex}`,
       request_id: photo.requestId,
@@ -209,6 +211,45 @@ export class AIServerStreamClient {
         mime_type: photo.mimeType,
         data: photo.buffer.toString("base64"),
       },
+    });
+    return true;
+  }
+
+  sendStreamStart(webrtcUrl: string, streamId: string): boolean {
+    if (!webrtcUrl || !streamId) {
+      console.warn("[AIServerStream] stream_start skipped; stream info is missing");
+      return false;
+    }
+    if (!this.sendWhenReady("stream_start")) {
+      return false;
+    }
+
+    this.send({
+      type: "stream_start",
+      schema_version: WEBRTC_SCHEMA_VERSION,
+      session_id: this.options.session.session_id,
+      client_message_id: `stream-start-${Date.now()}`,
+      webrtc_url: webrtcUrl,
+      stream_id: streamId,
+    });
+    return true;
+  }
+
+  sendStreamStop(streamId: string): boolean {
+    if (!streamId) {
+      console.warn("[AIServerStream] stream_stop skipped; stream_id is missing");
+      return false;
+    }
+    if (!this.sendWhenReady("stream_stop")) {
+      return false;
+    }
+
+    this.send({
+      type: "stream_stop",
+      schema_version: WEBRTC_SCHEMA_VERSION,
+      session_id: this.options.session.session_id,
+      client_message_id: `stream-stop-${Date.now()}`,
+      stream_id: streamId,
     });
     return true;
   }
@@ -227,7 +268,7 @@ export class AIServerStreamClient {
 
     this.send({
       type: "stop",
-      schema_version: SCHEMA_VERSION,
+      schema_version: FRAME_SCHEMA_VERSION,
       session_id: this.options.session.session_id,
       client_message_id: `stop-${Date.now()}`,
       reason,
@@ -241,6 +282,18 @@ export class AIServerStreamClient {
 
   private send(payload: object): void {
     this.socket?.send(JSON.stringify(payload));
+  }
+
+  private sendWhenReady(messageType: string): boolean {
+    if (
+      !this.isReady() ||
+      !this.socket ||
+      this.socket.readyState !== WebSocket.OPEN
+    ) {
+      console.warn(`[AIServerStream] ${messageType} skipped; socket is not ready`);
+      return false;
+    }
+    return true;
   }
 
   private handleMessage(raw: string): void {
@@ -262,6 +315,8 @@ export class AIServerStreamClient {
       result?: { text?: string };
       code?: string;
       message?: string;
+      status?: string;
+      stream_id?: string;
     };
 
     if (typedMessage.type === "ready") {
@@ -270,6 +325,18 @@ export class AIServerStreamClient {
       return;
     }
     if (typedMessage.type === "ack") {
+      if (typedMessage.status === "stream_start_accepted") {
+        console.log(
+          `[AIServerStream] stream_start acknowledged stream=${typedMessage.stream_id}`,
+        );
+        return;
+      }
+      if (typedMessage.status === "stream_stop_accepted") {
+        console.log(
+          `[AIServerStream] stream_stop acknowledged stream=${typedMessage.stream_id}`,
+        );
+        return;
+      }
       console.log("[AIServerStream] frame acknowledged");
       return;
     }
@@ -283,6 +350,9 @@ export class AIServerStreamClient {
       console.error(
         `[AIServerStream] server error ${typedMessage.code}: ${typedMessage.message}`,
       );
+      if (typedMessage.code === "stream_unavailable") {
+        this.options.onStreamError?.(typedMessage.code, typedMessage.message);
+      }
       return;
     }
 
