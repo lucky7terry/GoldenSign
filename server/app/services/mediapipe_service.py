@@ -54,6 +54,12 @@ class MediaPipeService:
             / "pose_landmarker_lite.task"
         )
 
+        face_model_path = (
+            server_directory
+            / "models"
+            / "face_landmarker.task"
+        )
+
         if not hand_model_path.exists():
             raise FileNotFoundError(
                 f"Hand model not found: {hand_model_path}"
@@ -62,6 +68,11 @@ class MediaPipeService:
         if not pose_model_path.exists():
             raise FileNotFoundError(
                 f"Pose model not found: {pose_model_path}"
+            )
+
+        if not face_model_path.exists():
+            raise FileNotFoundError(
+                f"Face model not found: {face_model_path}"
             )
 
         # 여러 WebSocket 프레임이 동시에 처리될 때
@@ -91,6 +102,17 @@ class MediaPipeService:
             output_segmentation_masks=False,
         )
 
+        face_options = mp.tasks.vision.FaceLandmarkerOptions(
+            base_options=mp.tasks.BaseOptions(
+                model_asset_path=str(face_model_path)
+            ),
+            running_mode=mp.tasks.vision.RunningMode.IMAGE,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+
         self._hand_landmarker = (
             mp.tasks.vision.HandLandmarker.create_from_options(
                 hand_options
@@ -100,6 +122,12 @@ class MediaPipeService:
         self._pose_landmarker = (
             mp.tasks.vision.PoseLandmarker.create_from_options(
                 pose_options
+            )
+        )
+
+        self._face_landmarker = (
+            mp.tasks.vision.FaceLandmarker.create_from_options(
+                face_options
             )
         )
 
@@ -184,6 +212,20 @@ class MediaPipeService:
         ]
 
     @staticmethod
+    def _serialize_face_landmarks(
+        landmarks: Any,
+    ) -> list[dict[str, float | None]]:
+        return [
+            {
+                "x": float(landmark.x),
+                "y": float(landmark.y),
+                "z": float(landmark.z),
+                "visibility": None,
+            }
+            for landmark in landmarks
+        ]
+
+    @staticmethod
     def _handedness_label_and_score(
         handedness: Any,
     ) -> tuple[str, float | None]:
@@ -234,6 +276,10 @@ class MediaPipeService:
                     mediapipe_image
                 )
 
+                face_result = self._face_landmarker.detect(
+                    mediapipe_image
+                )
+
         except Exception as exc:
             raise MediaPipeProcessingError(
                 f"MediaPipe processing failed: {exc}"
@@ -241,6 +287,7 @@ class MediaPipeService:
 
         left_hand: list[dict[str, float | None]] = []
         right_hand: list[dict[str, float | None]] = []
+        face: list[dict[str, float | None]] = []
         pose: list[dict[str, float | None]] = []
         image_height, image_width = image.shape[:2]
 
@@ -330,14 +377,20 @@ class MediaPipeService:
                 pose_result.pose_landmarks[0]
             )
 
+        # Face 결과
+        if face_result.face_landmarks:
+            face = self._serialize_face_landmarks(
+                face_result.face_landmarks[0]
+            )
+
         return {
-            "face": [],
+            "face": face,
             "pose": pose,
             "left_hand": left_hand,
             "right_hand": right_hand,
             "image_width": int(image_width),
             "image_height": int(image_height),
-            "face_detected": False,
+            "face_detected": bool(face),
             "pose_detected": bool(pose),
             "left_hand_detected": bool(left_hand),
             "right_hand_detected": bool(right_hand),
@@ -362,6 +415,7 @@ class MediaPipeService:
     def close(self) -> None:
         self._hand_landmarker.close()
         self._pose_landmarker.close()
+        self._face_landmarker.close()
 
 
 _mediapipe_service: MediaPipeService | None = None

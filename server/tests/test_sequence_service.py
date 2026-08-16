@@ -19,29 +19,33 @@ def _openpose_result(value: float = 1.0) -> OpenPoseResult:
             pose_keypoints_2d=[value] * (25 * 3),
             hand_left_keypoints_2d=[value + 1] * (21 * 3),
             hand_right_keypoints_2d=[value + 2] * (21 * 3),
+            face_keypoints_2d=[value + 3] * (70 * 3),
         )
     )
 
 
 class SequenceServiceTest(unittest.TestCase):
-    def test_build_openpose_feature_vector_uses_201_upper_body_values(self):
+    def test_build_openpose_feature_vector_uses_411_upper_body_and_face_values(self):
         feature_vector = build_openpose_feature_vector(_openpose_result())
 
         self.assertEqual(len(feature_vector), OPENPOSE_FEATURE_DIM)
-        self.assertEqual(OPENPOSE_FEATURE_DIM, 201)
+        self.assertEqual(OPENPOSE_FEATURE_DIM, 411)
         self.assertEqual(feature_vector[:3], [1.0, 1.0, 1.0])
         self.assertEqual(feature_vector[75:78], [2.0, 2.0, 2.0])
-        self.assertEqual(feature_vector[-3:], [3.0, 3.0, 3.0])
+        self.assertEqual(feature_vector[198:201], [3.0, 3.0, 3.0])
+        self.assertEqual(feature_vector[201:204], [4.0, 4.0, 4.0])
+        self.assertEqual(feature_vector[-3:], [4.0, 4.0, 4.0])
 
     def test_build_openpose_feature_vector_accepts_contract_dict(self):
         payload = _openpose_result().model_dump(by_alias=True)
 
         feature_vector = build_openpose_feature_vector(payload)
 
-        self.assertEqual(len(feature_vector), 201)
+        self.assertEqual(len(feature_vector), 411)
         self.assertEqual(feature_vector[:3], [1.0, 1.0, 1.0])
         self.assertEqual(feature_vector[75:78], [2.0, 2.0, 2.0])
-        self.assertEqual(feature_vector[-3:], [3.0, 3.0, 3.0])
+        self.assertEqual(feature_vector[198:201], [3.0, 3.0, 3.0])
+        self.assertEqual(feature_vector[201:204], [4.0, 4.0, 4.0])
 
     def test_default_window_waits_for_sixty_frames(self):
         store = SlidingWindowSequenceStore()

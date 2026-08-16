@@ -34,6 +34,79 @@ POSE_MP_TO_BODY25_IDX = [
 FACE_KEYPOINT_COUNT = 70
 HAND_KEYPOINT_COUNT = 21
 
+FACE_70 = [
+    234,
+    93,
+    132,
+    58,
+    172,
+    136,
+    150,
+    149,
+    152,
+    378,
+    379,
+    365,
+    397,
+    288,
+    361,
+    323,
+    454,
+    70,
+    63,
+    105,
+    66,
+    107,
+    336,
+    296,
+    334,
+    293,
+    300,
+    168,
+    6,
+    197,
+    195,
+    98,
+    97,
+    2,
+    326,
+    327,
+    33,
+    160,
+    158,
+    133,
+    153,
+    144,
+    362,
+    385,
+    387,
+    263,
+    373,
+    380,
+    61,
+    40,
+    37,
+    0,
+    267,
+    270,
+    291,
+    321,
+    314,
+    17,
+    84,
+    91,
+    78,
+    81,
+    13,
+    311,
+    308,
+    402,
+    14,
+    178,
+    [468, 469, 470, 471, 472, 33, 160, 158, 133, 153, 144],
+    [473, 474, 475, 476, 477, 362, 385, 387, 263, 373, 380],
+]
+
 
 def _landmark_confidence(landmark: Landmark) -> float:
     if landmark.visibility is not None:
@@ -89,6 +162,19 @@ def _average_landmark(
     )
 
 
+def _average_landmarks(landmarks: list[Landmark]) -> Landmark | None:
+    if not landmarks:
+        return None
+
+    confidence_sum = sum(_landmark_confidence(landmark) for landmark in landmarks)
+    return Landmark(
+        x=sum(landmark.x for landmark in landmarks) / len(landmarks),
+        y=sum(landmark.y for landmark in landmarks) / len(landmarks),
+        z=sum(landmark.z for landmark in landmarks) / len(landmarks),
+        visibility=confidence_sum / len(landmarks),
+    )
+
+
 def _pose_landmark_for_body25_index(
     pose: list[Landmark],
     mapping_index: int,
@@ -106,6 +192,50 @@ def _pose_landmark_for_body25_index(
     if mapping_index < 0 or mapping_index >= len(pose):
         return None
     return pose[mapping_index]
+
+
+def _face_landmark_for_index(
+    face: list[Landmark],
+    mapping_index: int | list[int],
+) -> Landmark | None:
+    if isinstance(mapping_index, list):
+        available_landmarks = [
+            face[index]
+            for index in mapping_index
+            if 0 <= index < len(face)
+        ]
+        return _average_landmarks(available_landmarks)
+    if mapping_index < 0 or mapping_index >= len(face):
+        return None
+    return face[mapping_index]
+
+
+def _face_to_openpose_2d(keypoints: ExtractedKeypoints) -> list[float]:
+    values: list[float] = []
+    for mapping_index in FACE_70:
+        landmark = _face_landmark_for_index(keypoints.face, mapping_index)
+        if landmark is None:
+            values.extend([0.0, 0.0, 0.0])
+        else:
+            values.extend(
+                _to_2d_values(
+                    landmark,
+                    keypoints.image_width,
+                    keypoints.image_height,
+                )
+            )
+    return values
+
+
+def _face_to_openpose_3d(keypoints: ExtractedKeypoints) -> list[float]:
+    values: list[float] = []
+    for mapping_index in FACE_70:
+        landmark = _face_landmark_for_index(keypoints.face, mapping_index)
+        if landmark is None:
+            values.extend([0.0, 0.0, 0.0, 0.0])
+        else:
+            values.extend(_to_3d_values(landmark))
+    return values
 
 
 def _pose_to_body25_2d(keypoints: ExtractedKeypoints) -> list[float]:
@@ -185,7 +315,7 @@ def convert_to_openpose(
 
     return OpenPoseResult(
         people=OpenPosePerson(
-            face_keypoints_2d=_zero_keypoints_2d(FACE_KEYPOINT_COUNT),
+            face_keypoints_2d=_face_to_openpose_2d(extracted_keypoints),
             pose_keypoints_2d=_pose_to_body25_2d(extracted_keypoints),
             hand_left_keypoints_2d=_hand_to_openpose_2d(
                 extracted_keypoints.left_hand,
@@ -197,7 +327,7 @@ def convert_to_openpose(
                 extracted_keypoints.image_width,
                 extracted_keypoints.image_height,
             ),
-            face_keypoints_3d=_zero_keypoints_3d(FACE_KEYPOINT_COUNT),
+            face_keypoints_3d=_face_to_openpose_3d(extracted_keypoints),
             pose_keypoints_3d=_pose_to_body25_3d(extracted_keypoints),
             hand_left_keypoints_3d=_hand_to_openpose_3d(
                 extracted_keypoints.left_hand

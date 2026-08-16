@@ -10,7 +10,12 @@ logger = logging.getLogger(__name__)
 
 POSE_2D_FEATURE_COUNT = 25 * 3
 HAND_2D_FEATURE_COUNT = 21 * 3
-OPENPOSE_FEATURE_DIM = POSE_2D_FEATURE_COUNT + HAND_2D_FEATURE_COUNT * 2
+FACE_2D_FEATURE_COUNT = 70 * 3
+OPENPOSE_FEATURE_DIM = (
+    POSE_2D_FEATURE_COUNT
+    + HAND_2D_FEATURE_COUNT * 2
+    + FACE_2D_FEATURE_COUNT
+)
 
 
 @dataclass(frozen=True)
@@ -61,6 +66,7 @@ def build_openpose_feature_vector(
         person.pose_keypoints_2d
         + person.hand_left_keypoints_2d
         + person.hand_right_keypoints_2d
+        + person.face_keypoints_2d
     )
 
     if len(feature_vector) != OPENPOSE_FEATURE_DIM:

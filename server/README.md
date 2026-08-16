@@ -18,6 +18,7 @@ The model download script prepares:
 
 - `server/models/hand_landmarker.task`
 - `server/models/pose_landmarker_lite.task`
+- `server/models/face_landmarker.task`
 
 ## Run
 
