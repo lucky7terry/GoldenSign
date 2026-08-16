@@ -3,6 +3,7 @@ import ipaddress
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from time import monotonic
 from urllib.parse import urljoin, urlparse
 
@@ -19,6 +20,19 @@ from app.error import error_message
 logger = logging.getLogger(__name__)
 
 SendJson = Callable[[dict], Awaitable[None]]
+
+
+def _utc_now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _recognize_whep_frame(image):
+    from app.services.model_service import (
+        get_model_health_status,
+        recognize_frame_from_image,
+    )
+
+    return recognize_frame_from_image(image), get_model_health_status()
 
 
 @dataclass
@@ -243,50 +257,174 @@ class WhepPullService:
         frame_count = 0
         last_log_at = monotonic()
         last_frame_at = monotonic()
+        latest_frame_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        processing_task = asyncio.create_task(
+            self._process_latest_video_frames(handle, latest_frame_queue)
+        )
 
-        while not handle.stop_event.is_set():
-            try:
-                await asyncio.wait_for(video_track.recv(), timeout=1.0)
-            except asyncio.TimeoutError:
-                if connection_closed.is_set():
-                    raise RuntimeError("WHEP connection closed while waiting for frames.")
-                if monotonic() - last_frame_at >= WHEP_FRAME_IDLE_TIMEOUT_SECONDS:
-                    raise RuntimeError("WHEP video frames stopped.")
-                continue
-            except MediaStreamError as exc:
-                if handle.stop_event.is_set():
+        try:
+            while not handle.stop_event.is_set():
+                try:
+                    video_frame = await asyncio.wait_for(video_track.recv(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if connection_closed.is_set():
+                        raise RuntimeError(
+                            "WHEP connection closed while waiting for frames."
+                        )
+                    if monotonic() - last_frame_at >= WHEP_FRAME_IDLE_TIMEOUT_SECONDS:
+                        raise RuntimeError("WHEP video frames stopped.")
+                    continue
+                except MediaStreamError as exc:
+                    if handle.stop_event.is_set():
+                        logger.info(
+                            "WHEP video track ended",
+                            extra={
+                                "session_id": handle.session_id,
+                                "stream_id": handle.stream_id,
+                                "frame_count": frame_count,
+                            },
+                        )
+                        return
                     logger.info(
-                        "WHEP video track ended",
+                        "WHEP video track ended unexpectedly",
                         extra={
                             "session_id": handle.session_id,
                             "stream_id": handle.stream_id,
                             "frame_count": frame_count,
                         },
                     )
-                    return
-                logger.info(
-                    "WHEP video track ended unexpectedly",
-                    extra={
-                        "session_id": handle.session_id,
-                        "stream_id": handle.stream_id,
-                        "frame_count": frame_count,
-                    },
-                )
-                raise RuntimeError("WHEP video track ended unexpectedly.") from exc
+                    raise RuntimeError("WHEP video track ended unexpectedly.") from exc
 
-            frame_count += 1
-            now = monotonic()
-            last_frame_at = now
-            if frame_count == 1 or now - last_log_at >= 5.0:
-                logger.info(
-                    "Received WHEP video frames",
+                frame_count += 1
+                now = monotonic()
+                last_frame_at = now
+                self._replace_latest_video_frame(
+                    latest_frame_queue,
+                    frame_count,
+                    video_frame,
+                )
+
+                if frame_count == 1 or now - last_log_at >= 5.0:
+                    logger.info(
+                        "Received WHEP video frames",
+                        extra={
+                            "session_id": handle.session_id,
+                            "stream_id": handle.stream_id,
+                            "frame_count": frame_count,
+                        },
+                    )
+                    last_log_at = now
+        finally:
+            processing_task.cancel()
+            await asyncio.gather(processing_task, return_exceptions=True)
+
+    @staticmethod
+    def _replace_latest_video_frame(
+        latest_frame_queue: asyncio.Queue,
+        frame_count: int,
+        video_frame,
+    ) -> None:
+        if latest_frame_queue.full():
+            try:
+                latest_frame_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        latest_frame_queue.put_nowait((frame_count, video_frame))
+
+    async def _process_latest_video_frames(
+        self,
+        handle: WhepStreamHandle,
+        latest_frame_queue: asyncio.Queue,
+    ) -> None:
+        processed_frame_count = 0
+        last_processed_log_at = monotonic()
+        last_processed_frame_count = 0
+        last_error_sent_at = 0.0
+
+        while not handle.stop_event.is_set():
+            try:
+                frame_count, video_frame = await asyncio.wait_for(
+                    latest_frame_queue.get(),
+                    timeout=1.0,
+                )
+            except asyncio.TimeoutError:
+                continue
+
+            try:
+                image = video_frame.to_ndarray(format="bgr24")
+                loop = asyncio.get_running_loop()
+                result, model_status = await loop.run_in_executor(
+                    None,
+                    _recognize_whep_frame,
+                    image,
+                )
+            except ValueError:
+                logger.exception(
+                    "WHEP frame validation failed",
                     extra={
                         "session_id": handle.session_id,
                         "stream_id": handle.stream_id,
                         "frame_count": frame_count,
                     },
                 )
-                last_log_at = now
+                continue
+            except Exception:
+                logger.exception(
+                    "WHEP frame processing failed",
+                    extra={
+                        "session_id": handle.session_id,
+                        "stream_id": handle.stream_id,
+                        "frame_count": frame_count,
+                    },
+                )
+                now = monotonic()
+                if now - last_error_sent_at >= 5.0:
+                    last_error_sent_at = now
+                    await handle.send_json(
+                        error_message(
+                            WEBRTC_SCHEMA_VERSION,
+                            handle.session_id,
+                            "model_unavailable",
+                            "WHEP frame processing failed.",
+                            handle.client_message_id,
+                            retryable=True,
+                        )
+                    )
+                continue
+
+            processed_frame_count += 1
+            await handle.send_json(
+                {
+                    "type": "result",
+                    "schema_version": WEBRTC_SCHEMA_VERSION,
+                    "session_id": handle.session_id,
+                    "client_message_id": handle.client_message_id,
+                    "stream_id": handle.stream_id,
+                    "sequence_index": processed_frame_count,
+                    "result": result,
+                    "model": model_status,
+                    "processed_at": _utc_now_iso(),
+                }
+            )
+
+            now = monotonic()
+            if processed_frame_count == 1 or now - last_processed_log_at >= 5.0:
+                elapsed = max(now - last_processed_log_at, 0.001)
+                interval_processed_frames = (
+                    processed_frame_count - last_processed_frame_count
+                )
+                logger.info(
+                    "Processed WHEP video frames",
+                    extra={
+                        "session_id": handle.session_id,
+                        "stream_id": handle.stream_id,
+                        "frame_count": frame_count,
+                        "processed_frame_count": processed_frame_count,
+                        "fps": round(interval_processed_frames / elapsed, 2),
+                    },
+                )
+                last_processed_log_at = now
+                last_processed_frame_count = processed_frame_count
 
     async def _wait_for_ice_gathering(self, peer_connection) -> None:
         if peer_connection.iceGatheringState == "complete":
