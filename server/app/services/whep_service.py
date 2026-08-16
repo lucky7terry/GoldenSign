@@ -67,7 +67,9 @@ def _keypoint_summary(keypoints: dict) -> str:
     pose = person.get("pose_keypoints_2d", [])
     left_hand = person.get("hand_left_keypoints_2d", [])
     right_hand = person.get("hand_right_keypoints_2d", [])
+    face = person.get("face_keypoints_2d", [])
     return (
+        f"face {detected(face)}/{len(face) // 3}, "
         f"pose {detected(pose)}/{len(pose) // 3}, "
         f"L-hand {detected(left_hand)}/{len(left_hand) // 3}, "
         f"R-hand {detected(right_hand)}/{len(right_hand) // 3}"
@@ -292,14 +294,20 @@ class WhepPullService:
                 video_track_queue.get(),
                 timeout=WHEP_CONNECT_TIMEOUT_SECONDS,
             )
-            await self._request_video_keyframe(video_track)
-            await self._receive_video_frames(handle, video_track, connection_closed)
+            await self._request_video_keyframe(peer_connection, video_track)
+            await self._receive_video_frames(
+                handle,
+                peer_connection,
+                video_track,
+                connection_closed,
+            )
         finally:
             await self._cleanup_connection(session, peer_connection, resource_url)
 
     async def _receive_video_frames(
         self,
         handle: WhepStreamHandle,
+        peer_connection,
         video_track,
         connection_closed: asyncio.Event,
     ) -> None:
@@ -336,7 +344,10 @@ class WhepPullService:
                         now - last_keyframe_request_at
                         >= WHEP_KEYFRAME_REQUEST_INTERVAL_SECONDS
                     ):
-                        await self._request_video_keyframe(video_track)
+                        await self._request_video_keyframe(
+                            peer_connection,
+                            video_track,
+                        )
                         last_keyframe_request_at = now
                     if now - last_frame_at >= frame_timeout:
                         raise RuntimeError("WHEP video frames stopped.")
@@ -538,19 +549,58 @@ class WhepPullService:
                 last_processed_log_at = now
                 last_processed_frame_count = processed_frame_count
 
-    async def _request_video_keyframe(self, video_track) -> None:
-        receiver = getattr(video_track, "_receiver", None)
-        if receiver is None:
-            return
+    async def _request_video_keyframe(self, peer_connection, video_track=None) -> None:
+        receivers = self._video_receivers(peer_connection, video_track)
+        for receiver in receivers:
+            for ssrc in self._receiver_ssrc_candidates(receiver, video_track):
+                if await self._send_receiver_pli(receiver, ssrc):
+                    logger.info("Requested WHEP video keyframe")
+                    return
+        logger.debug("No WHEP video receiver accepted a keyframe request")
 
-        ssrc = (
-            getattr(receiver, "_ssrc", None)
-            or getattr(video_track, "_ssrc", None)
-            or getattr(video_track, "ssrc", None)
-        )
-        if ssrc is None:
-            return
+    @staticmethod
+    def _video_receivers(peer_connection, video_track=None) -> list:
+        receivers = []
+        get_receivers = getattr(peer_connection, "getReceivers", None)
+        if get_receivers is not None:
+            receivers.extend(
+                receiver
+                for receiver in get_receivers()
+                if getattr(getattr(receiver, "track", None), "kind", None) == "video"
+            )
 
+        track_receiver = getattr(video_track, "_receiver", None)
+        if track_receiver is not None and track_receiver not in receivers:
+            receivers.append(track_receiver)
+        return receivers
+
+    @staticmethod
+    def _receiver_ssrc_candidates(receiver, video_track=None) -> list[int]:
+        candidates: list[int] = []
+
+        for source in (receiver, video_track):
+            if source is None:
+                continue
+            for attribute in (
+                "_ssrc",
+                "ssrc",
+                "_RTCRtpReceiver__ssrc",
+                "_RTCRtpReceiver__remote_ssrc",
+            ):
+                value = getattr(source, attribute, None)
+                if isinstance(value, int):
+                    candidates.append(value)
+
+        active_ssrc = getattr(receiver, "_RTCRtpReceiver__active_ssrc", None)
+        if isinstance(active_ssrc, dict):
+            candidates.extend(ssrc for ssrc in active_ssrc if isinstance(ssrc, int))
+        elif isinstance(active_ssrc, (set, list, tuple)):
+            candidates.extend(ssrc for ssrc in active_ssrc if isinstance(ssrc, int))
+
+        return list(dict.fromkeys(candidates))
+
+    @staticmethod
+    async def _send_receiver_pli(receiver, ssrc: int) -> bool:
         for method_name in ("_send_rtcp_pli", "send_rtcp_pli"):
             method = getattr(receiver, method_name, None)
             if method is None:
@@ -560,10 +610,10 @@ class WhepPullService:
                 result = method(ssrc)
                 if inspect.isawaitable(result):
                     await result
-                logger.info("Requested WHEP video keyframe")
-                return
+                return True
             except Exception:
                 logger.debug("Failed to request WHEP video keyframe", exc_info=True)
+        return False
 
     async def _wait_for_ice_gathering(self, peer_connection) -> None:
         if peer_connection.iceGatheringState == "complete":
