@@ -197,18 +197,10 @@ class MediaPipeService:
         )
 
     @staticmethod
-    def _should_replace_hand(
-        current_hand: list[dict[str, float | None]],
-        current_score: float | None,
-        candidate_score: float | None,
-    ) -> bool:
-        if not current_hand:
-            return True
-        if candidate_score is None:
-            return False
-        if current_score is None:
-            return True
-        return candidate_score > current_score
+    def _score_or_default(score: float | None) -> float:
+        if score is None:
+            return -1.0
+        return score
 
     def extract_keypoints_from_image(
         self,
@@ -249,12 +241,11 @@ class MediaPipeService:
 
         left_hand: list[dict[str, float | None]] = []
         right_hand: list[dict[str, float | None]] = []
-        left_hand_score: float | None = None
-        right_hand_score: float | None = None
         pose: list[dict[str, float | None]] = []
         image_height, image_width = image.shape[:2]
 
         # 손 결과 분류
+        hand_candidates: list[dict[str, Any]] = []
         for index, landmarks in enumerate(
             hand_result.hand_landmarks
         ):
@@ -272,30 +263,66 @@ class MediaPipeService:
                     )
                 )
 
-            if handedness_name == "left":
-                if left_hand:
-                    logger.warning(
-                        "Duplicate left hand detected; preserving higher score"
-                    )
-                if self._should_replace_hand(
-                    left_hand,
-                    left_hand_score,
-                    handedness_score,
-                ):
-                    left_hand = serialized
-                    left_hand_score = handedness_score
-            elif handedness_name == "right":
-                if right_hand:
-                    logger.warning(
-                        "Duplicate right hand detected; preserving higher score"
-                    )
-                if self._should_replace_hand(
-                    right_hand,
-                    right_hand_score,
-                    handedness_score,
-                ):
-                    right_hand = serialized
-                    right_hand_score = handedness_score
+            hand_candidates.append(
+                {
+                    "index": index,
+                    "label": handedness_name,
+                    "score": handedness_score,
+                    "landmarks": serialized,
+                }
+            )
+
+        selected_hand_indexes: set[int] = set()
+
+        for label in ("left", "right"):
+            labeled_candidates = [
+                candidate
+                for candidate in hand_candidates
+                if candidate["label"] == label
+            ]
+            if not labeled_candidates:
+                continue
+            if len(labeled_candidates) > 1:
+                logger.warning(
+                    "Duplicate %s hand detected; preserving higher score",
+                    label,
+                )
+            selected_candidate = max(
+                labeled_candidates,
+                key=lambda candidate: self._score_or_default(candidate["score"]),
+            )
+            selected_hand_indexes.add(selected_candidate["index"])
+            if label == "left":
+                left_hand = selected_candidate["landmarks"]
+            else:
+                right_hand = selected_candidate["landmarks"]
+
+        for label in ("left", "right"):
+            if label == "left" and left_hand:
+                continue
+            if label == "right" and right_hand:
+                continue
+
+            remaining_candidates = [
+                candidate
+                for candidate in hand_candidates
+                if candidate["index"] not in selected_hand_indexes
+            ]
+            if not remaining_candidates:
+                continue
+            selected_candidate = max(
+                remaining_candidates,
+                key=lambda candidate: self._score_or_default(candidate["score"]),
+            )
+            selected_hand_indexes.add(selected_candidate["index"])
+            logger.warning(
+                "Reassigned duplicate or unlabeled hand to missing %s hand",
+                label,
+            )
+            if label == "left":
+                left_hand = selected_candidate["landmarks"]
+            else:
+                right_hand = selected_candidate["landmarks"]
 
         # Pose 결과
         if pose_result.pose_landmarks:

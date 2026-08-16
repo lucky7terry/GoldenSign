@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import ipaddress
 import logging
 from collections.abc import Awaitable, Callable
@@ -10,9 +11,12 @@ from urllib.parse import urljoin, urlparse
 from app.config import (
     WHEP_ALLOWED_HOST_SUFFIXES,
     WHEP_CONNECT_TIMEOUT_SECONDS,
+    WHEP_FIRST_FRAME_TIMEOUT_SECONDS,
     WHEP_FRAME_IDLE_TIMEOUT_SECONDS,
+    WHEP_KEYFRAME_REQUEST_INTERVAL_SECONDS,
     WHEP_MAX_RETRIES,
     WHEP_RETRY_DELAY_SECONDS,
+    WHEP_STUN_SERVER_URLS,
 )
 from app.constants import WEBRTC_SCHEMA_VERSION
 from app.error import error_message
@@ -48,6 +52,22 @@ def _is_sequence_session_closed(error: Exception) -> bool:
     from app.services.sequence_service import SequenceSessionClosed
 
     return isinstance(error, SequenceSessionClosed)
+
+
+def _keypoint_summary(keypoints: dict) -> str:
+    person = keypoints.get("people", {}) or {}
+
+    def detected(points: list[float]) -> int:
+        return sum(1 for index in range(2, len(points), 3) if points[index] > 0.0)
+
+    pose = person.get("pose_keypoints_2d", [])
+    left_hand = person.get("hand_left_keypoints_2d", [])
+    right_hand = person.get("hand_right_keypoints_2d", [])
+    return (
+        f"pose {detected(pose)}/{len(pose) // 3}, "
+        f"L-hand {detected(left_hand)}/{len(left_hand) // 3}, "
+        f"R-hand {detected(right_hand)}/{len(right_hand) // 3}"
+    )
 
 
 @dataclass
@@ -194,9 +214,20 @@ class WhepPullService:
 
     async def _connect_and_receive(self, handle: WhepStreamHandle) -> None:
         import aiohttp
-        from aiortc import RTCPeerConnection, RTCSessionDescription
+        from aiortc import (
+            RTCConfiguration,
+            RTCIceServer,
+            RTCPeerConnection,
+            RTCSessionDescription,
+        )
 
-        peer_connection = RTCPeerConnection()
+        peer_connection = RTCPeerConnection(
+            configuration=RTCConfiguration(
+                iceServers=[
+                    RTCIceServer(urls=list(WHEP_STUN_SERVER_URLS)),
+                ]
+            )
+        )
         session: aiohttp.ClientSession | None = None
         resource_url: str | None = None
 
@@ -257,6 +288,7 @@ class WhepPullService:
                 video_track_queue.get(),
                 timeout=WHEP_CONNECT_TIMEOUT_SECONDS,
             )
+            await self._request_video_keyframe(video_track)
             await self._receive_video_frames(handle, video_track, connection_closed)
         finally:
             await self._cleanup_connection(session, peer_connection, resource_url)
@@ -267,28 +299,45 @@ class WhepPullService:
         video_track,
         connection_closed: asyncio.Event,
     ) -> None:
-        from av.error import MediaStreamError
+        from aiortc.mediastreams import MediaStreamError
 
         frame_count = 0
         last_log_at = monotonic()
         last_frame_at = monotonic()
+        first_frame_received = False
+        last_keyframe_request_at = 0.0
         latest_frame_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         processing_task = asyncio.create_task(
             self._process_latest_video_frames(handle, latest_frame_queue)
         )
+        recv_task = asyncio.create_task(video_track.recv())
 
         try:
             while not handle.stop_event.is_set():
-                try:
-                    video_frame = await asyncio.wait_for(video_track.recv(), timeout=1.0)
-                except asyncio.TimeoutError:
+                done, _ = await asyncio.wait({recv_task}, timeout=1.0)
+                if not done:
+                    now = monotonic()
                     if connection_closed.is_set():
                         raise RuntimeError(
                             "WHEP connection closed while waiting for frames."
                         )
-                    if monotonic() - last_frame_at >= WHEP_FRAME_IDLE_TIMEOUT_SECONDS:
+                    frame_timeout = (
+                        WHEP_FRAME_IDLE_TIMEOUT_SECONDS
+                        if first_frame_received
+                        else WHEP_FIRST_FRAME_TIMEOUT_SECONDS
+                    )
+                    if not first_frame_received and (
+                        now - last_keyframe_request_at
+                        >= WHEP_KEYFRAME_REQUEST_INTERVAL_SECONDS
+                    ):
+                        await self._request_video_keyframe(video_track)
+                        last_keyframe_request_at = now
+                    if now - last_frame_at >= frame_timeout:
                         raise RuntimeError("WHEP video frames stopped.")
                     continue
+
+                try:
+                    video_frame = recv_task.result()
                 except MediaStreamError as exc:
                     if handle.stop_event.is_set():
                         logger.info(
@@ -309,10 +358,13 @@ class WhepPullService:
                         },
                     )
                     raise RuntimeError("WHEP video track ended unexpectedly.") from exc
+                finally:
+                    recv_task = asyncio.create_task(video_track.recv())
 
                 frame_count += 1
                 now = monotonic()
                 last_frame_at = now
+                first_frame_received = True
                 self._replace_latest_video_frame(
                     latest_frame_queue,
                     frame_count,
@@ -330,6 +382,8 @@ class WhepPullService:
                     )
                     last_log_at = now
         finally:
+            recv_task.cancel()
+            await asyncio.gather(recv_task, return_exceptions=True)
             processing_task.cancel()
             await asyncio.gather(processing_task, return_exceptions=True)
 
@@ -443,10 +497,38 @@ class WhepPullService:
                         "frame_count": frame_count,
                         "processed_frame_count": processed_frame_count,
                         "fps": round(interval_processed_frames / elapsed, 2),
+                        "keypoints": _keypoint_summary(result.get("keypoints", {})),
                     },
                 )
                 last_processed_log_at = now
                 last_processed_frame_count = processed_frame_count
+
+    async def _request_video_keyframe(self, video_track) -> None:
+        receiver = getattr(video_track, "_receiver", None)
+        if receiver is None:
+            return
+
+        ssrc = (
+            getattr(receiver, "_ssrc", None)
+            or getattr(video_track, "_ssrc", None)
+            or getattr(video_track, "ssrc", None)
+        )
+        if ssrc is None:
+            return
+
+        for method_name in ("_send_rtcp_pli", "send_rtcp_pli"):
+            method = getattr(receiver, method_name, None)
+            if method is None:
+                continue
+
+            try:
+                result = method(ssrc)
+                if inspect.isawaitable(result):
+                    await result
+                logger.info("Requested WHEP video keyframe")
+                return
+            except Exception:
+                logger.debug("Failed to request WHEP video keyframe", exc_info=True)
 
     async def _wait_for_ice_gathering(self, peer_connection) -> None:
         if peer_connection.iceGatheringState == "complete":
