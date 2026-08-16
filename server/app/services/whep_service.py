@@ -54,6 +54,10 @@ def _is_sequence_session_closed(error: Exception) -> bool:
     return isinstance(error, SequenceSessionClosed)
 
 
+class WhepFrameProcessingStopped(Exception):
+    """Raised when processing should stop without WHEP connection retry."""
+
+
 def _keypoint_summary(keypoints: dict) -> str:
     person = keypoints.get("people", {}) or {}
 
@@ -341,6 +345,8 @@ class WhepPullService:
                 self._raise_if_processing_task_done(processing_task)
                 try:
                     video_frame = recv_task.result()
+                except WhepFrameProcessingStopped:
+                    return
                 except MediaStreamError as exc:
                     if handle.stop_event.is_set():
                         logger.info(
@@ -384,6 +390,16 @@ class WhepPullService:
                         },
                     )
                     last_log_at = now
+        except WhepFrameProcessingStopped:
+            logger.info(
+                "WHEP frame processing stopped",
+                extra={
+                    "session_id": handle.session_id,
+                    "stream_id": handle.stream_id,
+                    "frame_count": frame_count,
+                },
+            )
+            return
         finally:
             recv_task.cancel()
             await asyncio.gather(recv_task, return_exceptions=True)
@@ -398,6 +414,8 @@ class WhepPullService:
             raise RuntimeError("WHEP frame processing was cancelled.")
 
         error = processing_task.exception()
+        if isinstance(error, WhepFrameProcessingStopped):
+            raise error
         if error is None:
             raise RuntimeError("WHEP frame processing stopped unexpectedly.")
         raise RuntimeError("WHEP frame processing failed.") from error
@@ -459,7 +477,9 @@ class WhepPullService:
                 continue
             except Exception as exc:
                 if _is_sequence_session_closed(exc):
-                    return
+                    raise WhepFrameProcessingStopped(
+                        "Recognition session closed."
+                    ) from exc
                 logger.exception(
                     "WHEP frame processing failed",
                     extra={
