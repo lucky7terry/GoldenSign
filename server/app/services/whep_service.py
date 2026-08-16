@@ -314,8 +314,10 @@ class WhepPullService:
 
         try:
             while not handle.stop_event.is_set():
+                self._raise_if_processing_task_done(processing_task)
                 done, _ = await asyncio.wait({recv_task}, timeout=1.0)
                 if not done:
+                    self._raise_if_processing_task_done(processing_task)
                     now = monotonic()
                     if connection_closed.is_set():
                         raise RuntimeError(
@@ -336,6 +338,7 @@ class WhepPullService:
                         raise RuntimeError("WHEP video frames stopped.")
                     continue
 
+                self._raise_if_processing_task_done(processing_task)
                 try:
                     video_frame = recv_task.result()
                 except MediaStreamError as exc:
@@ -386,6 +389,18 @@ class WhepPullService:
             await asyncio.gather(recv_task, return_exceptions=True)
             processing_task.cancel()
             await asyncio.gather(processing_task, return_exceptions=True)
+
+    @staticmethod
+    def _raise_if_processing_task_done(processing_task: asyncio.Task) -> None:
+        if not processing_task.done():
+            return
+        if processing_task.cancelled():
+            raise RuntimeError("WHEP frame processing was cancelled.")
+
+        error = processing_task.exception()
+        if error is None:
+            raise RuntimeError("WHEP frame processing stopped unexpectedly.")
+        raise RuntimeError("WHEP frame processing failed.") from error
 
     @staticmethod
     def _replace_latest_video_frame(

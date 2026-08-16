@@ -146,6 +146,20 @@ class SequenceServiceTest(unittest.TestCase):
                 generation,
             )
 
+    def test_generation_none_does_not_rewind_after_clear_session(self):
+        store = SlidingWindowSequenceStore(window_size=2, stride=1)
+        stale_generation = store.start_session("session-1")
+
+        store.clear_session("session-1")
+        store.append_openpose_result("session-1", _openpose_result())
+
+        with self.assertRaises(SequenceSessionClosed):
+            store.append_openpose_result(
+                "session-1",
+                _openpose_result(),
+                stale_generation,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

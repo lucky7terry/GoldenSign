@@ -62,17 +62,23 @@ class MediaPipeService:
 
         if not hand_model_path.exists():
             raise FileNotFoundError(
-                f"Hand model not found: {hand_model_path}"
+                f"Hand model not found: {hand_model_path}. "
+                "Run `python scripts/download_mediapipe_models.py` "
+                "from the server directory."
             )
 
         if not pose_model_path.exists():
             raise FileNotFoundError(
-                f"Pose model not found: {pose_model_path}"
+                f"Pose model not found: {pose_model_path}. "
+                "Run `python scripts/download_mediapipe_models.py` "
+                "from the server directory."
             )
 
         if not face_model_path.exists():
             raise FileNotFoundError(
-                f"Face model not found: {face_model_path}"
+                f"Face model not found: {face_model_path}. "
+                "Run `python scripts/download_mediapipe_models.py` "
+                "from the server directory."
             )
 
         # 여러 WebSocket 프레임이 동시에 처리될 때

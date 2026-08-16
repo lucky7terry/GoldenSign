@@ -128,7 +128,9 @@ class SlidingWindowSequenceStore:
                 )
 
             if current_generation is None:
-                current_generation = 1
+                current_generation = self._generations.get(session_id, 0)
+                if current_generation <= 0:
+                    current_generation = 1
                 self._generations[session_id] = current_generation
 
             state = self._states.setdefault(
