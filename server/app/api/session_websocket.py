@@ -29,6 +29,7 @@ from app.services.model_service import (
     get_model_health_status,
     recognize_frame_from_image_bytes,
 )
+from app.services.sequence_service import SequenceSessionClosed, sequence_store
 from app.services.session_service import (
     activate_recognition_session,
     validate_recognition_session,
@@ -80,6 +81,7 @@ async def _run_frame_recognition(
     websocket: WebSocket,
     send_lock: asyncio.Lock,
     session_id: str,
+    sequence_generation: int,
     job: FrameRecognitionJob,
 ):
     frame_message = job.message
@@ -91,6 +93,8 @@ async def _run_frame_recognition(
                 None,
                 recognize_frame_from_image_bytes,
                 job.image_bytes,
+                session_id,
+                sequence_generation,
             )
         payload = {
             "type": "result",
@@ -113,6 +117,8 @@ async def _run_frame_recognition(
             client_message_id,
             retryable=False,
         )
+    except SequenceSessionClosed:
+        return
     except Exception:
         logger.exception(
             "Frame recognition failed",
@@ -140,6 +146,7 @@ async def _recognition_worker(
     websocket: WebSocket,
     send_lock: asyncio.Lock,
     session_id: str,
+    sequence_generation: int,
     frame_queue: asyncio.Queue[FrameRecognitionJob],
 ):
     while True:
@@ -149,6 +156,7 @@ async def _recognition_worker(
                 websocket,
                 send_lock,
                 session_id,
+                sequence_generation,
                 job,
             )
         finally:
@@ -168,6 +176,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
 
     await websocket.accept()
     send_lock = asyncio.Lock()
+    sequence_generation = sequence_store.start_session(session_id)
     frame_queue: asyncio.Queue[FrameRecognitionJob] = asyncio.Queue(
         maxsize=FRAME_QUEUE_MAX_SIZE,
     )
@@ -176,6 +185,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
             websocket,
             send_lock,
             session_id,
+            sequence_generation,
             frame_queue,
         )
     )
@@ -529,3 +539,4 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         await whep_pull_service.stop_session(session_id)
         recognition_worker.cancel()
         await asyncio.gather(recognition_worker, return_exceptions=True)
+        sequence_store.clear_session(session_id)

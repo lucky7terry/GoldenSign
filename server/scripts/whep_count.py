@@ -22,9 +22,18 @@ async def wait_for_ice_gathering(peer_connection, timeout_seconds: float) -> Non
 
 async def count_whep_frames(whep_url: str, timeout_seconds: float) -> None:
     import aiohttp
-    from aiortc import RTCPeerConnection, RTCSessionDescription
+    from aiortc import (
+        RTCConfiguration,
+        RTCIceServer,
+        RTCPeerConnection,
+        RTCSessionDescription,
+    )
 
-    peer_connection = RTCPeerConnection()
+    peer_connection = RTCPeerConnection(
+        configuration=RTCConfiguration(
+            iceServers=[RTCIceServer(urls=["stun:stun.cloudflare.com:3478"])]
+        )
+    )
     session = aiohttp.ClientSession()
     resource_url = None
 

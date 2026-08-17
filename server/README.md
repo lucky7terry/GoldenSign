@@ -18,6 +18,10 @@ The model download script prepares:
 
 - `server/models/hand_landmarker.task`
 - `server/models/pose_landmarker_lite.task`
+- `server/models/face_landmarker.task`
+
+Run this script in every local, CI, and deployment environment before starting
+the server. The MediaPipe model files are not committed to the repository.
 
 ## Run
 

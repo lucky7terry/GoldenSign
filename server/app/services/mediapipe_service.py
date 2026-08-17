@@ -54,14 +54,31 @@ class MediaPipeService:
             / "pose_landmarker_lite.task"
         )
 
+        face_model_path = (
+            server_directory
+            / "models"
+            / "face_landmarker.task"
+        )
+
         if not hand_model_path.exists():
             raise FileNotFoundError(
-                f"Hand model not found: {hand_model_path}"
+                f"Hand model not found: {hand_model_path}. "
+                "Run `python scripts/download_mediapipe_models.py` "
+                "from the server directory."
             )
 
         if not pose_model_path.exists():
             raise FileNotFoundError(
-                f"Pose model not found: {pose_model_path}"
+                f"Pose model not found: {pose_model_path}. "
+                "Run `python scripts/download_mediapipe_models.py` "
+                "from the server directory."
+            )
+
+        if not face_model_path.exists():
+            raise FileNotFoundError(
+                f"Face model not found: {face_model_path}. "
+                "Run `python scripts/download_mediapipe_models.py` "
+                "from the server directory."
             )
 
         # 여러 WebSocket 프레임이 동시에 처리될 때
@@ -91,6 +108,17 @@ class MediaPipeService:
             output_segmentation_masks=False,
         )
 
+        face_options = mp.tasks.vision.FaceLandmarkerOptions(
+            base_options=mp.tasks.BaseOptions(
+                model_asset_path=str(face_model_path)
+            ),
+            running_mode=mp.tasks.vision.RunningMode.IMAGE,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+
         self._hand_landmarker = (
             mp.tasks.vision.HandLandmarker.create_from_options(
                 hand_options
@@ -100,6 +128,12 @@ class MediaPipeService:
         self._pose_landmarker = (
             mp.tasks.vision.PoseLandmarker.create_from_options(
                 pose_options
+            )
+        )
+
+        self._face_landmarker = (
+            mp.tasks.vision.FaceLandmarker.create_from_options(
+                face_options
             )
         )
 
@@ -184,6 +218,20 @@ class MediaPipeService:
         ]
 
     @staticmethod
+    def _serialize_face_landmarks(
+        landmarks: Any,
+    ) -> list[dict[str, float | None]]:
+        return [
+            {
+                "x": float(landmark.x),
+                "y": float(landmark.y),
+                "z": float(landmark.z),
+                "visibility": None,
+            }
+            for landmark in landmarks
+        ]
+
+    @staticmethod
     def _handedness_label_and_score(
         handedness: Any,
     ) -> tuple[str, float | None]:
@@ -197,18 +245,10 @@ class MediaPipeService:
         )
 
     @staticmethod
-    def _should_replace_hand(
-        current_hand: list[dict[str, float | None]],
-        current_score: float | None,
-        candidate_score: float | None,
-    ) -> bool:
-        if not current_hand:
-            return True
-        if candidate_score is None:
-            return False
-        if current_score is None:
-            return True
-        return candidate_score > current_score
+    def _score_or_default(score: float | None) -> float:
+        if score is None:
+            return -1.0
+        return score
 
     def extract_keypoints_from_image(
         self,
@@ -242,6 +282,10 @@ class MediaPipeService:
                     mediapipe_image
                 )
 
+                face_result = self._face_landmarker.detect(
+                    mediapipe_image
+                )
+
         except Exception as exc:
             raise MediaPipeProcessingError(
                 f"MediaPipe processing failed: {exc}"
@@ -249,12 +293,12 @@ class MediaPipeService:
 
         left_hand: list[dict[str, float | None]] = []
         right_hand: list[dict[str, float | None]] = []
-        left_hand_score: float | None = None
-        right_hand_score: float | None = None
+        face: list[dict[str, float | None]] = []
         pose: list[dict[str, float | None]] = []
         image_height, image_width = image.shape[:2]
 
         # 손 결과 분류
+        hand_candidates: list[dict[str, Any]] = []
         for index, landmarks in enumerate(
             hand_result.hand_landmarks
         ):
@@ -272,30 +316,66 @@ class MediaPipeService:
                     )
                 )
 
-            if handedness_name == "left":
-                if left_hand:
-                    logger.warning(
-                        "Duplicate left hand detected; preserving higher score"
-                    )
-                if self._should_replace_hand(
-                    left_hand,
-                    left_hand_score,
-                    handedness_score,
-                ):
-                    left_hand = serialized
-                    left_hand_score = handedness_score
-            elif handedness_name == "right":
-                if right_hand:
-                    logger.warning(
-                        "Duplicate right hand detected; preserving higher score"
-                    )
-                if self._should_replace_hand(
-                    right_hand,
-                    right_hand_score,
-                    handedness_score,
-                ):
-                    right_hand = serialized
-                    right_hand_score = handedness_score
+            hand_candidates.append(
+                {
+                    "index": index,
+                    "label": handedness_name,
+                    "score": handedness_score,
+                    "landmarks": serialized,
+                }
+            )
+
+        selected_hand_indexes: set[int] = set()
+
+        for label in ("left", "right"):
+            labeled_candidates = [
+                candidate
+                for candidate in hand_candidates
+                if candidate["label"] == label
+            ]
+            if not labeled_candidates:
+                continue
+            if len(labeled_candidates) > 1:
+                logger.warning(
+                    "Duplicate %s hand detected; preserving higher score",
+                    label,
+                )
+            selected_candidate = max(
+                labeled_candidates,
+                key=lambda candidate: self._score_or_default(candidate["score"]),
+            )
+            selected_hand_indexes.add(selected_candidate["index"])
+            if label == "left":
+                left_hand = selected_candidate["landmarks"]
+            else:
+                right_hand = selected_candidate["landmarks"]
+
+        for label in ("left", "right"):
+            if label == "left" and left_hand:
+                continue
+            if label == "right" and right_hand:
+                continue
+
+            remaining_candidates = [
+                candidate
+                for candidate in hand_candidates
+                if candidate["index"] not in selected_hand_indexes
+            ]
+            if not remaining_candidates:
+                continue
+            selected_candidate = max(
+                remaining_candidates,
+                key=lambda candidate: self._score_or_default(candidate["score"]),
+            )
+            selected_hand_indexes.add(selected_candidate["index"])
+            logger.warning(
+                "Reassigned duplicate or unlabeled hand to missing %s hand",
+                label,
+            )
+            if label == "left":
+                left_hand = selected_candidate["landmarks"]
+            else:
+                right_hand = selected_candidate["landmarks"]
 
         # Pose 결과
         if pose_result.pose_landmarks:
@@ -303,14 +383,20 @@ class MediaPipeService:
                 pose_result.pose_landmarks[0]
             )
 
+        # Face 결과
+        if face_result.face_landmarks:
+            face = self._serialize_face_landmarks(
+                face_result.face_landmarks[0]
+            )
+
         return {
-            "face": [],
+            "face": face,
             "pose": pose,
             "left_hand": left_hand,
             "right_hand": right_hand,
             "image_width": int(image_width),
             "image_height": int(image_height),
-            "face_detected": False,
+            "face_detected": bool(face),
             "pose_detected": bool(pose),
             "left_hand_detected": bool(left_hand),
             "right_hand_detected": bool(right_hand),
@@ -335,6 +421,7 @@ class MediaPipeService:
     def close(self) -> None:
         self._hand_landmarker.close()
         self._pose_landmarker.close()
+        self._face_landmarker.close()
 
 
 _mediapipe_service: MediaPipeService | None = None
