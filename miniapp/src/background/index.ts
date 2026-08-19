@@ -39,6 +39,7 @@
  */
 
 import {registerMiniapp, type GlassesCapabilities, type StreamModule, type WifiData} from "@mentra/miniapp/background"
+import {AiClient, probeRuntime} from "./ai-client"
 
 /**
  * The background entry point re-exports `StreamModule` but not its option /
@@ -225,6 +226,11 @@ registerMiniapp((session) => {
   /** Latest glasses Wi-Fi state. Undefined until the first onWifi delivery. */
   let latestWifi: WifiData | undefined
 
+  // --- Gate 3 state -------------------------------------------------------
+  // Created inside "ready" because session.userId is only populated by
+  // CONNECT_ACK. Undefined when the runtime probe fails.
+  let ai: AiClient | undefined
+
   // --- session lifecycle -------------------------------------------------
 
   // "ready" fires with no arguments — the CONNECT_ACK values are read off
@@ -243,6 +249,14 @@ registerMiniapp((session) => {
       // Explicit display verdict. `false` on Mentra Live is correct, not a bug.
       const hasDisplay = session.capabilities?.display != null
       console.log("[Caps] hasDisplay =", hasDisplay)
+
+      // --- Gate 3 -----------------------------------------------------------
+      // Runtime probe first: without WebSocket the whole Gate is impossible,
+      // so nothing else is attempted. All network work starts here rather than
+      // in the registerMiniapp handler body, which must stay synchronous.
+      if (!probeRuntime()) return
+      ai = new AiClient(session.userId)
+      ai.connect()
     }),
   )
 
@@ -259,7 +273,17 @@ registerMiniapp((session) => {
 
   // Synchronous only. Per SDK: async work started here will not complete
   // before the socket closes.
-  unsubscribers.push(session.on("beforeDisconnect", (r) => console.log("[Session] beforeDisconnect:", r)))
+  unsubscribers.push(
+    session.on("beforeDisconnect", (r) => {
+      console.log("[Session] beforeDisconnect:", r)
+      // ws.send() only — synchronous, so it has a chance to reach the wire.
+      // POST /v1/sessions/{id}/stop is deliberately NOT attempted here: it is
+      // async and, per the SDK, async work started in this handler will not
+      // complete before the socket closes. The server-side `stop` message
+      // already runs stop_session(), and the record expires on TTL anyway.
+      ai?.sendStopMessage(`beforeDisconnect: ${r}`)
+    }),
+  )
 
   unsubscribers.push(
     session.on("disconnect", (r) => {
@@ -270,6 +294,7 @@ registerMiniapp((session) => {
         // console if the camera turns out to still be held afterward.
         console.warn("[Gate2] disconnect 시점에 스트림이 살아있었다. streamId=", activeStreamId)
       }
+      ai?.closeNow(`disconnect: ${r}`)
       for (const unsubscribe of unsubscribers) {
         unsubscribe()
       }
@@ -409,6 +434,20 @@ registerMiniapp((session) => {
       if (press.pressType === "long") {
         // Full payload logged so we can see what `buttonId` actually carries.
         console.log("[Input] LONG", JSON.stringify(press))
+
+        // --- Gate 3 teardown ------------------------------------------------
+        // While an AI session is live, long-press means "tear down the AI
+        // session" and stops here. Gate 3 explicitly starts no stream, so the
+        // Gate 2 ladder below is unreachable in this configuration — its code
+        // is untouched, just not entered. Once both Gates run together this
+        // single gesture is overloaded and will need disambiguating.
+        // TODO(Gate 4): 롱프레스 하나로 스트림과 AI 세션을 동시에 다루는 규칙 정리.
+        const aiState = ai?.getState()
+        if (ai !== undefined && aiState !== "idle") {
+          console.log("[Gate3] 롱프레스 → AI 세션 종료. state=", aiState)
+          ai.shutdown(`long press (buttonId=${press.buttonId})`)
+          return
+        }
 
         // Re-entrancy guard. starting_stream / stopping are in-flight async
         // states; a second long-press during either would race the first.
