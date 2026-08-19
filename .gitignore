@@ -28,3 +28,8 @@ logs/
 .DS_Store
 .vscode/
 .idea/
+
+server/venv/
+server/__pycache__/
+**/__pycache__/
+*.pyc
