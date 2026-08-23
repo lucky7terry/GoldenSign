@@ -25,7 +25,7 @@
  *     idempotent and worth sending even after the socket is gone.
  */
 
-import {AI_HTTP, CLIENT_NAME, HELLO_SCHEMA} from "../shared/config"
+import {AI_HTTP, CLIENT_NAME, HELLO_SCHEMA, STREAM_SCHEMA} from "../shared/config"
 
 // ---------------------------------------------------------------------------
 // Runtime capability probe
@@ -125,7 +125,29 @@ export class AiClient {
   /** Set before any intentional teardown so onclose does not schedule a reconnect. */
   private shuttingDown = false
 
-  constructor(private readonly userId: string) {}
+  /** `model` block from the last `ready`. Re-logged at stream start — see getModel(). */
+  private readyModel: unknown
+
+  /**
+   * Idempotency guards. A stream_start / stream_stop must never go out twice
+   * for the same stream_id: cleanup runs from stop, error and disconnect paths
+   * that can overlap, and duplicates would desync the server's stream state.
+   */
+  private readonly streamStartSent = new Set<string>()
+  private readonly streamStopSent = new Set<string>()
+
+  /** client_message_id → send timestamp, for measuring ack round-trip. */
+  private readonly pendingAcks = new Map<string, {label: string; sentAt: number}>()
+
+  /**
+   * @param userId  session.userId, sent as `user_id` on POST /v1/sessions.
+   * @param onReady Fired every time a `ready` arrives — including after a
+   *                reconnect, so the caller can re-enter its ai_ready state.
+   */
+  constructor(
+    private readonly userId: string,
+    private readonly onReady?: () => void,
+  ) {}
 
   getState(): AiClientState {
     return this.state
@@ -133,6 +155,20 @@ export class AiClient {
 
   getSessionId(): string | undefined {
     return this.sessionId
+  }
+
+  /** True only when the socket is open AND the handshake completed. */
+  isReady(): boolean {
+    return this.state === "ai_ready" && this.ws !== undefined && this.ws.readyState === 1
+  }
+
+  /**
+   * The `model` block from `ready` ({loaded, mode, version}). Kept so it can be
+   * re-logged at stream start: when frames flow but no `result` ever comes
+   * back, "was the model even loaded?" is the first question to answer.
+   */
+  getModel(): unknown {
+    return this.readyModel
   }
 
   private setState(next: AiClientState): void {
@@ -421,17 +457,34 @@ export class AiClient {
         this.reconnectAttempt = 0
         console.log("[Gate3] ready 수신. 클라이언트 수신 시각=", new Date().toISOString())
         console.log("[Gate3] ready server_time=", m?.server_time)
-        console.log("[Gate3] ready model=", JSON.stringify(m?.model))
+        this.readyModel = m?.model
+        console.log("[Gate3] ready model=", JSON.stringify(this.readyModel))
         console.log("[Gate3] ready 전문:", JSON.stringify(parsed, null, 2))
+        // Reconnects re-fire this, letting the caller return to ai_ready.
+        try {
+          this.onReady?.()
+        } catch (err) {
+          console.error("[Gate3] onReady 콜백 예외:", err)
+        }
         break
       }
 
       case "ack": {
-        // Gate 3 sends no stream_start/stream_stop, so an ack here would be a
-        // surprise — logged in full rather than assumed irrelevant.
+        const cmid = m?.client_message_id
         console.log("[Gate3] ack status=", m?.status)
         console.log("[Gate3] ack stream_id=", m?.stream_id)
-        console.log("[Gate3] ack client_message_id=", m?.client_message_id)
+        console.log("[Gate3] ack client_message_id=", cmid)
+        console.log("[Gate3] ack 수신 시각=", new Date().toISOString())
+
+        // Round-trip for the stream_start / stream_stop we sent. This is the
+        // number that says whether the server is keeping up.
+        if (typeof cmid === "string") {
+          const pending = this.pendingAcks.get(cmid)
+          if (pending !== undefined) {
+            this.pendingAcks.delete(cmid)
+            console.log(`[Gate3] ack ${pending.label} 왕복 ${Date.now() - pending.sentAt}ms`)
+          }
+        }
         console.log("[Gate3] ack 전문:", JSON.stringify(parsed))
         break
       }
@@ -441,11 +494,9 @@ export class AiClient {
         console.log("[Gate3] result.text=", r?.text)
         console.log("[Gate3] result.confidence=", r?.confidence)
         console.log("[Gate3] result.is_final=", r?.is_final)
-        // The server has no top-level `sequence_index`; the nearest field is
-        // result.sequence.window_index (sequence_service.metadata()). Both are
-        // read so whichever the server actually sends shows up.
-        const sequenceIndex = r?.sequence_index ?? asRecord(r?.sequence)?.window_index
-        console.log("[Gate3] result.sequence_index(=sequence.window_index)=", sequenceIndex)
+        // The index field is result.sequence.window_index — confirmed against
+        // sequence_service.metadata(). There is no `sequence_index` on the wire.
+        console.log("[Gate3] result.sequence.window_index=", asRecord(r?.sequence)?.window_index)
         console.log("[Gate3] result.sequence=", JSON.stringify(r?.sequence))
         break
       }
@@ -519,34 +570,84 @@ export class AiClient {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Stream messages (Gate 4)
+  // -------------------------------------------------------------------------
+
   /**
-   * Full teardown, long-press triggered: stop message → close(1000) →
-   * POST /stop. Steps 1-2 are synchronous; step 3 is awaited internally.
+   * Tell the AI server to start pulling the Mentra WHEP stream.
+   *
+   * Guarded by `streamStartSent`: one start per stream_id, ever. Synchronous,
+   * so it is safe from any callback. Returns false when nothing was sent.
    */
-  shutdown(reason: string): void {
-    if (this.state === "idle" && this.ws === undefined && this.sessionId === undefined) {
-      console.warn("[Gate3] shutdown 무시 — 연결된 적 없다")
-      return
-    }
-    // Set first: onclose fires during step 2 and must not schedule a reconnect.
-    this.shuttingDown = true
-    this.setState("closing")
-    this.clearHandshakeTimer()
-    if (this.reconnectTimer !== undefined) {
-      clearTimeout(this.reconnectTimer)
-      this.reconnectTimer = undefined
-    }
-
+  sendStreamStart(streamId: string, webrtcUrl: string): boolean {
     const sessionId = this.sessionId
-    this.sendStopMessage(reason)
+    if (sessionId === undefined) {
+      console.error("[Gate4] stream_start 전송 불가 — AI session_id 없음")
+      return false
+    }
+    if (this.streamStartSent.has(streamId)) {
+      console.warn("[Gate4] stream_start 중복 방지 — 이미 보낸 stream_id:", streamId)
+      return false
+    }
 
-    // The server closes with 1000 on its own once it processes `stop`, so this
-    // may be a no-op depending on which side wins the race. Both are fine.
-    this.closeSocket(1000, reason)
+    const clientMessageId = `stream-start-${Date.now()}`
+    const sent = this.sendJson(
+      {
+        // stream_start/stream_stop ride the WebRTC schema, not HELLO_SCHEMA.
+        type: "stream_start",
+        schema_version: STREAM_SCHEMA,
+        session_id: sessionId,
+        stream_id: streamId,
+        webrtc_url: webrtcUrl,
+        client_message_id: clientMessageId,
+      },
+      "stream_start",
+    )
+    if (!sent) return false
 
-    void this.postStop(sessionId).catch((err) => {
-      console.error("[Gate3] postStop 최상위 예외:", err)
-    })
+    this.streamStartSent.add(streamId)
+    this.pendingAcks.set(clientMessageId, {label: "stream_start", sentAt: Date.now()})
+    console.log("[Gate4] stream_start 전송 시각=", new Date().toISOString())
+    // Re-logged here on purpose: if frames flow but no result ever arrives,
+    // this line answers "was the model loaded at the time?".
+    console.log("[Gate4] 스트림 시작 시점 model=", JSON.stringify(this.readyModel))
+    return sent
+  }
+
+  /**
+   * Tell the AI server to stop pulling. Guarded by `streamStopSent` so the
+   * shared cleanup path can run from stop / error / disconnect without
+   * emitting duplicates. Synchronous — safe from beforeDisconnect.
+   */
+  sendStreamStop(streamId: string): boolean {
+    const sessionId = this.sessionId
+    if (sessionId === undefined) {
+      console.error("[Gate4] stream_stop 전송 불가 — AI session_id 없음")
+      return false
+    }
+    if (this.streamStopSent.has(streamId)) {
+      console.warn("[Gate4] stream_stop 중복 방지 — 이미 보낸 stream_id:", streamId)
+      return false
+    }
+
+    const clientMessageId = `stream-stop-${Date.now()}`
+    const sent = this.sendJson(
+      {
+        type: "stream_stop",
+        schema_version: STREAM_SCHEMA,
+        session_id: sessionId,
+        stream_id: streamId,
+        client_message_id: clientMessageId,
+      },
+      "stream_stop",
+    )
+    if (!sent) return false
+
+    this.streamStopSent.add(streamId)
+    this.pendingAcks.set(clientMessageId, {label: "stream_stop", sentAt: Date.now()})
+    console.log("[Gate4] stream_stop 전송 시각=", new Date().toISOString())
+    return sent
   }
 
   /**
@@ -586,10 +687,25 @@ export class AiClient {
   }
 
   /**
-   * POST /v1/sessions/{id}/stop. Idempotent: the server keeps stopped sessions
-   * until TTL, so this returns 200 even when the `stop` message already ran
-   * stop_session() server-side. A 404 means the record was already gone.
+   * POST /v1/sessions/{id}/stop, best effort.
+   *
+   * Idempotent server-side: stop_session() marks the record "stopped" but
+   * keeps it until TTL, so this returns 200 even when the `stop` WS message
+   * already ran it. Safe to call more than once.
+   *
+   * Called from the disconnect path, where completion is NOT guaranteed — the
+   * host tears the JSContext down without waiting. A failure here is normal
+   * and not an error: the server session expires on its own at `expires_at`
+   * (creation + SESSION_TTL_SECONDS, 1 hour by default), so nothing leaks
+   * permanently even when this never lands.
    */
+  postStopBestEffort(): void {
+    const sessionId = this.sessionId
+    void this.postStop(sessionId).catch((err) => {
+      console.warn("[Gate3] postStop 예외 (정상 취급 — 세션은 expires_at 에 만료된다):", err)
+    })
+  }
+
   private async postStop(sessionId: string | undefined): Promise<void> {
     if (sessionId === undefined) {
       console.warn("[Gate3] POST /stop 생략 — session_id 없음")
