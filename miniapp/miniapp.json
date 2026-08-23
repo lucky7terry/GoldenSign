@@ -12,7 +12,12 @@
     "background": "background/index.js",
     "ui": "ui/index.html"
   },
-  "permissions": [],
+  "permissions": [
+    {
+      "type": "CAMERA",
+      "description": "상대방의 수어를 인식하기 위해 안경 카메라를 사용합니다"
+    }
+  ],
   "hardwareRequirements": [
     {
       "type": "CAMERA",
@@ -20,7 +25,11 @@
     },
     {
       "type": "MICROPHONE",
-      "level": "REQUIRED"
+      "level": "OPTIONAL"
+    },
+    {
+      "type": "WIFI",
+      "level": "OPTIONAL"
     }
   ]
 }
