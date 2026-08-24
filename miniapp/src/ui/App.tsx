@@ -65,6 +65,33 @@ function fmtWindowIndex(value: number | undefined): string {
   return String(value)
 }
 
+/**
+ * Fold the snapshot's history in UNDER the results that already arrived live.
+ *
+ * history-then-live because history is older by construction. Where the same
+ * windowIndex appears in both, the live copy wins: it came from a later
+ * broadcast and may carry an upgraded isFinal / confidence for that window.
+ *
+ * windowIndex -1 is EXEMPT from the dedupe. Background writes -1 when the
+ * server omitted `result.sequence.window_index`, so it is a sentinel, not an
+ * identity — two unrelated results both carrying -1 must both survive, and
+ * collapsing them would silently delete recognition history.
+ */
+function mergeResults(
+  history: Channels["recognition:result"][],
+  live: Channels["recognition:result"][],
+): Channels["recognition:result"][] {
+  const liveIndexes = new Set<number>()
+  for (const r of live) {
+    if (r.windowIndex !== -1) liveIndexes.add(r.windowIndex)
+  }
+
+  const kept = history.filter((r) => r.windowIndex === -1 || !liveIndexes.has(r.windowIndex))
+  // Dedupe BEFORE the cap: slicing first would leave the buffer short by
+  // however many duplicates the merge dropped.
+  return [...kept, ...live].slice(-MAX_RESULTS)
+}
+
 // ---------------------------------------------------------------------------
 // State → Korean copy
 //
@@ -335,27 +362,32 @@ export function App() {
     // Subscribe FIRST, then ready(), then ask. Background flushes on ready, so
     // a broadcast arriving before the handlers exist would need the SDK's
     // 32-deep inbound buffer to save us — ordering it correctly costs nothing.
-    let gotBroadcast = false
+    // Tracked PER SLOT, not as one boolean. Opening the UI mid-stream means
+    // recognition:result fires several times per second, so a single flag would
+    // always be set before the RPC returned — and every other slot, including
+    // the 20-deep result history, would be thrown away with it. That would
+    // defeat the entire reason getSnapshot exists.
+    const seen = new Set<string>()
 
     const offs = [
       mentra.on("ai:state", (ai) => {
-        gotBroadcast = true
+        seen.add("ai")
         setSnap((s) => ({...s, ai}))
       }),
       mentra.on("stream:state", (stream) => {
-        gotBroadcast = true
+        seen.add("stream")
         setSnap((s) => ({...s, stream}))
       }),
       mentra.on("glasses:state", (glasses) => {
-        gotBroadcast = true
+        seen.add("glasses")
         setSnap((s) => ({...s, glasses}))
       }),
       mentra.on("stream:diagnostics", (diagnostics) => {
-        gotBroadcast = true
+        seen.add("diagnostics")
         setSnap((s) => ({...s, diagnostics}))
       }),
       mentra.on("recognition:result", (r) => {
-        gotBroadcast = true
+        seen.add("results")
         setSnap((s) => ({...s, results: [...s.results, r].slice(-MAX_RESULTS)}))
       }),
       mentra.on("error", (e) => {
@@ -369,8 +401,17 @@ export function App() {
 
     getSnapshot({}, {timeout: SNAPSHOT_TIMEOUT_MS})
       .then((snapshot) => {
-        // A broadcast is newer than the snapshot by definition — never roll back.
-        if (!gotBroadcast) setSnap(snapshot)
+        // Per slot: a broadcast is newer than the snapshot, so a slot that
+        // already got one keeps its live value. Untouched slots take the
+        // snapshot's. Results are the exception — history and live are merged
+        // rather than one discarding the other.
+        setSnap((s) => ({
+          ai: seen.has("ai") ? s.ai : snapshot.ai,
+          stream: seen.has("stream") ? s.stream : snapshot.stream,
+          glasses: seen.has("glasses") ? s.glasses : snapshot.glasses,
+          diagnostics: seen.has("diagnostics") ? s.diagnostics : snapshot.diagnostics,
+          results: seen.has("results") ? mergeResults(snapshot.results, s.results) : snapshot.results,
+        }))
         setPhase({kind: "ready"})
       })
       .catch((err: unknown) => {
