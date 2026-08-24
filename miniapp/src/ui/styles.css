@@ -101,6 +101,17 @@ body {
   flex-direction: column;
 }
 
+/* Reserves the phone status bar above MiniappHeader. paddingTop and minHeight
+   are set inline from useSafeArea — see the comment at the JSX call site.
+
+   flex-column is load-bearing: it prevents the header's own marginTop from
+   collapsing through this wrapper when insets.top is 0. */
+.gs-headerbar {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+}
+
 /* MiniappHeader is "unstyled beyond the layout" — it computes marginTop /
    paddingLeft / paddingRight / height inline and leaves the paint to us. */
 .gs-header {

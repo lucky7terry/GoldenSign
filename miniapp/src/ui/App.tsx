@@ -353,7 +353,7 @@ export function App() {
   // useSafeArea) and never change at runtime — the host would have to force a
   // reload. So there is no rotation handling here: a resize listener would fire
   // but the values behind it would be identical.
-  const {insets} = useSafeArea()
+  const {insets, capsuleMenu} = useSafeArea()
 
   // Both generics must be written out; neither is inferred from the argument.
   const getSnapshot = useRpc<Channels, "getSnapshot">("getSnapshot")
@@ -434,17 +434,43 @@ export function App() {
   return (
     <div
       className="gs-root"
-      // MiniappHeader handles the TOP inset itself (useCapsuleHeaderStyle sets
-      // marginTop and keeps clear of the capsule menu). It does not touch the
-      // other three, so the body pads them here.
+      // The top inset is handled by .gs-headerbar below, not here — see there.
       style={{
         paddingLeft: insets.left,
         paddingRight: insets.right,
         paddingBottom: insets.bottom,
       }}
     >
-      {/* No onBack: this is the root screen, there is nowhere to return to. */}
-      <MiniappHeader title="Golden Sign" className="gs-header" />
+      {/*
+        MiniappHeader does NOT reserve the status bar. useCapsuleHeaderStyle
+        computes `marginTop = capsuleMenu.top - insets.top` — it SUBTRACTS the
+        top inset, which only lands correctly if the container has already
+        padded by that much. We never did, so the whole header sat insets.top
+        (~47-59px on iPhone) too high and the title printed over the clock.
+
+        Padding here rather than inside the header keeps the SDK's own maths
+        untouched. With insets.top === 0 this is a no-op.
+
+        minHeight is a floor, not a layout driver: it guarantees that whatever
+        follows this bar starts at or below the capsule menu's bottom edge, in
+        the same viewport-absolute coordinates capsuleMenu.top uses. With the
+        padding above in place the natural height already exceeds it, so it
+        normally does nothing — it only bites if the SDK's alignment maths
+        changes under us. Null capsuleMenu (older hosts) → no constraint.
+
+        flex-column matters: it stops the header's own marginTop from collapsing
+        out through this wrapper when insets.top happens to be 0.
+      */}
+      <div
+        className="gs-headerbar"
+        style={{
+          paddingTop: insets.top,
+          minHeight: capsuleMenu === null ? undefined : capsuleMenu.top + capsuleMenu.height,
+        }}
+      >
+        {/* No onBack: this is the root screen, there is nowhere to return to. */}
+        <MiniappHeader title="Golden Sign" className="gs-header" />
+      </div>
 
       <main className="gs-main">
         {phase.kind === "loading" ? (
