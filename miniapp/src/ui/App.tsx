@@ -495,7 +495,22 @@ export function App() {
           <p className="gs-status-detail">{stream.detail}</p>
         </section>
 
-        <p className="gs-hint">안경 관자놀이 버튼을 길게 눌러 시작하세요</p>
+        {/*
+          One box, two mutually exclusive lines — never both at once. The start
+          hint belongs to the waiting states; the posture hint only makes sense
+          while frames are actually being measured.
+
+          Measured on-device: looking only at the other person's FACE gives face
+          70/70 but hands 0/21 — the hands are outside the glasses' field of
+          view entirely, so recognition has nothing to work with. Framing face
+          and hands together gives 70/70 and 21/21. That's why this line is
+          worth screen space during streaming.
+        */}
+        <p className="gs-hint">
+          {snap.stream.state === "streaming"
+            ? "상대방의 얼굴과 손이 함께 보이도록 바라보세요"
+            : "안경 관자놀이 버튼을 길게 눌러 시작하세요"}
+        </p>
 
         <ResultPanel results={snap.results} />
 
