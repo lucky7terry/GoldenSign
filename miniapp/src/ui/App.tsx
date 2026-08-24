@@ -1,15 +1,15 @@
 /**
- * WebView UI — subscription and display only.
+ * WebView UI. 구독하고 표시하는 일만 한다.
  *
- * Owns no network, no AI socket, no stream control, no storage. Every value on
- * screen arrived over a typed channel or from the single `getSnapshot` call on
- * mount (see src/shared/channels.ts). There is deliberately no "start" button:
- * streaming is triggered by the glasses temple button and nothing else.
+ * 네트워크도 AI 소켓도 스트림 제어도 저장소도 소유하지 않는다. 화면의 모든 값은
+ * 타입 지정 채널로 왔거나 마운트 시 한 번의 `getSnapshot` 으로 온 것이다
+ * (src/shared/channels.ts 참고). "변환 시작" 버튼을 두지 않은 것도 의도다.
+ * 스트리밍은 안경 관자놀이 버튼으로만 시작한다.
  *
- * Why the snapshot is mandatory rather than nice-to-have: `session.ui.send`
- * silently DROPS when no WebView is bound, so background keeps no backlog for
- * us. A WebView that mounts mid-session has missed every broadcast so far and
- * can only catch up by asking.
+ * 스냅샷이 선택이 아니라 필수인 이유: `session.ui.send` 는 바인딩된 WebView 가
+ * 없으면 조용히 드롭하고 background 가 밀린 것을 모아 두지 않는다. 세션 도중
+ * 마운트된 WebView 는 그때까지의 모든 방송을 놓친 상태라, 물어보는 것 말고는
+ * 따라잡을 방법이 없다.
  */
 
 import {useEffect, useState} from "react"
@@ -17,12 +17,12 @@ import {MiniappHeader, useRpc, useSafeArea} from "@mentra/miniapp/ui"
 import type {Channels, Snapshot} from "../shared/channels"
 
 /**
- * `mentra.request` has NO default timeout (ui/index.d.ts). Without this the
- * promise hangs forever whenever background isn't attached.
+ * `mentra.request` 에는 기본 timeout 이 없다(ui/index.d.ts). 이 값을 주지 않으면
+ * background 가 붙어 있지 않을 때 Promise 가 영원히 매달린다.
  */
 const SNAPSHOT_TIMEOUT_MS = 3000
 
-/** Mirrors background's own cap so the two buffers can't disagree. */
+/** background 쪽 상한과 같은 값. 두 버퍼가 어긋나지 않게 한다. */
 const MAX_RESULTS = 20
 
 type Tone = "idle" | "connecting" | "waiting" | "streaming" | "error"
@@ -45,10 +45,10 @@ const EMPTY_SNAPSHOT: Snapshot = {
 }
 
 // ---------------------------------------------------------------------------
-// Formatting
+// 표시 포맷
 // ---------------------------------------------------------------------------
 
-/** null / undefined both render as "—". A raw `undefined` must never reach the DOM. */
+/** null 과 undefined 모두 "—" 로 표시한다. 날 `undefined` 가 DOM 에 닿으면 안 된다. */
 function fmt(value: string | number | boolean | null | undefined): string {
   if (value === null || value === undefined) return "—"
   if (typeof value === "boolean") return value ? "예" : "아니오"
@@ -56,9 +56,10 @@ function fmt(value: string | number | boolean | null | undefined): string {
 }
 
 /**
- * `windowIndex` is a required `number` on the channel, so background writes -1
- * when the server omitted `result.sequence.window_index`. That's a sentinel,
- * not an index — rendering "w-1" would read as real data.
+ * 채널에서 `windowIndex` 는 필수 `number` 라, 서버가
+ * `result.sequence.window_index` 를 주지 않으면 background 가 -1 을 쓴다
+ * (60프레임이 차기 전 구간에서 서버가 null 로 보낸다). 인덱스가 아니라
+ * 센티널이므로 "w-1" 로 그리면 실제 데이터처럼 읽힌다.
  */
 function fmtWindowIndex(value: number | undefined): string {
   if (value === undefined || value === -1) return "—"
@@ -66,16 +67,16 @@ function fmtWindowIndex(value: number | undefined): string {
 }
 
 /**
- * Fold the snapshot's history in UNDER the results that already arrived live.
+ * 스냅샷의 히스토리를 이미 도착한 live 결과 *아래* 로 접어 넣는다.
  *
- * history-then-live because history is older by construction. Where the same
- * windowIndex appears in both, the live copy wins: it came from a later
- * broadcast and may carry an upgraded isFinal / confidence for that window.
+ * 히스토리가 먼저이고 live 가 뒤인 이유는 히스토리가 구조적으로 더 오래됐기
+ * 때문이다. 같은 windowIndex 가 양쪽에 있으면 live 가 이긴다 — 더 나중 방송이라
+ * 그 창의 isFinal / confidence 가 갱신돼 있을 수 있다.
  *
- * windowIndex -1 is EXEMPT from the dedupe. Background writes -1 when the
- * server omitted `result.sequence.window_index`, so it is a sentinel, not an
- * identity — two unrelated results both carrying -1 must both survive, and
- * collapsing them would silently delete recognition history.
+ * windowIndex 가 -1 인 항목은 중복 판정에서 제외한다. -1 은 서버가 값을 주지
+ * 않았을 때 background 가 넣는 센티널이지 식별자가 아니다. 서로 무관한 두 결과가
+ * 모두 -1 을 달고 있을 수 있으므로 둘 다 살아남아야 하고, 합쳐 버리면 인식
+ * 기록이 조용히 지워진다.
  */
 function mergeResults(
   history: Channels["recognition:result"][],
@@ -87,16 +88,16 @@ function mergeResults(
   }
 
   const kept = history.filter((r) => r.windowIndex === -1 || !liveIndexes.has(r.windowIndex))
-  // Dedupe BEFORE the cap: slicing first would leave the buffer short by
-  // however many duplicates the merge dropped.
+  // 상한을 걸기 전에 중복을 제거한다. 먼저 자르면 병합에서 지운 중복 수만큼
+  // 버퍼가 모자라게 된다.
   return [...kept, ...live].slice(-MAX_RESULTS)
 }
 
 // ---------------------------------------------------------------------------
-// State → Korean copy
+// 상태 → 화면 문구
 //
-// The raw state strings (idle / ai_ready / …) are internal vocabulary. They
-// appear ONLY in the diagnostics panel; everything above it is wearer-facing.
+// 원본 상태 문자열(idle / ai_ready / …)은 내부 용어다. 진단 패널에만 노출되고,
+// 그 위의 모든 것은 착용자를 향한 문장이다.
 // ---------------------------------------------------------------------------
 
 interface StateView {
@@ -106,8 +107,8 @@ interface StateView {
 }
 
 /**
- * Error copy names the cause AND what is still working, so the wearer knows
- * whether to retry or to fix something first.
+ * 오류 문구는 원인과 함께 아직 살아 있는 항목도 말한다. 그래야 착용자가 다시
+ * 시도하면 되는지, 먼저 고칠 게 있는지 판단할 수 있다.
  */
 function describeError(snap: Snapshot): string {
   const alive: string[] = []
@@ -187,7 +188,7 @@ function describeRpcFailure(name: string | undefined, err: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
-// Pieces
+// 조각들
 // ---------------------------------------------------------------------------
 
 function StatusBadge({name, view}: {name: string; view: StateView}) {
@@ -201,16 +202,14 @@ function StatusBadge({name, view}: {name: string; view: StateView}) {
 }
 
 /**
- * The visual channel, isolated on purpose.
+ * 시각 피드백. 일부러 이 컴포넌트 하나로 격리해 두었다.
  *
- * Today it renders a pulsing indicator and nothing else. There is NO live video
- * here: the WebView has no camera access (background owns all hardware) and
- * echoing the glasses feed back to the phone would double the bandwidth for no
- * diagnostic gain.
+ * 지금은 맥동 인디케이터만 그린다. 라이브 영상은 없다 — WebView 에는 카메라
+ * 접근 권한이 없고(하드웨어는 전부 background 소유), 안경 영상을 폰으로 되돌려
+ * 보내면 진단상 이득 없이 대역폭만 두 배가 된다.
  *
- * When the server eventually ships keypoints, this component is the only place
- * that changes. Nothing has been pre-built for that — no channel, no parser —
- * because the server-side keypoint schema does not exist yet.
+ * 나중에 서버가 keypoints 를 싣기 시작하면 바뀌는 곳은 여기뿐이다. 그것을 위한
+ * 채널도 파서도 미리 만들지 않았다. 서버 쪽 keypoint 스키마가 아직 없기 때문이다.
  */
 function VisualFeedback({tone, animated}: {tone: Tone; animated: boolean}) {
   return (
@@ -222,9 +221,9 @@ function VisualFeedback({tone, animated}: {tone: Tone; animated: boolean}) {
 }
 
 /**
- * Interim vs final is signalled by border style, weight, opacity AND a trailing
- * ellipsis — never by color alone. Stage lighting and re-encoded demo video
- * flatten hue differences; shape survives both.
+ * 중간 결과와 확정 결과는 테두리 스타일·굵기·투명도, 그리고 뒤에 붙는 말줄임표로
+ * 구분한다. 색만으로 구분하지 않는다. 시연 조명과 재인코딩된 영상은 색차를
+ * 뭉개지만 형태는 살아남는다.
  */
 function ResultPanel({results}: {results: Channels["recognition:result"][]}) {
   const finals = results.filter((r) => r.isFinal)
@@ -240,8 +239,8 @@ function ResultPanel({results}: {results: Channels["recognition:result"][]}) {
         <div className="gs-chips">
           {results.map((r, i) => (
             <span
-              // Results carry no unique id; index + windowIndex is stable enough
-              // for an append-only, capped list.
+              // 결과에는 고유 id 가 없다. 뒤에만 붙고 상한이 있는 목록이라
+              // 인덱스 + windowIndex 조합이면 충분히 안정적이다.
               key={`${i}-${r.windowIndex}`}
               className={`gs-chip ${r.isFinal ? "gs-chip-final" : "gs-chip-interim"}`}
             >
@@ -272,10 +271,10 @@ function DiagnosticsPanel({snap}: {snap: Snapshot}) {
           <dt>fps</dt>
           <dd className="gs-mono">
             {/*
-              Three stages, but the app only knows two. The third — how many
-              frames the AI server actually processed — never reaches the
-              miniapp: no channel carries it and the server's `result` payload
-              has no such field. Left as "—" rather than guessed.
+              세 칸이지만 앱이 아는 것은 둘뿐이다. 세 번째 — AI 서버가 실제로
+              처리한 프레임 수 — 는 미니앱에 닿지 않는다. 실어 오는 채널도 없고
+              서버 `result` 페이로드에도 그런 필드가 없다. 추측하는 대신 "—" 로
+              둔다.
             */}
             {fmt(d.requestedFps)} → {fmt(d.resolvedFps)} → —
           </dd>
@@ -342,31 +341,30 @@ function DiagnosticsPanel({snap}: {snap: Snapshot}) {
 }
 
 // ---------------------------------------------------------------------------
-// Root
+// 루트
 // ---------------------------------------------------------------------------
 
 export function App() {
   const [snap, setSnap] = useState<Snapshot>(EMPTY_SNAPSHOT)
   const [phase, setPhase] = useState<Phase>({kind: "loading"})
 
-  // insets and capsuleMenu are read ONCE at mount (useState initialiser inside
-  // useSafeArea) and never change at runtime — the host would have to force a
-  // reload. So there is no rotation handling here: a resize listener would fire
-  // but the values behind it would be identical.
+  // insets 와 capsuleMenu 는 마운트 시 한 번만 읽힌다(useSafeArea 내부의
+  // useState 이니셜라이저). 런타임에 갱신되지 않으며 바뀌려면 호스트가 리로드를
+  // 강제해야 한다. 그래서 회전 대응이 없다 — resize 리스너를 달아도 값이 그대로다.
   const {insets, capsuleMenu} = useSafeArea()
 
-  // Both generics must be written out; neither is inferred from the argument.
+  // 제네릭 두 개를 직접 써야 한다. 인자에서 추론되지 않는다.
   const getSnapshot = useRpc<Channels, "getSnapshot">("getSnapshot")
 
   useEffect(() => {
-    // Subscribe FIRST, then ready(), then ask. Background flushes on ready, so
-    // a broadcast arriving before the handlers exist would need the SDK's
-    // 32-deep inbound buffer to save us — ordering it correctly costs nothing.
-    // Tracked PER SLOT, not as one boolean. Opening the UI mid-stream means
-    // recognition:result fires several times per second, so a single flag would
-    // always be set before the RPC returned — and every other slot, including
-    // the 20-deep result history, would be thrown away with it. That would
-    // defeat the entire reason getSnapshot exists.
+    // 순서는 구독 → ready() → 요청이다. background 가 ready 시점에 밀린 것을
+    // 흘려보내므로, 핸들러가 없는 사이 도착한 방송은 SDK 의 32개 인바운드 버퍼에
+    // 기대야 한다. 순서를 맞추는 데 드는 비용이 0 이라 맞춰 둔다.
+    //
+    // 슬롯별로 추적한다. 불리언 하나로 두면 안 된다 — 스트리밍 중 UI 를 열면
+    // recognition:result 가 초당 여러 번 오므로 RPC 왕복 전에 반드시 참이 되고,
+    // 결과 히스토리 20개를 포함한 나머지 슬롯이 통째로 버려진다. getSnapshot 이
+    // 존재하는 이유 자체가 무효가 된다.
     const seen = new Set<string>()
 
     const offs = [
@@ -395,16 +393,16 @@ export function App() {
       }),
     ]
 
-    // MUST run once on bootstrap. Idempotent per the SDK. Called here rather
-    // than in main.tsx so it lands after the handlers above are armed.
+    // 부트스트랩에서 반드시 한 번 불러야 한다. SDK 가 멱등이라고 명시한다.
+    // main.tsx 가 아니라 여기서 부르는 이유는 위 핸들러가 걸린 뒤에 도달하게
+    // 하려는 것이다.
     mentra.ready()
 
     getSnapshot({}, {timeout: SNAPSHOT_TIMEOUT_MS})
       .then((snapshot) => {
-        // Per slot: a broadcast is newer than the snapshot, so a slot that
-        // already got one keeps its live value. Untouched slots take the
-        // snapshot's. Results are the exception — history and live are merged
-        // rather than one discarding the other.
+        // 슬롯 단위로 판단한다. 방송은 스냅샷보다 새로우므로 이미 방송을 받은
+        // 슬롯은 live 값을 지키고, 받지 않은 슬롯만 스냅샷 값을 취한다. 결과는
+        // 예외다 — 한쪽이 다른 쪽을 버리지 않고 히스토리와 live 를 병합한다.
         setSnap((s) => ({
           ai: seen.has("ai") ? s.ai : snapshot.ai,
           stream: seen.has("stream") ? s.stream : snapshot.stream,
@@ -415,10 +413,10 @@ export function App() {
         setPhase({kind: "ready"})
       })
       .catch((err: unknown) => {
-        // These errors are constructed in the WebView's bare runtime scope, so
-        // `instanceof` is unreliable. Match on err.name — the SDK says so.
+        // 이 에러들은 WebView 의 bare runtime 스코프에서 생성되므로
+        // `instanceof` 가 통하지 않는다. SDK 안내대로 err.name 으로 판별한다.
         const name = (err as {name?: string} | null)?.name
-        // Unmount: useRpc aborts every in-flight call for us. Nothing to clean.
+        // 언마운트. useRpc 가 진행 중인 호출을 알아서 abort 한다. 정리할 것 없음.
         if (name === "AbortError") return
         setPhase({kind: "error", message: describeRpcFailure(name, err)})
       })
@@ -434,7 +432,7 @@ export function App() {
   return (
     <div
       className="gs-root"
-      // The top inset is handled by .gs-headerbar below, not here — see there.
+      // 상단 inset 은 여기가 아니라 아래 .gs-headerbar 가 처리한다 — 그쪽 주석 참고.
       style={{
         paddingLeft: insets.left,
         paddingRight: insets.right,
@@ -442,24 +440,23 @@ export function App() {
       }}
     >
       {/*
-        MiniappHeader does NOT reserve the status bar. useCapsuleHeaderStyle
-        computes `marginTop = capsuleMenu.top - insets.top` — it SUBTRACTS the
-        top inset, which only lands correctly if the container has already
-        padded by that much. We never did, so the whole header sat insets.top
-        (~47-59px on iPhone) too high and the title printed over the clock.
+        MiniappHeader 는 폰 상태 표시줄을 확보해 주지 않는다. useCapsuleHeaderStyle
+        은 `marginTop = capsuleMenu.top - insets.top` 을 계산한다 — 상단 inset 을
+        *빼는* 식이라, 컨테이너가 그만큼 이미 패딩을 준 경우에만 결과가 맞는다.
+        우리가 주지 않아서 헤더 전체가 insets.top(아이폰 기준 약 47~59px)만큼
+        위로 올라갔고 제목이 시계 위에 겹쳐 찍혔다.
 
-        Padding here rather than inside the header keeps the SDK's own maths
-        untouched. With insets.top === 0 this is a no-op.
+        헤더 내부가 아니라 여기서 패딩을 주면 SDK 의 계산을 건드리지 않는다.
+        insets.top 이 0 이면 아무 일도 일어나지 않는다.
 
-        minHeight is a floor, not a layout driver: it guarantees that whatever
-        follows this bar starts at or below the capsule menu's bottom edge, in
-        the same viewport-absolute coordinates capsuleMenu.top uses. With the
-        padding above in place the natural height already exceeds it, so it
-        normally does nothing — it only bites if the SDK's alignment maths
-        changes under us. Null capsuleMenu (older hosts) → no constraint.
+        minHeight 는 레이아웃을 주도하는 값이 아니라 바닥값이다. 이 막대 다음에
+        오는 것이 캡슐 메뉴 하단 이하에서 시작함을 보장한다(capsuleMenu.top 과
+        같은 뷰포트 절대 좌표 기준). 위 패딩이 들어간 상태에서는 자연 높이가 이미
+        이 값을 넘으므로 평소에는 아무 역할도 하지 않는다 — SDK 의 정렬 계산이
+        바뀔 때만 걸린다. capsuleMenu 가 null 이면(구버전 호스트) 제약 없음.
 
-        flex-column matters: it stops the header's own marginTop from collapsing
-        out through this wrapper when insets.top happens to be 0.
+        flex-column 은 필요해서 넣었다. insets.top 이 0 일 때 헤더 자신의
+        marginTop 이 이 래퍼 밖으로 마진 붕괴하는 것을 막는다.
       */}
       <div
         className="gs-headerbar"
@@ -468,7 +465,7 @@ export function App() {
           minHeight: capsuleMenu === null ? undefined : capsuleMenu.top + capsuleMenu.height,
         }}
       >
-        {/* No onBack: this is the root screen, there is nowhere to return to. */}
+        {/* onBack 을 주지 않는다. 루트 화면이라 돌아갈 곳이 없다. */}
         <MiniappHeader title="Golden Sign" className="gs-header" />
       </div>
 
@@ -496,15 +493,14 @@ export function App() {
         </section>
 
         {/*
-          One box, two mutually exclusive lines — never both at once. The start
-          hint belongs to the waiting states; the posture hint only makes sense
-          while frames are actually being measured.
+          박스 하나에 서로 배타적인 두 문구. 동시에 보이는 일은 없다. 시작 안내는
+          대기 상태의 것이고, 자세 안내는 실제로 프레임이 측정되는 동안에만
+          의미가 있다.
 
-          Measured on-device: looking only at the other person's FACE gives face
-          70/70 but hands 0/21 — the hands are outside the glasses' field of
-          view entirely, so recognition has nothing to work with. Framing face
-          and hands together gives 70/70 and 21/21. That's why this line is
-          worth screen space during streaming.
+          실측: 상대의 얼굴만 응시하면 얼굴 70/70, 양손 0/21 이다 — 손이 안경
+          시야 밖으로 완전히 벗어나 인식할 대상이 없다. 얼굴과 손이 함께 보이도록
+          잡으면 70/70, 21/21 이 된다. 스트리밍 중 이 줄이 화면을 차지할 값어치가
+          있는 이유다.
         */}
         <p className="gs-hint">
           {snap.stream.state === "streaming"

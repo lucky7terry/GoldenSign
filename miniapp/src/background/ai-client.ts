@@ -1,43 +1,42 @@
 /**
- * Gate 3 — AI server connection (handshake only).
+ * AI 서버 연결 담당. POST /v1/sessions → WebSocket(ws_url) → hello → ready.
  *
- * Scope: POST /v1/sessions → WebSocket(ws_url) → hello → ready. Nothing else.
- * No stream is started here; `session.stream.*` and `session.ui.*` are never
- * touched by this module. Frame sending is a later Gate.
+ * 이 모듈은 AI 소켓만 소유한다. `session.stream.*` 도 `session.ui.*` 도 건드리지
+ * 않는다. 인식 결과는 `onResult` 콜백으로 순수 데이터만 내보내고, 그것을 UI 로
+ * 보낼지는 index.ts 가 정한다.
  *
- * Runtime is a bare JS engine (iOS JavaScriptCore / Android QuickJS):
- * runtime `fetch` / `WebSocket` only. No npm packages, no Node API, and
- * `new URL()` is never called — the URL global's presence is unconfirmed, so
- * `probeRuntime()` reports it but nothing depends on it.
+ * 런타임은 bare JS 엔진(iOS JavaScriptCore / Android QuickJS)이다. npm 패키지도
+ * Node API 도 없고, `typeof URL === "undefined"` 로 실측됐으므로 `new URL()` 은
+ * 쓸 수 없다. URL 파싱이 필요하면 정규식뿐이다. fetch / WebSocket /
+ * localStorage 는 사용 가능한 것으로 실측됐다.
  *
- * Wire contract verified against the running server (not assumed):
+ * 와이어 규약은 실행 중인 서버 코드로 대조 확인한 것이다(추정 아님):
  *   server/app/api/sessions.py          POST /v1/sessions, POST /v1/sessions/{id}/stop
  *   server/app/api/session_websocket.py WS  /v1/sessions/{id}/ws, hello → ready
- *   server/app/schemas/websocket.py     required: type, schema_version, session_id
+ *   server/app/schemas/websocket.py     필수 필드: type, schema_version, session_id
  *   server/app/constants.py             SCHEMA_VERSION === HELLO_SCHEMA
  *
- * Two server behaviours this module is built around:
- *  1. On receiving `stop`, the server calls stop_session() and closes the
- *     socket with code 1000 itself. Our own close(1000) may therefore lose a
- *     race — that is expected, not an error.
- *  2. stop_session() marks status="stopped" but KEEPS the record until TTL,
- *     so the follow-up POST /stop still returns 200 (not 404). It is
- *     idempotent and worth sending even after the socket is gone.
+ * 이 모듈이 전제하는 서버 동작 두 가지:
+ *  1. `stop` 을 받으면 서버가 stop_session() 을 부르고 code 1000 으로 소켓을
+ *     직접 닫는다. 우리 쪽 close(1000) 이 경쟁에서 질 수 있는데 정상이다.
+ *  2. stop_session() 은 status="stopped" 로 표시할 뿐 TTL 까지 레코드를
+ *     유지한다. 그래서 뒤이은 POST /stop 도 404 가 아니라 200 을 돌려준다.
+ *     멱등이므로 소켓이 사라진 뒤에 보내도 무해하다.
  */
 
 import {AI_HTTP, CLIENT_NAME, HELLO_SCHEMA, STREAM_SCHEMA} from "../shared/config"
 
 // ---------------------------------------------------------------------------
-// Runtime capability probe
+// 런타임 전역 확인
 // ---------------------------------------------------------------------------
 
 /**
- * register.d.ts documents the polyfill as installing "__dispatch / __deliver /
- * timers / fetch / etc." — `fetch` is named explicitly but WebSocket only
- * hides inside "etc.", and has never been measured on-device. Without it this
- * whole Gate is impossible, so it is checked before anything else runs.
+ * register.d.ts 는 폴리필이 설치하는 것을 "__dispatch / __deliver / timers /
+ * fetch / etc." 라고만 적어 둔다. fetch 는 이름이 명시돼 있지만 WebSocket 은
+ * "etc." 안에 숨어 있어 실측 전까지 보장이 없었다. WebSocket 이 없으면 AI 연결
+ * 자체가 불가능하므로 다른 무엇보다 먼저 확인한다.
  *
- * Returns false when WebSocket is missing; the caller must then abort.
+ * WebSocket 이 없으면 false 를 돌려주고, 호출부는 거기서 중단해야 한다.
  */
 export function probeRuntime(): boolean {
   console.log("[Runtime] typeof fetch =", typeof fetch)
@@ -58,7 +57,7 @@ export function probeRuntime(): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Logging helpers
+// 로깅 헬퍼
 // ---------------------------------------------------------------------------
 
 type UnknownRecord = Record<string, unknown>
@@ -68,13 +67,13 @@ function asRecord(value: unknown): UnknownRecord | undefined {
 }
 
 /**
- * `fetch` rejects with a TypeError on transport-level failure, and Errors
- * serialize to `{}` under JSON.stringify — so name/message/stack are pulled
- * out explicitly. This is the log that distinguishes:
- *   - ATS / cleartext blocked  → reject before any bytes leave the phone
- *   - server not running       → connection refused
- *   - wrong LAN IP             → timeout / no route to host
- * The exact wording differs per platform, so the raw message is what matters.
+ * fetch 는 전송 계층 실패 시 TypeError 로 reject 하는데, Error 는
+ * JSON.stringify 에서 `{}` 로 뭉개진다. 그래서 name/message/stack 을 따로 꺼낸다.
+ * 이 로그가 구분해 주는 것:
+ *   - ATS / cleartext 차단 → 바이트가 폰을 떠나기도 전에 거부
+ *   - 서버 미기동          → connection refused
+ *   - LAN IP 오류          → timeout / no route to host
+ * 문구는 플랫폼마다 다르므로 결국 원본 message 가 판단 근거다.
  */
 function logFetchError(label: string, err: unknown): void {
   console.error(`[AI] ${label} fetch 실패 — err:`, err)
@@ -94,17 +93,19 @@ function logFetchError(label: string, err: unknown): void {
 }
 
 // ---------------------------------------------------------------------------
-// Client
+// 클라이언트
 // ---------------------------------------------------------------------------
 
 /**
- * A parsed `result` payload, handed to the caller via the `onResult` callback.
+ * 파싱된 `result` 페이로드. `onResult` 콜백으로 호출부에 전달된다.
  *
- * Deliberately plain data with no UI types: this module owns the AI socket and
- * nothing else. index.ts decides what reaches the WebView.
+ * UI 타입이 섞이지 않은 순수 데이터다. 이 모듈은 AI 소켓만 소유하고, WebView 로
+ * 무엇을 보낼지는 index.ts 가 정한다.
  *
- * `windowIndex` comes from `result.sequence.window_index` — there is no
- * `result.sequence_index` on the wire. `-1` means the server didn't send one.
+ * `windowIndex` 의 출처는 `result.sequence.window_index` 다.
+ * `result.sequence_index` 라는 필드는 와이어에 존재하지 않는다.
+ * 서버는 60프레임이 차기 전 구간에서 window_index 를 null 로 보내는데,
+ * 그 경우 -1 을 넣는다(센티널).
  */
 export interface AiRecognitionResult {
   text: string
@@ -122,12 +123,12 @@ export type AiClientState =
   | "closing"
   | "error"
 
-/** Backoff schedule for abnormal disconnects. */
+/** 비정상 종료 시 재연결 백오프. 1s → 2s → 4s → 8s → 16s, 5회로 종료. */
 const MAX_RECONNECT_ATTEMPTS = 5
 const RECONNECT_BASE_MS = 1000
 const RECONNECT_CAP_MS = 30_000
 
-/** How long to wait for `ready` after sending `hello` before treating it as a failure. */
+/** hello 를 보낸 뒤 ready 를 기다리는 한도. 넘기면 실패로 처리한다. */
 const HANDSHAKE_TIMEOUT_MS = 10_000
 
 export class AiClient {
@@ -138,29 +139,29 @@ export class AiClient {
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
   private handshakeTimer: ReturnType<typeof setTimeout> | undefined
-  /** Set before any intentional teardown so onclose does not schedule a reconnect. */
+  /** 의도된 종료 직전에 세운다. onclose 가 재연결을 걸지 않게 하는 유일한 근거. */
   private shuttingDown = false
 
-  /** `model` block from the last `ready`. Re-logged at stream start — see getModel(). */
+  /** 마지막 `ready` 의 `model` 블록. 스트림 시작 시 다시 찍는다 — getModel() 참고. */
   private readyModel: unknown
 
   /**
-   * Idempotency guards. A stream_start / stream_stop must never go out twice
-   * for the same stream_id: cleanup runs from stop, error and disconnect paths
-   * that can overlap, and duplicates would desync the server's stream state.
+   * 멱등성 가드. 같은 stream_id 로 stream_start / stream_stop 이 두 번 나가면
+   * 안 된다. 정리 경로가 stop·error·disconnect 세 갈래라 겹칠 수 있고, 중복이
+   * 나가면 서버의 스트림 상태와 어긋난다.
    */
   private readonly streamStartSent = new Set<string>()
   private readonly streamStopSent = new Set<string>()
 
-  /** client_message_id → send timestamp, for measuring ack round-trip. */
+  /** client_message_id → 전송 시각. ack 왕복 시간 측정용. */
   private readonly pendingAcks = new Map<string, {label: string; sentAt: number}>()
 
   /**
-   * @param userId  session.userId, sent as `user_id` on POST /v1/sessions.
-   * @param onReady Fired every time a `ready` arrives — including after a
-   *                reconnect, so the caller can re-enter its ai_ready state.
-   * @param onResult Fired once per `result` message with the parsed fields.
-   *                Pure data out; this class holds no reference to the UI.
+   * @param userId  session.userId. POST /v1/sessions 의 `user_id` 로 나간다.
+   * @param onReady `ready` 가 올 때마다 호출된다. 재연결 이후에도 다시 오므로
+   *                호출부가 ai_ready 상태로 복귀할 수 있다.
+   * @param onResult `result` 메시지 한 건마다 파싱된 필드로 호출된다.
+   *                순수 데이터만 나가며 이 클래스는 UI 를 참조하지 않는다.
    */
   constructor(
     private readonly userId: string,
@@ -176,15 +177,15 @@ export class AiClient {
     return this.sessionId
   }
 
-  /** True only when the socket is open AND the handshake completed. */
+  /** 소켓이 열려 있고 핸드셰이크까지 끝난 경우에만 true. */
   isReady(): boolean {
     return this.state === "ai_ready" && this.ws !== undefined && this.ws.readyState === 1
   }
 
   /**
-   * The `model` block from `ready` ({loaded, mode, version}). Kept so it can be
-   * re-logged at stream start: when frames flow but no `result` ever comes
-   * back, "was the model even loaded?" is the first question to answer.
+   * `ready` 의 `model` 블록 ({loaded, mode, version}). 스트림 시작 시점에 다시
+   * 찍으려고 들고 있다. 프레임은 흐르는데 `result` 가 하나도 안 올 때
+   * "그 시점에 모델이 로드돼 있었나" 가 첫 확인 항목이기 때문이다.
    */
   getModel(): unknown {
     return this.readyModel
@@ -196,13 +197,13 @@ export class AiClient {
   }
 
   // -------------------------------------------------------------------------
-  // Connect
+  // 연결
   // -------------------------------------------------------------------------
 
   /**
-   * Entry point. Deliberately returns void rather than a Promise: it is called
-   * from `session.on("ready")`, a synchronous callback. Every failure path is
-   * handled internally so nothing can produce an unhandled rejection.
+   * 진입점. Promise 가 아니라 void 를 돌려주는 것은 의도다. 동기 콜백인
+   * `session.on("ready")` 안에서 불리기 때문에, 모든 실패 경로를 내부에서
+   * 처리해 unhandled rejection 이 생길 여지를 없앴다.
    */
   connect(): void {
     if (this.state !== "idle" && this.state !== "error") {
@@ -228,7 +229,7 @@ export class AiClient {
     this.openSocket(created)
   }
 
-  /** POST /v1/sessions. Returns undefined on any failure (already logged). */
+  /** POST /v1/sessions. 실패 시 undefined 를 돌려준다(로그는 이미 남긴 뒤다). */
   private async createSession(): Promise<{sessionId: string; wsUrl: string} | undefined> {
     const url = `${AI_HTTP}/v1/sessions`
     const body = {client: CLIENT_NAME, user_id: this.userId}
@@ -243,16 +244,16 @@ export class AiClient {
         body: JSON.stringify(body),
       })
     } catch (err) {
-      // Transport-level failure — the request never completed. This is where
-      // ATS / cleartext blocking lands.
+      // 전송 계층 실패. 요청 자체가 완료되지 않았다. ATS / cleartext 차단이
+      // 여기로 떨어진다.
       logFetchError("POST /v1/sessions", err)
       return undefined
     }
 
     console.log("[AI] POST /v1/sessions status=", response.status, response.statusText)
 
-    // Read as text first so a non-JSON body (proxy error page, HTML) is still
-    // visible in the log instead of being swallowed by a parse error.
+    // 먼저 텍스트로 읽는다. JSON 이 아닌 본문(프록시 에러 페이지, HTML)이
+    // 파싱 에러에 묻히지 않고 로그에 남는다.
     let raw: string
     try {
       raw = await response.text()
@@ -275,13 +276,13 @@ export class AiClient {
       return undefined
     }
 
-    // Whole response, unfolded — undocumented fields must be visible here.
+    // 응답 전문을 펼쳐서 찍는다. 문서에 없는 필드를 발견하는 통로다.
     console.log("[AI] 세션 생성 응답:", JSON.stringify(parsed, null, 2))
 
     const p = asRecord(parsed)
     const sessionId = p?.session_id
-    // Separate line: dev reloads orphan sessions, and these ids are what gets
-    // cross-referenced against the server log to find them.
+    // 줄을 따로 뺀 이유: dev 리로드가 세션을 고아로 남기는데, 서버 로그와
+    // 대조해 그것을 찾아내는 열쇠가 이 id 다.
     console.log("[AI] session_id =", sessionId)
     console.log("[AI] status =", p?.status)
     console.log("[AI] schema_version =", p?.schema_version)
@@ -292,15 +293,15 @@ export class AiClient {
       return undefined
     }
 
-    // Server-provided URL is authoritative: it is derived from the request's
-    // own base_url, so it already carries the right host/port/scheme.
+    // 서버가 준 URL 이 우선이다. 요청의 base_url 에서 파생된 값이라 host/port/
+    // scheme 이 이미 맞게 들어 있다.
     const wsUrlRaw = p?.ws_url
     let wsUrl: string
     if (typeof wsUrlRaw === "string" && wsUrlRaw.length > 0) {
       wsUrl = wsUrlRaw
     } else {
-      // Schema says `ws_url: str | None`. Assembling it ourselves is the
-      // fallback only, because it re-guesses information the server already knew.
+      // 스키마상 `ws_url: str | None` 이다. 직접 조립하는 건 폴백일 뿐이다 —
+      // 서버가 이미 알던 정보를 우리가 다시 추측하는 셈이라서.
       wsUrl = `${AI_HTTP.replace(/^http/i, "ws")}/v1/sessions/${sessionId}/ws`
       console.warn("[AI] ws_url 이 null — AI_HTTP 기반으로 폴백 조립했다:", wsUrl)
     }
@@ -323,8 +324,8 @@ export class AiClient {
     try {
       ws = new WebSocket(created.wsUrl)
     } catch (err) {
-      // Constructor throwing (rather than firing onerror) usually means a
-      // malformed URL or a scheme the runtime refuses outright.
+      // onerror 가 아니라 생성자가 throw 했다면 대개 URL 형식 오류이거나
+      // 런타임이 아예 거부하는 scheme 이다.
       console.error("[AI] WebSocket 생성자 throw:", err)
       console.error("[AI] WebSocket 생성자 throw JSON:", JSON.stringify(err))
       this.setState("error")
@@ -343,14 +344,14 @@ export class AiClient {
       try {
         this.handleMessage(event.data)
       } catch (err) {
-        // A throw here would otherwise kill the socket's callback silently.
+        // 여기서 throw 가 새어 나가면 소켓 콜백이 조용히 죽는다.
         console.error("[AI] onmessage 처리 중 예외:", err)
       }
     }
 
     ws.onerror = (event: Event) => {
-      // The error event carries no useful detail in most engines — the real
-      // information arrives in the following onclose.
+      // 대부분의 엔진에서 error 이벤트에는 쓸 만한 정보가 없다. 실제 원인은
+      // 뒤따르는 onclose 에 담긴다.
       console.error("[AI] ws onerror. type=", (event as Event & {type?: string})?.type)
       console.error("[AI] ws onerror event JSON:", JSON.stringify(event))
       console.error("[AI] 자세한 원인은 다음 onclose 의 code/reason 참고")
@@ -363,13 +364,15 @@ export class AiClient {
       console.log("[AI] ws onclose code=", code)
       console.log("[AI] ws onclose reason=", reason === "" ? "(빈 문자열)" : reason)
       console.log("[AI] ws onclose wasClean=", wasClean)
-      // session_websocket.py calls close(1008) for an unknown/stopped/expired
-      // session — but it does so BEFORE websocket.accept(), which makes it an
-      // HTTP 403 handshake rejection, not a WebSocket close frame. Verified
-      // against the running server: uvicorn logs `403 Forbidden` and the client
-      // never receives 1008. Engines report the failed upgrade differently
-      // (1002 protocol error under Bun, 1006 abnormal closure in most others),
-      // so all three are treated as the same "session rejected" case.
+      // 실측: wasClean 이 null 로 온다. 그래서 종료 원인은 code 로만 판단한다.
+      //
+      // session_websocket.py 는 미존재/stopped/만료 세션에 close(1008) 을
+      // 부르지만, 그 호출이 websocket.accept() *이전* 이라 실제로는 WebSocket
+      // close 프레임이 아니라 HTTP 403 핸드셰이크 거부가 된다. 실행 중인 서버로
+      // 확인했다 — uvicorn 은 `403 Forbidden` 을 찍고 클라이언트는 1008 을 받지
+      // 못한다. 실패한 업그레이드를 엔진마다 다르게 보고하므로(Bun 은 1002
+      // protocol error, 대부분은 1006 abnormal closure) 세 값을 같은
+      // "세션 거부" 로 묶어 처리한다.
       if (code === 1008 || code === 1002 || code === 1006) {
         console.error(`[AI] code=${String(code)} — 핸드셰이크 거부로 보인다 (HTTP 403)`)
         console.error("[AI] 원인 후보: session_id 미존재 / 이미 stopped / TTL 만료")
@@ -405,12 +408,12 @@ export class AiClient {
     }
     if (!this.sendJson(hello, "hello")) return
 
-    // Guard against a server that accepts the socket but never answers.
+    // 소켓은 받아 놓고 답을 주지 않는 서버에 대한 방어.
     this.handshakeTimer = setTimeout(() => {
       if (this.state === "handshaking") {
         console.error(`[AI] hello 후 ${HANDSHAKE_TIMEOUT_MS}ms 안에 ready 가 오지 않았다`)
         this.setState("error")
-        // Closing triggers onclose, which drives the reconnect path.
+        // 닫으면 onclose 가 뜨고, 그 경로가 재연결을 굴린다.
         this.closeSocket(4000, "handshake timeout")
       }
     }, HANDSHAKE_TIMEOUT_MS)
@@ -423,7 +426,7 @@ export class AiClient {
     }
   }
 
-  /** Serialize + send. Returns false (and logs) when the socket can't take it. */
+  /** 직렬화 후 전송. 소켓이 받을 수 없는 상태면 로그를 남기고 false. */
   private sendJson(payload: object, label: string): boolean {
     const ws = this.ws
     if (ws === undefined) {
@@ -446,12 +449,12 @@ export class AiClient {
   }
 
   // -------------------------------------------------------------------------
-  // Inbound
+  // 수신
   // -------------------------------------------------------------------------
 
   private handleMessage(data: unknown): void {
     if (typeof data !== "string") {
-      // Binary frames aren't part of this contract; log rather than drop.
+      // 바이너리 프레임은 이 규약에 없다. 버리지 말고 남겨서 드러나게 한다.
       console.warn("[AI] 문자열이 아닌 메시지 수신. typeof=", typeof data)
       return
     }
@@ -471,7 +474,7 @@ export class AiClient {
     switch (type) {
       case "ready": {
         this.clearHandshakeTimer()
-        // Only here does the session count as usable.
+        // 여기 도달해야 비로소 세션이 쓸 수 있는 상태가 된다.
         this.setState("ai_ready")
         this.reconnectAttempt = 0
         console.log("[AI] ready 수신. 클라이언트 수신 시각=", new Date().toISOString())
@@ -479,7 +482,7 @@ export class AiClient {
         this.readyModel = m?.model
         console.log("[AI] ready model=", JSON.stringify(this.readyModel))
         console.log("[AI] ready 전문:", JSON.stringify(parsed, null, 2))
-        // Reconnects re-fire this, letting the caller return to ai_ready.
+        // 재연결 때도 다시 불리므로 호출부가 ai_ready 로 복귀할 수 있다.
         try {
           this.onReady?.()
         } catch (err) {
@@ -495,8 +498,8 @@ export class AiClient {
         console.log("[AI] ack client_message_id=", cmid)
         console.log("[AI] ack 수신 시각=", new Date().toISOString())
 
-        // Round-trip for the stream_start / stream_stop we sent. This is the
-        // number that says whether the server is keeping up.
+        // 우리가 보낸 stream_start / stream_stop 의 왕복 시간. 서버가 따라오고
+        // 있는지를 말해 주는 수치다.
         if (typeof cmid === "string") {
           const pending = this.pendingAcks.get(cmid)
           if (pending !== undefined) {
@@ -513,14 +516,16 @@ export class AiClient {
         console.log("[AI] result.text=", r?.text)
         console.log("[AI] result.confidence=", r?.confidence)
         console.log("[AI] result.is_final=", r?.is_final)
-        // The index field is result.sequence.window_index — confirmed against
-        // sequence_service.metadata(). There is no `sequence_index` on the wire.
+        // 인덱스 필드는 result.sequence.window_index 다. sequence_service.
+        // metadata() 로 확인했다. 와이어에 `sequence_index` 는 없다.
         console.log("[AI] result.sequence.window_index=", asRecord(r?.sequence)?.window_index)
         console.log("[AI] result.sequence=", JSON.stringify(r?.sequence))
 
-        // Hand the parsed values out. Every field is re-checked because these
-        // came off the wire as `unknown`; the callback's signature promises
-        // concrete types. A throwing consumer must not kill the socket.
+        // 파싱한 값을 밖으로 넘긴다. 전부 와이어에서 `unknown` 으로 온 값인데
+        // 콜백 시그니처는 구체 타입을 약속하므로 필드마다 다시 검사한다.
+        //
+        // windowIndex 가 -1 이면 서버가 값을 주지 않았다는 뜻이다(60프레임 미만
+        // 구간에서 null 로 온다). 소비자가 던지는 예외로 소켓이 죽으면 안 된다.
         if (this.onResult !== undefined) {
           const windowIndex = asRecord(r?.sequence)?.window_index
           try {
@@ -546,8 +551,8 @@ export class AiClient {
       }
 
       default: {
-        // Unknown types must not be silently dropped — this is how a schema
-        // drift between client and server gets noticed.
+        // 미지의 타입을 조용히 버리면 안 된다. 클라이언트와 서버의 스키마가
+        // 어긋난 걸 알아채는 통로가 여기다.
         console.warn("[AI] 미지의 메시지 type=", type)
         console.warn("[AI] 미지의 메시지 원문:", data)
         break
@@ -556,7 +561,7 @@ export class AiClient {
   }
 
   // -------------------------------------------------------------------------
-  // Reconnect
+  // 재연결
   // -------------------------------------------------------------------------
 
   private scheduleReconnect(why: string): void {
@@ -581,9 +586,9 @@ export class AiClient {
       this.reconnectTimer = undefined
       if (this.shuttingDown) return
       console.log(`[AI] 재연결 ${this.reconnectAttempt}회차 실행`)
-      // A fresh POST /v1/sessions on purpose: the previous session_id may be
-      // stopped or expired server-side, and reusing it would just earn a 1008.
-      // Full hello → ready runs again against the new id.
+      // 재연결은 항상 새 세션을 발급받는다. 기존 session_id 를 이어 쓰지
+      // 않는다 — 서버에서 이미 stopped 이거나 만료됐을 수 있고, 그러면 1008 만
+      // 받는다. 새 id 로 hello → ready 를 처음부터 다시 밟는다.
       void this.runConnect().catch((err) => {
         this.setState("error")
         console.error("[AI] 재연결 중 예외:", err)
@@ -592,7 +597,7 @@ export class AiClient {
   }
 
   // -------------------------------------------------------------------------
-  // Teardown
+  // 종료
   // -------------------------------------------------------------------------
 
   private closeSocket(code: number, reason: string): void {
@@ -607,14 +612,14 @@ export class AiClient {
   }
 
   // -------------------------------------------------------------------------
-  // Stream messages (Gate 4)
+  // 스트림 메시지
   // -------------------------------------------------------------------------
 
   /**
-   * Tell the AI server to start pulling the Mentra WHEP stream.
+   * Mentra WHEP 스트림을 당겨 가라고 AI 서버에 알린다.
    *
-   * Guarded by `streamStartSent`: one start per stream_id, ever. Synchronous,
-   * so it is safe from any callback. Returns false when nothing was sent.
+   * `streamStartSent` 가 막아 준다 — stream_id 하나당 start 는 평생 한 번이다.
+   * 동기 함수라 어느 콜백에서 불러도 안전하다. 아무것도 안 보냈으면 false.
    */
   sendStreamStart(streamId: string, webrtcUrl: string): boolean {
     const sessionId = this.sessionId
@@ -630,7 +635,7 @@ export class AiClient {
     const clientMessageId = `stream-start-${Date.now()}`
     const sent = this.sendJson(
       {
-        // stream_start/stream_stop ride the WebRTC schema, not HELLO_SCHEMA.
+        // stream_start/stream_stop 은 HELLO_SCHEMA 가 아니라 WebRTC 스키마를 탄다.
         type: "stream_start",
         schema_version: STREAM_SCHEMA,
         session_id: sessionId,
@@ -645,16 +650,16 @@ export class AiClient {
     this.streamStartSent.add(streamId)
     this.pendingAcks.set(clientMessageId, {label: "stream_start", sentAt: Date.now()})
     console.log("[Stream] stream_start 전송 시각=", new Date().toISOString())
-    // Re-logged here on purpose: if frames flow but no result ever arrives,
-    // this line answers "was the model loaded at the time?".
+    // 여기서 다시 찍는 건 의도다. 프레임은 흐르는데 result 가 하나도 안 올 때
+    // "그 시점에 모델이 로드돼 있었나" 에 답해 주는 줄이다.
     console.log("[Stream] 스트림 시작 시점 model=", JSON.stringify(this.readyModel))
     return sent
   }
 
   /**
-   * Tell the AI server to stop pulling. Guarded by `streamStopSent` so the
-   * shared cleanup path can run from stop / error / disconnect without
-   * emitting duplicates. Synchronous — safe from beforeDisconnect.
+   * 그만 당기라고 AI 서버에 알린다. `streamStopSent` 가 막아 주므로 공용 정리
+   * 경로가 stop / error / disconnect 어디에서 돌아도 중복이 나가지 않는다.
+   * 동기 함수라 beforeDisconnect 에서도 안전하다.
    */
   sendStreamStop(streamId: string): boolean {
     const sessionId = this.sessionId
@@ -687,9 +692,9 @@ export class AiClient {
   }
 
   /**
-   * Synchronous half of teardown only — safe to call from
-   * `session.on("beforeDisconnect")`, where async work cannot finish before
-   * the host socket closes.
+   * 종료 절차 중 동기 부분만 담당한다. `session.on("beforeDisconnect")` 에서는
+   * 동기 코드만 완료가 보장되므로(호스트가 기다려 주지 않고 소켓을 닫는다)
+   * 거기서 부를 수 있는 것은 이런 형태뿐이다.
    */
   sendStopMessage(reason: string): boolean {
     const sessionId = this.sessionId
@@ -710,7 +715,7 @@ export class AiClient {
     )
   }
 
-  /** Synchronous close — safe from `session.on("disconnect")`. */
+  /** 동기 종료. `session.on("disconnect")` 에서 부를 수 있다. */
   closeNow(reason: string): void {
     this.shuttingDown = true
     this.clearHandshakeTimer()
@@ -723,17 +728,16 @@ export class AiClient {
   }
 
   /**
-   * POST /v1/sessions/{id}/stop, best effort.
+   * POST /v1/sessions/{id}/stop. best effort.
    *
-   * Idempotent server-side: stop_session() marks the record "stopped" but
-   * keeps it until TTL, so this returns 200 even when the `stop` WS message
-   * already ran it. Safe to call more than once.
+   * 서버 쪽이 멱등이다. stop_session() 은 레코드를 "stopped" 로 표시할 뿐 TTL
+   * 까지 유지하므로, WS `stop` 메시지가 이미 같은 일을 했어도 200 이 온다.
+   * 여러 번 불러도 무해하다.
    *
-   * Called from the disconnect path, where completion is NOT guaranteed — the
-   * host tears the JSContext down without waiting. A failure here is normal
-   * and not an error: the server session expires on its own at `expires_at`
-   * (creation + SESSION_TTL_SECONDS, 1 hour by default), so nothing leaks
-   * permanently even when this never lands.
+   * disconnect 경로에서 불리는데 거기서는 완료가 보장되지 않는다 — 호스트가
+   * 기다리지 않고 JSContext 를 내린다. 실패해도 정상이다: 서버 세션은
+   * `expires_at`(생성 시각 + SESSION_TTL_SECONDS, 기본 1시간)에 스스로
+   * 만료되므로 이 호출이 끝내 닿지 않아도 영구히 새는 것은 없다.
    */
   postStopBestEffort(): void {
     const sessionId = this.sessionId

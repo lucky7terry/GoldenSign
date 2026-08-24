@@ -1,39 +1,39 @@
 /**
- * Shared build-time configuration for the miniapp.
+ * 미니앱 공용 빌드 타임 설정.
  *
- * Imported by the background JSContext. Values are inlined by the bundler —
- * there is no runtime config fetch and no env var access (the bare JS engine
- * has no `process`).
+ * background JSContext 가 임포트한다. 값은 번들러가 인라인하므로 런타임 설정
+ * 조회도, 환경변수 접근도 없다 — bare JS 엔진에는 `process` 가 없다.
  */
 
 /**
- * AI server base URL.
+ * AI 서버 base URL.
  *
- * MUST be the Mac's LAN IP, not localhost/127.0.0.1 — the background bundle
- * runs on the *phone*, so loopback would resolve to the phone itself.
+ * 반드시 Mac 의 LAN IP 여야 한다. background 번들은 *폰* 에서 도는 코드라
+ * localhost/127.0.0.1 은 폰 자신을 가리킨다.
  *
- * Re-check this whenever the Mac changes network (café Wi-Fi, hotspot, VPN):
+ * Mac 의 네트워크가 바뀌면(카페 WiFi, 핫스팟, VPN) 재확인 필요:
  *   ipconfig getifaddr en0
  *
- * Cleartext http:// to a private IP is the thing Gate 3 is probing. iOS ATS
- * and Android's cleartext policy can each block it; ai-client.ts logs enough
- * to tell that apart from "server not running".
+ * 사설 IP 로의 평문 http:// 는 iOS ATS 와 Android cleartext 정책이 각각
+ * 차단할 수 있다. ai-client.ts 의 로그가 그 경우와 "서버 미기동" 을 구분한다.
  */
 export const AI_HTTP = "http://192.168.35.161:8000"
 
 /**
- * Schema version for the session/handshake message family
- * (hello / ready / frame / result / ack / stop).
- * Matches server/app/constants.py SCHEMA_VERSION.
+ * 세션·핸드셰이크 메시지 계열(hello / ready / frame / result / ack / stop)의
+ * 스키마 버전. server/app/constants.py 의 SCHEMA_VERSION 과 일치해야 한다.
  */
 export const HELLO_SCHEMA = "dev-0.2"
 
 /**
- * Schema version for the WebRTC stream message family
- * (stream_start / stream_stop). Matches server/app/constants.py
- * WEBRTC_SCHEMA_VERSION. Unused in Gate 3 — no stream is started here.
+ * WebRTC 스트림 메시지 계열(stream_start / stream_stop)의 스키마 버전.
+ * server/app/constants.py 의 WEBRTC_SCHEMA_VERSION 과 일치해야 한다.
+ *
+ * 세션 계열과 버전이 다르다. 서버가 stream_start/stop 에 대해서만
+ * dev-0.3 을 요구하고 불일치 시 unsupported_schema_version 으로 거절하므로,
+ * 두 상수를 하나로 합칠 수 없다.
  */
 export const STREAM_SCHEMA = "dev-0.3"
 
-/** Sent as `client` on POST /v1/sessions so server logs can attribute sessions. */
+/** POST /v1/sessions 의 `client` 필드. 서버 로그에서 세션 출처를 식별한다. */
 export const CLIENT_NAME = "mentra-local-miniapp"
