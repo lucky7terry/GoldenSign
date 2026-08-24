@@ -161,40 +161,40 @@ function logUrlParts(label: string, url: unknown): void {
 
   const parts = parseUrlParts(url)
   if (parts === undefined) {
-    console.warn(`[Gate4] ${label} URL 파싱 실패 — 원본:`, url)
+    console.warn(`[Stream] ${label} URL 파싱 실패 — 원본:`, url)
     return
   }
-  console.log(`[Gate4] ${label} protocol=${parts.protocol}`)
-  console.log(`[Gate4] ${label} hostname=${parts.hostname}`)
-  console.log(`[Gate4] ${label} port=${parts.port}`)
-  console.log(`[Gate4] ${label} full=`, url)
+  console.log(`[Stream] ${label} protocol=${parts.protocol}`)
+  console.log(`[Stream] ${label} hostname=${parts.hostname}`)
+  console.log(`[Stream] ${label} port=${parts.port}`)
+  console.log(`[Stream] ${label} full=`, url)
 }
 
 /** Pull every field of interest out of a successful StreamResult. */
 function logStreamResult(result: StreamResult): void {
-  console.log("[Gate4] 성공 result 전체:", JSON.stringify(result, null, 2))
+  console.log("[Stream] 성공 result 전체:", JSON.stringify(result, null, 2))
 
-  console.log("[Gate4] streamId=", result?.streamId)
-  console.log("[Gate4] status=", result?.status)
-  console.log("[Gate4] mode=", result?.mode)
-  console.log("[Gate4] liveInputId=", result?.liveInputId)
-  console.log("[Gate4] webrtcUrl=", result?.webrtcUrl)
-  console.log("[Gate4] hlsUrl=", result?.hlsUrl)
-  console.log("[Gate4] dashUrl=", result?.dashUrl)
+  console.log("[Stream] streamId=", result?.streamId)
+  console.log("[Stream] status=", result?.status)
+  console.log("[Stream] mode=", result?.mode)
+  console.log("[Stream] liveInputId=", result?.liveInputId)
+  console.log("[Stream] webrtcUrl=", result?.webrtcUrl)
+  console.log("[Stream] hlsUrl=", result?.hlsUrl)
+  console.log("[Stream] dashUrl=", result?.dashUrl)
 
   const resolved = result?.resolvedConfig
   if (resolved === undefined) {
     // Loud on purpose: without resolvedConfig we cannot tell which transport
     // was actually negotiated, which is the core question of this Gate.
-    console.warn("[Gate4] resolvedConfig 미제공 — Mentra 문의 대상")
+    console.warn("[Stream] resolvedConfig 미제공 — Mentra 문의 대상")
   } else {
-    console.log("[Gate4] resolvedConfig:", JSON.stringify(resolved, null, 2))
+    console.log("[Stream] resolvedConfig:", JSON.stringify(resolved, null, 2))
     // Which of rtmp/srt/whip actually won the negotiation.
-    console.log("[Gate4] resolvedConfig.transport=", resolved?.transport)
+    console.log("[Stream] resolvedConfig.transport=", resolved?.transport)
     // Whether the requested fps:30 survived.
-    console.log("[Gate4] resolvedConfig.video.fps=", resolved?.video?.fps)
+    console.log("[Stream] resolvedConfig.video.fps=", resolved?.video?.fps)
     console.log(
-      "[Gate4] resolvedConfig.video WxH=",
+      "[Stream] resolvedConfig.video WxH=",
       `${String(resolved?.video?.width)}x${String(resolved?.video?.height)}`,
     )
   }
@@ -761,7 +761,7 @@ registerMiniapp((session) => {
         session.userId,
         () => {
           if (appState === "connecting_ai" || appState === "error") setState("ai_ready")
-          else console.log("[Gate3] ready 수신했지만 state 유지:", appState)
+          else console.log("[AI] ready 수신했지만 state 유지:", appState)
           // Published unconditionally: the AI phase is its own axis, and a
           // reconnect that lands while we're already streaming still needs to
           // reach the UI even though appState doesn't move.
@@ -827,7 +827,7 @@ registerMiniapp((session) => {
       console.log("[Session] disconnect:", r)
 
       if (activeStreamId !== undefined || appState === "streaming") {
-        console.warn("[Gate4] disconnect 시점에 스트림이 살아있었다. streamId=", activeStreamId)
+        console.warn("[Stream] disconnect 시점에 스트림이 살아있었다. streamId=", activeStreamId)
       }
 
       ai?.closeNow(`disconnect: ${r}`)
@@ -842,10 +842,10 @@ registerMiniapp((session) => {
       const idAtDisconnect = activeStreamId
       void session.stream
         .stop(idAtDisconnect)
-        .then(() => console.log("[Gate4] disconnect stream.stop 성공"))
+        .then(() => console.log("[Stream] disconnect stream.stop 성공"))
         .catch((err) => {
-          console.warn("[Gate4] disconnect stream.stop 실패 (정상 취급)")
-          logRequestError("[Gate4] disconnect stream.stop", err)
+          console.warn("[Stream] disconnect stream.stop 실패 (정상 취급)")
+          logRequestError("[Stream] disconnect stream.stop", err)
         })
 
       // Attempted, but failure is expected and fine: the JSContext may be gone
@@ -873,7 +873,7 @@ registerMiniapp((session) => {
   unsubscribers.push(
     session.glasses.onWifi((data) => {
       latestWifi = data
-      console.log("[Gate4] WiFi:", JSON.stringify(data))
+      console.log("[Glasses] WiFi:", JSON.stringify(data))
       // Spread the current slot: this event only knows about Wi-Fi, and
       // overwriting battery/charging with null would erase what onBattery said.
       patch("glasses:state", {
@@ -888,7 +888,7 @@ registerMiniapp((session) => {
   // BatteryData is {level, charging}; `level` is the percentage.
   unsubscribers.push(
     session.glasses.onBattery((data) => {
-      console.log("[Gate4] Battery:", JSON.stringify(data))
+      console.log("[Glasses] Battery:", JSON.stringify(data))
       patch("glasses:state", {
         ...snapshot.glasses,
         battery: data?.level ?? null,
@@ -906,12 +906,12 @@ registerMiniapp((session) => {
   function hasCameraOrLog(): boolean {
     const c = asRecord(session.capabilities)
     if (c?.hasCamera !== true) {
-      console.error("[Gate4] hasCamera !== true — 스트림 불가. hasCamera=", c?.hasCamera)
+      console.error("[Stream] hasCamera !== true — 스트림 불가. hasCamera=", c?.hasCamera)
       return false
     }
-    console.log("[Gate4] modelName=", c?.modelName)
+    console.log("[Stream] modelName=", c?.modelName)
     console.log(
-      "[Gate4] supportedStreamTypes=",
+      "[Stream] supportedStreamTypes=",
       JSON.stringify(asRecord(asRecord(c?.camera)?.video)?.supportedStreamTypes),
     )
     return true
@@ -926,17 +926,17 @@ registerMiniapp((session) => {
    */
   async function waitForWifi(): Promise<boolean> {
     const deadline = Date.now() + WIFI_WAIT_MS
-    console.log("[Gate4] WiFi 대기 시작. 현재=", JSON.stringify(latestWifi))
+    console.log("[Stream] WiFi 대기 시작. 현재=", JSON.stringify(latestWifi))
 
     while (Date.now() < deadline) {
       if (latestWifi?.connected === true) {
-        console.log("[Gate4] WiFi 확인됨:", JSON.stringify(latestWifi))
+        console.log("[Stream] WiFi 확인됨:", JSON.stringify(latestWifi))
         return true
       }
       await new Promise((resolve) => setTimeout(resolve, WIFI_POLL_MS))
     }
 
-    console.warn(`[Gate4] ${WIFI_WAIT_MS}ms 동안 WiFi 미연결. 마지막 값=`, JSON.stringify(latestWifi))
+    console.warn(`[Stream] ${WIFI_WAIT_MS}ms 동안 WiFi 미연결. 마지막 값=`, JSON.stringify(latestWifi))
     return false
   }
 
@@ -950,7 +950,7 @@ registerMiniapp((session) => {
    */
   async function waitForAi(): Promise<boolean> {
     const deadline = Date.now() + AI_WAIT_MS
-    console.log("[Gate4] AI 연결 대기 시작. aiState=", ai?.getState())
+    console.log("[Stream] AI 연결 대기 시작. aiState=", ai?.getState())
     // One of the two places index.ts reads ai.getState() — publish the
     // projection here rather than teaching AiClient about the UI.
     publishAiState(aiPhase(ai?.getState()))
@@ -960,7 +960,7 @@ registerMiniapp((session) => {
       await new Promise((resolve) => setTimeout(resolve, AI_POLL_MS))
     }
 
-    console.warn("[Gate4] AI 연결 대기 실패. aiState=", ai?.getState())
+    console.warn("[Stream] AI 연결 대기 실패. aiState=", ai?.getState())
     publishAiState(aiPhase(ai?.getState()), `${AI_WAIT_MS}ms 안에 AI 세션이 준비되지 않았다`)
     return false
   }
@@ -986,7 +986,7 @@ registerMiniapp((session) => {
     // applyLed to the correct light. Darkening here would only add a second
     // blackout on the way through.
     publishStreamState(`cleanup: ${reason}`)
-    console.log(`[Gate4] cleanup 시작 (${reason}). streamId=`, streamId)
+    console.log(`[Stream] cleanup 시작 (${reason}). streamId=`, streamId)
 
     // 1. AI WebSocket first.
     if (opts.notifyAi && streamId !== undefined) {
@@ -998,16 +998,16 @@ registerMiniapp((session) => {
     // "stop the active stream" and which is the escape hatch when the id is lost.
     try {
       await session.stream.stop(streamId)
-      console.log("[Gate4] stream.stop 성공. streamId=", streamId)
+      console.log("[Stream] stream.stop 성공. streamId=", streamId)
     } catch (err) {
-      console.error("[Gate4] stream.stop 실패 — 인자 없는 stop() 으로 폴백")
-      logRequestError("[Gate4] stream.stop", err)
+      console.error("[Stream] stream.stop 실패 — 인자 없는 stop() 으로 폴백")
+      logRequestError("[Stream] stream.stop", err)
       try {
         await session.stream.stop()
-        console.log("[Gate4] stream.stop() (인자 없음) 성공")
+        console.log("[Stream] stream.stop() (인자 없음) 성공")
       } catch (err2) {
-        console.error("[Gate4] stream.stop() (인자 없음)도 실패 — 스트림이 남아있을 수 있다")
-        logRequestError("[Gate4] stream.stop()", err2)
+        console.error("[Stream] stream.stop() (인자 없음)도 실패 — 스트림이 남아있을 수 있다")
+        logRequestError("[Stream] stream.stop()", err2)
         throw err2
       }
     }
@@ -1025,21 +1025,21 @@ registerMiniapp((session) => {
   async function runStreamLadder(): Promise<{result: StreamResult; requestedFps: number} | undefined> {
     for (let i = 0; i < STREAM_ATTEMPTS.length; i += 1) {
       const attempt = STREAM_ATTEMPTS[i]
-      console.log(`[Gate4] 시도 ${attempt.name} 시작`, JSON.stringify(attempt.options), `(${attempt.note})`)
+      console.log(`[Stream] 시도 ${attempt.name} 시작`, JSON.stringify(attempt.options), `(${attempt.note})`)
       const startedAt = Date.now()
 
       try {
         const result = await session.stream.startStream(attempt.options)
-        console.log(`[Gate4] 시도 ${attempt.name} 성공 (${Date.now() - startedAt}ms)`)
+        console.log(`[Stream] 시도 ${attempt.name} 성공 (${Date.now() - startedAt}ms)`)
         logStreamResult(result)
         return {result, requestedFps: attempt.options.video?.fps ?? REQUESTED_FPS}
       } catch (err) {
-        console.error(`[Gate4] 시도 ${attempt.name} 실패 (${Date.now() - startedAt}ms)`)
+        console.error(`[Stream] 시도 ${attempt.name} 실패 (${Date.now() - startedAt}ms)`)
         // logRequestError prints err.code and err.message on separate lines.
         // There is no camera-busy code in MiniappErrorCode — a held camera
         // arrives as INTERNAL with the detail in `message`, so read that line
         // rather than matching on code.
-        logRequestError(`[Gate4] 시도 ${attempt.name}`, err)
+        logRequestError(`[Stream] 시도 ${attempt.name}`, err)
       }
     }
     return undefined
@@ -1049,7 +1049,7 @@ registerMiniapp((session) => {
 
   async function runStartSequence(): Promise<void> {
     if (startInFlight) {
-      console.warn("[Gate4] 시작 시퀀스가 이미 진행 중이다 — 무시. state=", appState)
+      console.warn("[Stream] 시작 시퀀스가 이미 진행 중이다 — 무시. state=", appState)
       return
     }
     if (!hasCameraOrLog()) {
@@ -1067,7 +1067,7 @@ registerMiniapp((session) => {
       // 상태를 보존한 채 다시 누르면 그때 성공한다. startInFlight 안쪽이라
       // 대기 중 두 번째 롱프레스가 병렬 진입하는 일은 없다.
       if (!(await waitForAi())) {
-        console.error("[Gate4] AI 세션이 준비되지 않았다 — 스트림 시작 불가. 다시 눌러라")
+        console.error("[Stream] AI 세션이 준비되지 않았다 — 스트림 시작 불가. 다시 누르면 재시도 가능")
         return
       }
 
@@ -1078,9 +1078,9 @@ registerMiniapp((session) => {
         // finishes the setup flow.
         void session.glasses
           .requestWifiSetup("수어 인식을 위해 안경을 WiFi에 연결해주세요")
-          .then(() => console.log("[Gate4] requestWifiSetup 호출됨"))
-          .catch((err) => logRequestError("[Gate4] requestWifiSetup", err))
-        console.warn("[Gate4] WiFi 설정 유도 후 대기 — 연결 뒤 롱프레스로 재시도해라")
+          .then(() => console.log("[Stream] requestWifiSetup 호출됨"))
+          .catch((err) => logRequestError("[Stream] requestWifiSetup", err))
+        console.warn("[Stream] WiFi 설정 유도 후 대기 — 연결 뒤 롱프레스로 재시도 가능")
         return
       }
 
@@ -1089,7 +1089,7 @@ registerMiniapp((session) => {
       const attempt = await runStreamLadder()
       if (attempt === undefined) {
         setState("error")
-        console.error("[Gate4] 스트림 시작 실패 (rung A) — error 상태")
+        console.error("[Stream] 스트림 시작 실패 (rung A) — error 상태")
         return
       }
       const {result, requestedFps} = attempt
@@ -1099,7 +1099,7 @@ registerMiniapp((session) => {
       // Requested vs negotiated, side by side. requestedFps comes from the rung
       // that actually won rather than a module constant, so a future rung that
       // asks for something other than 30 still reports honestly.
-      console.log("[Gate4] fps 요청=", requestedFps, "/ resolvedConfig=", result?.resolvedConfig?.video?.fps)
+      console.log("[Stream] fps 요청=", requestedFps, "/ resolvedConfig=", result?.resolvedConfig?.video?.fps)
 
       // Diagnostics before validation: a rung that "succeeded" but produced no
       // webrtcUrl is exactly the case worth showing, and the rollback below
@@ -1127,21 +1127,21 @@ registerMiniapp((session) => {
       // 3. Validate the WHEP URL. Anything unusable here is a hard failure —
       // the server could not pull it either.
       if (typeof webrtcUrl !== "string" || webrtcUrl.length === 0) {
-        console.error("[Gate4] webrtcUrl 이 없다 — 롤백한다. result.mode=", result?.mode)
+        console.error("[Stream] webrtcUrl 이 없다 — 롤백한다. result.mode=", result?.mode)
         await rollback("webrtcUrl 없음")
         return
       }
       const parts = parseUrlParts(webrtcUrl)
       if (parts === undefined) {
-        console.error("[Gate4] webrtcUrl 정규식 파싱 실패 — 롤백한다. 원본:", webrtcUrl)
+        console.error("[Stream] webrtcUrl 정규식 파싱 실패 — 롤백한다. 원본:", webrtcUrl)
         await rollback("webrtcUrl 파싱 실패")
         return
       }
       console.log(
-        `[Gate4] webrtcUrl protocol=${parts.protocol} hostname=${parts.hostname} port=${parts.port}`,
+        `[Stream] webrtcUrl protocol=${parts.protocol} hostname=${parts.hostname} port=${parts.port}`,
       )
       if (typeof streamId !== "string" || streamId.length === 0) {
-        console.error("[Gate4] streamId 가 없다 — stream_start 를 보낼 수 없다. 롤백한다")
+        console.error("[Stream] streamId 가 없다 — stream_start 를 보낼 수 없다. 롤백한다")
         await rollback("streamId 없음")
         return
       }
@@ -1153,14 +1153,14 @@ registerMiniapp((session) => {
       // (waitForAi only returns true via `ai?.isReady() === true`), and if it
       // somehow did, `!undefined` rolls back — which is the right answer anyway.
       if (!ai?.sendStreamStart(streamId, webrtcUrl)) {
-        console.error("[Gate4] stream_start 전송 실패 — 롤백한다")
+        console.error("[Stream] stream_start 전송 실패 — 롤백한다")
         await rollback("stream_start 전송 실패")
         return
       }
 
       // 5. Done.
       setState("streaming")
-      console.log("[Gate4] streaming. streamId=", streamId)
+      console.log("[Stream] streaming. streamId=", streamId)
     } finally {
       startInFlight = false
     }
@@ -1179,12 +1179,12 @@ registerMiniapp((session) => {
    * Ends in ai_ready, not idle: the AI session is untouched by a stream failure.
    */
   async function rollback(why: string): Promise<void> {
-    console.warn("[Gate4] 롤백:", why)
+    console.warn("[Stream] 롤백:", why)
     try {
       await cleanupStream(`rollback: ${why}`, {notifyAi: false})
     } catch {
       // cleanupStream already logged both stop attempts.
-      console.error("[Gate4] 롤백 중 stop 실패 — 카메라가 잡혀있을 수 있다")
+      console.error("[Stream] 롤백 중 stop 실패 — 카메라가 잡혀있을 수 있다")
     }
     setState(ai?.isReady() === true ? "ai_ready" : "error")
   }
@@ -1200,7 +1200,7 @@ registerMiniapp((session) => {
       setState(ai?.isReady() === true ? "ai_ready" : "error")
     } catch {
       setState("error")
-      console.error("[Gate4] 정지 실패 — error 상태. 롱프레스로 재시도 가능")
+      console.error("[Stream] 정지 실패 — error 상태. 롱프레스로 재시도 가능")
     }
   }
 
@@ -1233,31 +1233,31 @@ registerMiniapp((session) => {
             // the setup flow, comes back, and presses again.
             void runStartSequence().catch((err) => {
               setState("error")
-              logRequestError("[Gate4] 시작 시퀀스 예외", err)
+              logRequestError("[Stream] 시작 시퀀스 예외", err)
             })
             return
 
           case "streaming":
             void runStopSequence(`long press (buttonId=${press.buttonId})`).catch((err) => {
               setState("error")
-              logRequestError("[Gate4] 정지 시퀀스 예외", err)
+              logRequestError("[Stream] 정지 시퀀스 예외", err)
             })
             return
 
           case "error":
             // Recovery: clear whatever is held, then fall back to ai_ready if
             // the AI socket survived. Also the hot-reload escape hatch.
-            console.warn("[Gate4] error 상태 — 복구 정지 시도")
+            console.warn("[Stream] error 상태 — 복구 정지 시도")
             void runStopSequence("error 복구").catch((err) => {
               setState("error")
-              logRequestError("[Gate4] 복구 정지 예외", err)
+              logRequestError("[Stream] 복구 정지 예외", err)
             })
             return
 
           default:
             // idle: AI client not constructed yet ("ready" hasn't fired).
             // starting_stream (~5s) / stopping: in flight, second press would race.
-            console.warn("[Gate4] 지금은 롱프레스를 받지 않는다. state=", appState)
+            console.warn("[Stream] 지금은 롱프레스를 받지 않는다. state=", appState)
             return
         }
       } else {
