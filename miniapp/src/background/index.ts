@@ -208,25 +208,30 @@ const VIDEO_CONFIG = {width: 1280, height: 720, fps: 30} as const
 /** Requested fps, kept separate so the log can state request vs negotiated. */
 const REQUESTED_FPS = VIDEO_CONFIG.fps
 
-/** Low-resolution fallback for rung D. */
-const VIDEO_CONFIG_LOW = {width: 640, height: 480, fps: 15} as const
-
 /**
- * TEMPORARY diagnostic ladder. Ordered; the first success wins.
+ * Stream attempts, in order; the first success wins. One rung today.
  *
- * `ingest:"whip"` is measured working on Mentra Live, so rung A is the normal
- * path and the rest only run when it starts failing. The point is to record
- * WHICH rung works when A stops working, so this trades startup latency for
- * information — each failed rung costs its own timeout plus INTER_ATTEMPT_MS.
+ * The B/C/D diagnostic rungs were removed — they could not do what they looked
+ * like they were doing:
  *
- * ⚠️  Only rungs A and D request WHIP. B and C negotiate SRT, which returns
- * hlsUrl/dashUrl and NO webrtcUrl — so even when they "succeed" the webrtcUrl
- * validation downstream rejects them and rolls the stream back. That is
- * correct (the AI server pulls WHEP; it cannot consume HLS), but it means a
- * B/C success is a diagnostic result, not a working stream. Expect the log to
- * read "시도 B 성공" followed by "롤백: webrtcUrl 없음".
+ *   - B/C negotiate SRT, which returns hlsUrl/dashUrl and NO webrtcUrl. Our AI
+ *     server PULLS WHEP and cannot consume HLS/DASH, so a B/C "success" was
+ *     never a usable stream — runStartSequence's webrtcUrl check rejected it
+ *     and rolled it back every time.
+ *   - D was therefore unreachable. runStreamLadder returns on the first
+ *     startStream success, and the rollback ends runStartSequence, so the walk
+ *     stopped at B and never reached D.
+ *   - The cost was paid in front of the audience: A fail (~5s) → cleanup stop
+ *     + 1s → B "success" (~5s) → rollback → failure. Fifteen-plus seconds of
+ *     nothing, ending in nothing.
  *
- * TODO: 진단이 끝나면 A 단일 호출로 되돌릴 것.
+ * Reviving D (low-res WHIP, to test whether encoder load is the cause) needs
+ * TWO changes, not just a new array entry: runStreamLadder must keep walking
+ * when a rung succeeds but fails downstream validation, and the inter-rung
+ * cleanup — a best-effort no-arg stop() plus a ~1s pause so the phone actually
+ * releases the camera — has to come back with it. Without that pause the next
+ * rung inherits a held camera and fails busy, misattributing the failure to
+ * its own options. B and C are not worth reviving at all.
  */
 const STREAM_ATTEMPTS: ReadonlyArray<{name: string; note: string; options: StartStreamOptions}> = [
   {
@@ -234,29 +239,7 @@ const STREAM_ATTEMPTS: ReadonlyArray<{name: string; note: string; options: Start
     note: 'ingest:"whip" 1280x720@30 — 정상 경로. webrtcUrl 기대',
     options: {ingest: "whip", video: VIDEO_CONFIG, sound: false},
   },
-  {
-    name: "B",
-    note: "ingest 생략(기본 srt) — 폰 기본값 관찰용. webrtcUrl 안 나온다",
-    options: {video: VIDEO_CONFIG, sound: false},
-  },
-  {
-    name: "C",
-    note: 'ingest:"srt" 명시 — HLS/DASH 경로. webrtcUrl 안 나온다',
-    options: {ingest: "srt", video: VIDEO_CONFIG, sound: false},
-  },
-  {
-    name: "D",
-    note: 'ingest:"whip" 640x480@15 — 저해상도. 인코더 부하가 원인인지 판별',
-    options: {ingest: "whip", video: VIDEO_CONFIG_LOW, sound: false},
-  },
 ]
-
-/**
- * Pause between rungs, after a best-effort stop(). The phone needs a moment to
- * actually release the camera — retrying immediately just earns a busy error
- * and misattributes it to the next rung's options.
- */
-const INTER_ATTEMPT_MS = 1000
 
 /** Longest we wait for glasses Wi-Fi to come up before prompting the user. */
 const WIFI_WAIT_MS = 5000
@@ -1017,16 +1000,14 @@ registerMiniapp((session) => {
     }
   }
 
-  // --- start ladder (temporary diagnostic) --------------------------------
+  // --- start ladder --------------------------------------------------------
 
   /**
    * Walk STREAM_ATTEMPTS until one succeeds. Returns the winning result plus
-   * the fps that rung actually asked for, or undefined when all four fail.
+   * the fps that rung actually asked for, or undefined when every rung fails.
    *
-   * Between rungs: a best-effort no-arg stop() then a 1s pause. A rung can
-   * fail *after* the phone has already provisioned something, and without the
-   * stop the next rung inherits a held camera and fails for the wrong reason.
-   * The stop is expected to fail when nothing is live — that is not an error.
+   * The loop is kept even though STREAM_ATTEMPTS holds a single entry — see the
+   * note on that constant for what reviving a rung would take.
    */
   async function runStreamLadder(): Promise<{result: StreamResult; requestedFps: number} | undefined> {
     for (let i = 0; i < STREAM_ATTEMPTS.length; i += 1) {
@@ -1046,18 +1027,6 @@ registerMiniapp((session) => {
         // arrives as INTERNAL with the detail in `message`, so read that line
         // rather than matching on code.
         logRequestError(`[Gate4] 시도 ${attempt.name}`, err)
-      }
-
-      if (i < STREAM_ATTEMPTS.length - 1) {
-        try {
-          await session.stream.stop()
-          console.log(`[Gate4] 시도 ${attempt.name} 후 정리용 stop() 성공`)
-        } catch {
-          // Expected when nothing was provisioned. Not logged as an error.
-          console.log(`[Gate4] 시도 ${attempt.name} 후 정리용 stop() — 정리할 스트림 없음`)
-        }
-        console.log(`[Gate4] ${INTER_ATTEMPT_MS}ms 대기 후 다음 시도`)
-        await new Promise((resolve) => setTimeout(resolve, INTER_ATTEMPT_MS))
       }
     }
     return undefined
@@ -1102,12 +1071,12 @@ registerMiniapp((session) => {
         return
       }
 
-      // 2. Start the Mentra stream. Each rung is measured ~5s.
+      // 2. Start the Mentra stream. Measured ~5s.
       setState("starting_stream")
       const attempt = await runStreamLadder()
       if (attempt === undefined) {
         setState("error")
-        console.error("[Gate4] A/B/C/D 전부 실패 — error 상태")
+        console.error("[Gate4] 스트림 시작 실패 (rung A) — error 상태")
         return
       }
       const {result, requestedFps} = attempt
@@ -1115,15 +1084,15 @@ registerMiniapp((session) => {
       const streamId = result?.streamId
       const webrtcUrl = result?.webrtcUrl
       // Requested vs negotiated, side by side. requestedFps comes from the rung
-      // that actually won, so D's 15 isn't reported as 30.
+      // that actually won rather than a module constant, so a future rung that
+      // asks for something other than 30 still reports honestly.
       console.log("[Gate4] fps 요청=", requestedFps, "/ resolvedConfig=", result?.resolvedConfig?.video?.fps)
 
       // Diagnostics before validation: a rung that "succeeded" but produced no
       // webrtcUrl is exactly the case worth showing, and the rollback below
       // would otherwise return before anything reached the UI.
       //
-      // `requestedFps` is the winning rung's own request, not the nominal 30 —
-      // rung D asks for 15 and reporting 30 there would be a lie.
+      // `requestedFps` is the winning rung's own request, not a module constant.
       // resolvedConfig is OPTIONAL: every hop is optional-chained.
       // Host via parseUrlParts() — `new URL()` does not exist in this runtime.
       patch("stream:diagnostics", {
