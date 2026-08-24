@@ -412,6 +412,22 @@ function deviceHasLight(caps: GlassesCapabilities | null): boolean {
   return asRecord(caps)?.hasLight === true
 }
 
+/**
+ * One-line LED failure log.
+ *
+ * Not logRequestError: that prints four lines per failure, which is right for a
+ * stream call that gates the whole app but far too loud for the light. An LED
+ * failure changes nothing about what the app does, so it gets one warn line.
+ *
+ * `.message` is read structurally rather than off `Error`: session.led.* goes
+ * through session.sendRequest, which rejects with a PLAIN {code, message}
+ * object. JSON.stringify covers anything that isn't shaped that way.
+ */
+function logLedError(label: string, err: unknown): void {
+  const message = asRecord(err)?.message
+  console.warn(`[LED] ${label} 실패:`, typeof message === "string" ? message : JSON.stringify(err))
+}
+
 registerMiniapp((session) => {
   /**
    * Every subscription's unsubscribe fn lands here and is drained on
@@ -523,14 +539,11 @@ registerMiniapp((session) => {
     console.log("[LED]", state, "->", JSON.stringify(command))
 
     try {
-      // session.led.* rejects with a PLAIN {code, message} object, not an Error
-      // (session.js's sendRequest path) — logRequestError already handles both
-      // shapes, so it's reused rather than duplicated here.
-      void sendLed(command).catch((err) => logRequestError(`[LED] ${state}`, err))
+      void sendLed(command).catch((err) => logLedError(state, err))
     } catch (err) {
       // Every LedModule method is `async`, so a synchronous throw shouldn't be
       // reachable. Caught anyway: an LED problem must never reach the caller.
-      logRequestError(`[LED] ${state} 동기 예외`, err)
+      logLedError(`${state} 동기 예외`, err)
     }
   }
 
@@ -545,9 +558,9 @@ registerMiniapp((session) => {
     lastAppliedLedState = undefined
     console.log("[LED] turnOff:", reason)
     try {
-      void session.led.turnOff().catch((err) => logRequestError(`[LED] turnOff (${reason})`, err))
+      void session.led.turnOff().catch((err) => logLedError(`turnOff (${reason})`, err))
     } catch (err) {
-      logRequestError(`[LED] turnOff (${reason}) 동기 예외`, err)
+      logLedError(`turnOff (${reason}) 동기 예외`, err)
     }
   }
 
