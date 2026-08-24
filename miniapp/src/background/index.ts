@@ -41,8 +41,17 @@
  * describes direct `new MiniappSession()` use, not the register path.
  */
 
-import {registerMiniapp, type GlassesCapabilities, type StreamModule, type WifiData} from "@mentra/miniapp/background"
-import {AiClient, probeRuntime} from "./ai-client"
+import {
+  registerMiniapp,
+  type GlassesCapabilities,
+  type IsRpc,
+  type LedColor,
+  type StreamModule,
+  type UIModule,
+  type WifiData,
+} from "@mentra/miniapp/background"
+import type {Channels, Snapshot} from "../shared/channels"
+import {AiClient, probeRuntime, type AiClientState} from "./ai-client"
 
 /**
  * The background entry point re-exports `StreamModule` but not its option /
@@ -63,6 +72,24 @@ type UnknownRecord = Record<string, unknown>
  */
 function asRecord(value: unknown): UnknownRecord | undefined {
   return typeof value === "object" && value !== null ? (value as UnknownRecord) : undefined
+}
+
+/**
+ * Narrow the `model` block from the server's `ready` before it goes on a typed
+ * channel. AiClient keeps it as `unknown` on purpose — it's a raw wire value —
+ * so every field is checked here.
+ *
+ * Returns `null` (not undefined) on a shape mismatch: JSON.stringify deletes
+ * undefined keys, and the UI must be able to see "we asked and got nothing".
+ */
+function readModelBlock(value: unknown): Channels["ai:state"]["model"] {
+  const m = asRecord(value)
+  if (m === undefined) return null
+  return {
+    loaded: m.loaded === true,
+    mode: typeof m.mode === "string" ? m.mode : "",
+    version: typeof m.version === "string" ? m.version : "",
+  }
 }
 
 /**
@@ -236,6 +263,17 @@ const WIFI_WAIT_MS = 5000
 const WIFI_POLL_MS = 250
 
 /**
+ * Longest we wait for the AI socket before giving up on a long-press.
+ *
+ * Sized against AiClient's backoff: the first reconnect fires 1s after the
+ * close, so 3s covers that attempt plus its handshake. Later attempts (2s, 4s,
+ * 8s, 16s) fall outside on purpose — waiting 16s with no way to tell the
+ * wearer anything is worse than letting them press again.
+ */
+const AI_WAIT_MS = 3000
+const AI_POLL_MS = 100
+
+/**
  * Extract a WHEP URL's parts without `new URL()`.
  *
  * Measured on-device: `typeof URL === "undefined"` in this runtime, so the URL
@@ -265,6 +303,132 @@ type AppState =
   | "stopping"
   | "error"
 
+// ---------------------------------------------------------------------------
+// UI bridge
+// ---------------------------------------------------------------------------
+
+/**
+ * Broadcast channels only — every key of `Channels` whose value is not
+ * `Rpc<Req, Res>`. `IsRpc<T>` tests for that brand; mapping over the registry
+ * and indexing back by its own keys drops the RPC entries to `never`.
+ */
+type BroadcastChannel = {
+  [C in keyof Channels]: IsRpc<Channels[C]> extends true ? never : C
+}[keyof Channels]
+
+/** snapshot.results ring size. Oldest dropped first. */
+const MAX_RESULTS = 20
+
+/**
+ * Minimum gap between NON-final recognition broadcasts.
+ *
+ * Two reasons, not one: the obvious render cost, and the SDK's per-channel
+ * inbound buffer of 32 payloads (modules/ui.d.ts). A UI attaching mid-stream
+ * would overflow that buffer and silently lose messages without a cap here.
+ */
+const RESULT_THROTTLE_MS = 200
+
+/**
+ * Collapse AiClient's seven-value state onto the four the UI cares about.
+ * `AiClientState` itself is deliberately left alone — this is a projection,
+ * not a new state in that machine.
+ */
+function aiPhase(state: AiClientState | undefined): Channels["ai:state"]["state"] {
+  switch (state) {
+    case "creating_session":
+    case "connecting_ws":
+    case "handshaking":
+      return "connecting"
+    case "ai_ready":
+      return "ready"
+    case "error":
+      return "error"
+    default:
+      // idle / closing / undefined (client not constructed yet)
+      return "disconnected"
+  }
+}
+
+// ---------------------------------------------------------------------------
+// LED feedback
+// ---------------------------------------------------------------------------
+
+/**
+ * The wearer-facing LED is the ONLY status channel on this device —
+ * hasDisplay is false on Mentra Live, so there is nowhere to draw text.
+ *
+ * Scope note: `LedModule` exposes no light-id parameter. Its header states the
+ * phone maps color names onto per-device LED indices, so this API physically
+ * cannot address the front-facing privacy light — the system owns that one and
+ * we never touch it. Nothing here needs to guard against it.
+ *
+ * UNITS — verified, not assumed:
+ *   - led.d.ts:16,18 annotate `ontime` / `offtime` as "LED on/off duration in ms".
+ *   - `blink(color, ontime, offtime, count)` forwards its args straight into
+ *     turnOn({ontime, offtime, count}) (led.js:31-33) → same ms units.
+ *   - `solid(color, duration)` has NO unit annotation of its own, but led.js:36
+ *     assigns `ontime: duration` — so duration inherits the documented ms.
+ *   All three are therefore milliseconds by derivation from the SDK source.
+ */
+
+/**
+ * How long one steady-state LED command is asked to hold.
+ *
+ * blink's `count` and solid's `duration` are both finite, but ai_ready and
+ * streaming last minutes. Rather than adding a refresh interval (there is no
+ * existing timer to piggyback on — we deliberately shipped no ping), each
+ * transition arms the light for a generous window and we re-arm only when the
+ * state actually changes. If the light is observed dying before the next
+ * transition, that's the signal to revisit the refresh strategy.
+ */
+const LED_HOLD_MS = 30_000
+
+/** Blink cadence. 400/400 reads as a clear pulse rather than a flicker. */
+const LED_BLINK_ON_MS = 400
+const LED_BLINK_OFF_MS = 400
+
+/** Enough cycles to cover LED_HOLD_MS, so blink and solid hold equally long. */
+const LED_BLINK_COUNT = Math.floor(LED_HOLD_MS / (LED_BLINK_ON_MS + LED_BLINK_OFF_MS))
+
+type LedCommand = {kind: "off"} | {kind: "solid"; color: LedColor} | {kind: "blink"; color: LedColor}
+
+/**
+ * appState → LED. Exhaustive over AppState: adding a state without a mapping
+ * is a compile error, not a silently dark light.
+ *
+ * There is no yellow in the five-color preset set, so waiting_wifi uses orange.
+ */
+function ledCommandFor(state: AppState): LedCommand {
+  switch (state) {
+    case "idle":
+      return {kind: "off"}
+    case "connecting_ai":
+      return {kind: "blink", color: "blue"}
+    case "ai_ready":
+      return {kind: "solid", color: "blue"}
+    case "waiting_wifi":
+      return {kind: "blink", color: "orange"}
+    case "starting_stream":
+      return {kind: "blink", color: "green"}
+    case "streaming":
+      return {kind: "solid", color: "green"}
+    case "stopping":
+      return {kind: "off"}
+    case "error":
+      return {kind: "solid", color: "red"}
+  }
+}
+
+/**
+ * `hasLight` is not in GlassesCapabilities' declared surface — it arrives via
+ * the `[key: string]: unknown` index signature, same as every field
+ * summarizeCapabilities reads. Read live rather than cached so a mid-session
+ * device swap ("capabilities" event) is respected.
+ */
+function deviceHasLight(caps: GlassesCapabilities | null): boolean {
+  return asRecord(caps)?.hasLight === true
+}
+
 registerMiniapp((session) => {
   /**
    * Every subscription's unsubscribe fn lands here and is drained on
@@ -291,10 +455,242 @@ registerMiniapp((session) => {
   // CONNECT_ACK. Undefined when the runtime probe fails.
   let ai: AiClient | undefined
 
+  // --- UI bridge ----------------------------------------------------------
+
+  // session.d.ts:161 declares `readonly ui: UIModule` with NO generic argument,
+  // so it defaults to Record<string, unknown>. That makes IsRpc<unknown> false,
+  // which collapses handle()'s channel parameter to `never` and leaves send/on
+  // payloads as `unknown`. Cast ONCE here; every call below goes through `ui`.
+  //
+  // Via `unknown` because a direct `as UIModule<Channels>` is rejected —
+  // Record<string, unknown> and Channels don't overlap enough for TS to accept
+  // a single-step assertion. The cast is sound: UIModule's generic only types
+  // the channel/payload pairs, it doesn't change the object's runtime shape.
+  const ui = session.ui as unknown as UIModule<Channels>
+
+  // send()'s channel parameter is the conditional type
+  // `IsRpc<Channels[C]> extends true ? never : C`, which TS refuses to evaluate
+  // while C is still generic — so a generic wrapper can't call it directly.
+  // BroadcastChannel already excludes every RPC channel, so narrow the
+  // signature once here instead of casting at each call site.
+  const sendBroadcast = ui.send as <C extends BroadcastChannel>(
+    channel: C,
+    payload: Channels[C],
+  ) => void
+
+  /**
+   * What a late-mounting WebView gets from `getSnapshot`.
+   *
+   * Every unknown starts as `null`, never undefined — payloads cross the
+   * bridge through JSON.stringify (envelope.js), which DELETES undefined keys.
+   * With undefined the UI could not distinguish "not known yet" from "this
+   * build doesn't have that field".
+   */
+  const snapshot: Snapshot = {
+    ai: {state: "disconnected", sessionId: null, model: null, message: null},
+    stream: {state: "idle", streamId: null, message: null},
+    glasses: {wifiConnected: null, ssid: null, battery: null, charging: null},
+    diagnostics: {
+      requestedFps: null,
+      resolvedFps: null,
+      transport: null,
+      webrtcHost: null,
+      mode: null,
+      status: null,
+    },
+    results: [],
+  }
+
+  // --- LED ------------------------------------------------------------------
+
+  /** Last state actually pushed to the light. Guards against re-arming on every
+   *  publishStreamState() call that only changed streamId. */
+  let lastAppliedLedState: AppState | undefined
+
+  /** Build (don't await) the LED promise for a command. */
+  function sendLed(command: LedCommand) {
+    switch (command.kind) {
+      case "off":
+        return session.led.turnOff()
+      case "solid":
+        return session.led.solid(command.color, LED_HOLD_MS)
+      case "blink":
+        return session.led.blink(command.color, LED_BLINK_ON_MS, LED_BLINK_OFF_MS, LED_BLINK_COUNT)
+    }
+  }
+
+  /**
+   * Drive the wearer LED from appState. Fire-and-forget: never awaited, so a
+   * slow or absent ack can't delay a state transition, and a rejection can't
+   * become an app error. The light is feedback, not a dependency.
+   */
+  function applyLed(state: AppState): void {
+    if (!deviceHasLight(session.capabilities)) {
+      // Logged on change only, so a lightless device doesn't spam every patch.
+      if (lastAppliedLedState !== state) {
+        lastAppliedLedState = state
+        console.log("[LED] hasLight !== true — LED 표시 생략. state=", state)
+      }
+      return
+    }
+    if (lastAppliedLedState === state) return
+    lastAppliedLedState = state
+
+    const command = ledCommandFor(state)
+    console.log("[LED]", state, "->", JSON.stringify(command))
+
+    try {
+      // session.led.* rejects with a PLAIN {code, message} object, not an Error
+      // (session.js's sendRequest path) — logRequestError already handles both
+      // shapes, so it's reused rather than duplicated here.
+      void sendLed(command).catch((err) => logRequestError(`[LED] ${state}`, err))
+    } catch (err) {
+      // Every LedModule method is `async`, so a synchronous throw shouldn't be
+      // reachable. Caught anyway: an LED problem must never reach the caller.
+      logRequestError(`[LED] ${state} 동기 예외`, err)
+    }
+  }
+
+  /**
+   * Unconditional off, bypassing the state map — for the teardown paths.
+   *
+   * Clears lastAppliedLedState so a later applyLed for the SAME state still
+   * re-arms the light instead of being skipped as a duplicate.
+   */
+  function turnOffLed(reason: string): void {
+    if (!deviceHasLight(session.capabilities)) return
+    lastAppliedLedState = undefined
+    console.log("[LED] turnOff:", reason)
+    try {
+      void session.led.turnOff().catch((err) => logRequestError(`[LED] turnOff (${reason})`, err))
+    } catch (err) {
+      logRequestError(`[LED] turnOff (${reason}) 동기 예외`, err)
+    }
+  }
+
+  /**
+   * The ONLY way state reaches the UI: update the snapshot slot, then
+   * broadcast. Because both happen here, `getSnapshot` is current by
+   * construction and no call site can send without recording.
+   *
+   * `ui.send` silently DROPS when no WebView is bound. That is the normal
+   * case — background outlives the WebView — and is not an error.
+   */
+  function patch<C extends BroadcastChannel>(channel: C, next: Channels[C]): void {
+    switch (channel) {
+      case "ai:state":
+        snapshot.ai = next as Channels["ai:state"]
+        break
+      case "stream:state": {
+        const stream = next as Channels["stream:state"]
+        snapshot.stream = stream
+        // The one and only LED call site. Every appState transition funnels
+        // through setState → publishStreamState → patch, so the 8-state mapping
+        // lives here instead of being scattered across 16 setState call sites.
+        // Calls that only changed streamId land here too and are skipped by
+        // applyLed's lastAppliedLedState guard.
+        applyLed(stream.state)
+        break
+      }
+      case "glasses:state":
+        snapshot.glasses = next as Channels["glasses:state"]
+        break
+      case "stream:diagnostics":
+        snapshot.diagnostics = next as Channels["stream:diagnostics"]
+        break
+      case "recognition:result":
+        snapshot.results.push(next as Channels["recognition:result"])
+        if (snapshot.results.length > MAX_RESULTS) {
+          snapshot.results.splice(0, snapshot.results.length - MAX_RESULTS)
+        }
+        break
+      default:
+        // "error" is an event, not a state — no snapshot slot. Broadcast only.
+        break
+    }
+    sendBroadcast(channel, next)
+  }
+
+  /** Publish the appState + activeStreamId pair as it stands right now. */
+  function publishStreamState(message: string | null = null): void {
+    patch("stream:state", {state: appState, streamId: activeStreamId ?? null, message})
+  }
+
+  /** Publish the AI phase + identity as they stand right now. */
+  function publishAiState(
+    state: Channels["ai:state"]["state"],
+    message: string | null = null,
+  ): void {
+    patch("ai:state", {
+      state,
+      sessionId: ai?.getSessionId() ?? null,
+      model: readModelBlock(ai?.getModel()),
+      message,
+    })
+  }
+
+  // --- recognition throttle -------------------------------------------------
+
+  let lastResultSentAt = 0
+  let pendingResult: Channels["recognition:result"] | undefined
+  let resultTimer: ReturnType<typeof setTimeout> | undefined
+
+  function clearResultTimer(): void {
+    if (resultTimer !== undefined) {
+      clearTimeout(resultTimer)
+      resultTimer = undefined
+    }
+  }
+
+  /**
+   * Throttle non-final results to one per RESULT_THROTTLE_MS; let finals
+   * through immediately — those are what the wearer is actually waiting on.
+   *
+   * Trailing edge, newest-wins: a suppressed interim is held and emitted when
+   * the window closes, and a final drops any held interim rather than letting
+   * it arrive after the answer. Consequence worth knowing: snapshot.results
+   * holds what was BROADCAST, not every result the server produced.
+   */
+  function publishResult(next: Channels["recognition:result"]): void {
+    if (next.isFinal) {
+      clearResultTimer()
+      pendingResult = undefined
+      lastResultSentAt = Date.now()
+      patch("recognition:result", next)
+      return
+    }
+
+    const elapsed = Date.now() - lastResultSentAt
+    if (elapsed >= RESULT_THROTTLE_MS) {
+      lastResultSentAt = Date.now()
+      patch("recognition:result", next)
+      return
+    }
+
+    pendingResult = next
+    if (resultTimer === undefined) {
+      resultTimer = setTimeout(() => {
+        resultTimer = undefined
+        const queued = pendingResult
+        pendingResult = undefined
+        if (queued !== undefined) {
+          lastResultSentAt = Date.now()
+          patch("recognition:result", queued)
+        }
+      }, RESULT_THROTTLE_MS - elapsed)
+    }
+  }
+
+  // Registered exactly once. ui.handle throws SYNCHRONOUSLY on a second
+  // registration for the same channel (one handler per channel), so this must
+  // not be moved anywhere that can run twice. Returns the deregister fn.
+  unsubscribers.push(ui.handle("getSnapshot", async () => snapshot))
+
   function setState(next: AppState): void {
     if (appState === next) return
     console.log(`[State] ${appState} -> ${next}`)
     appState = next
+    publishStreamState()
   }
 
   // --- permissions (진단 로그 전용) ---------------------------------------
@@ -358,20 +754,44 @@ registerMiniapp((session) => {
       // body, which must stay synchronous.
       if (!probeRuntime()) {
         setState("error")
+        publishAiState("error", "런타임에 WebSocket 또는 fetch 가 없다")
         return
       }
       setState("connecting_ai")
+      publishAiState("connecting")
       // onReady also fires after a reconnect, so this returns us to ai_ready
       // without the user having to do anything.
-      ai = new AiClient(session.userId, () => {
-        if (appState === "connecting_ai" || appState === "error") setState("ai_ready")
-        else console.log("[Gate3] ready 수신했지만 state 유지:", appState)
-      })
+      ai = new AiClient(
+        session.userId,
+        () => {
+          if (appState === "connecting_ai" || appState === "error") setState("ai_ready")
+          else console.log("[Gate3] ready 수신했지만 state 유지:", appState)
+          // Published unconditionally: the AI phase is its own axis, and a
+          // reconnect that lands while we're already streaming still needs to
+          // reach the UI even though appState doesn't move.
+          publishAiState("ready")
+        },
+        // Results are forwarded as plain data. AiClient never sees `ui` —
+        // the bridge lives entirely on this side.
+        publishResult,
+      )
       ai.connect()
     }),
   )
 
-  unsubscribers.push(session.on("error", (e) => console.error("[Session] error:", e)))
+  unsubscribers.push(
+    session.on("error", (e) => {
+      console.error("[Session] error:", e)
+      // `retryable` is null, not false: the session "error" event carries no
+      // such field, and claiming false would be inventing an answer.
+      const r = asRecord(e)
+      patch("error", {
+        code: typeof r?.code === "string" ? r.code : "session_error",
+        message: e instanceof Error ? e.message : String(r?.message ?? e),
+        retryable: null,
+      })
+    }),
+  )
 
   unsubscribers.push(session.on("visibility", (v) => console.log("[Session] visibility:", v)))
 
@@ -391,6 +811,13 @@ registerMiniapp((session) => {
       // reach the wire before the host tears the socket down — per the SDK,
       // async work started in this handler will not complete.
       // Deliberately absent: session.stream.stop() and POST /stop, both async.
+      //
+      // The one exception: turnOffLed is fired and NOT waited on. Every
+      // LedModule method is async, so this may well not complete before the
+      // socket goes — that's accepted. Leaving the light on after teardown is
+      // worse than a call that sometimes doesn't land, and there is no
+      // synchronous way to darken it.
+      turnOffLed(`beforeDisconnect: ${r}`)
       if (activeStreamId !== undefined) {
         // stream_stop before stop, so the server unwinds the pull first.
         ai?.sendStreamStop(activeStreamId)
@@ -408,6 +835,11 @@ registerMiniapp((session) => {
       }
 
       ai?.closeNow(`disconnect: ${r}`)
+      turnOffLed(`disconnect: ${r}`)
+      publishAiState("disconnected", `disconnect: ${r}`)
+      // A queued interim must not fire after the subscriptions are drained.
+      clearResultTimer()
+      pendingResult = undefined
 
       // Best effort from here on — the transport is already going away, so
       // neither of these is guaranteed to complete.
@@ -427,6 +859,7 @@ registerMiniapp((session) => {
       ai?.postStopBestEffort()
 
       activeStreamId = undefined
+      publishStreamState(`disconnect: ${r}`)
       setState("idle")
 
       for (const unsubscribe of unsubscribers) {
@@ -445,6 +878,26 @@ registerMiniapp((session) => {
     session.glasses.onWifi((data) => {
       latestWifi = data
       console.log("[Gate4] WiFi:", JSON.stringify(data))
+      // Spread the current slot: this event only knows about Wi-Fi, and
+      // overwriting battery/charging with null would erase what onBattery said.
+      patch("glasses:state", {
+        ...snapshot.glasses,
+        wifiConnected: data?.connected ?? null,
+        ssid: data?.ssid ?? null,
+      })
+    }),
+  )
+
+  // Battery had no subscriber before — added for the glasses:state channel.
+  // BatteryData is {level, charging}; `level` is the percentage.
+  unsubscribers.push(
+    session.glasses.onBattery((data) => {
+      console.log("[Gate4] Battery:", JSON.stringify(data))
+      patch("glasses:state", {
+        ...snapshot.glasses,
+        battery: data?.level ?? null,
+        charging: data?.charging ?? null,
+      })
     }),
   )
 
@@ -491,6 +944,31 @@ registerMiniapp((session) => {
     return false
   }
 
+  /**
+   * Wait (don't reject) for the AI socket — same shape as waitForWifi.
+   *
+   * AiClient reconnects on its own after an abnormal close, but it has no
+   * "reconnecting" state: the whole backoff window reads as `error`, so a
+   * single isReady() check can't tell "dead" from "back in a second". Polling
+   * for 3s answers that question without adding state to AiClient.
+   */
+  async function waitForAi(): Promise<boolean> {
+    const deadline = Date.now() + AI_WAIT_MS
+    console.log("[Gate4] AI 연결 대기 시작. aiState=", ai?.getState())
+    // One of the two places index.ts reads ai.getState() — publish the
+    // projection here rather than teaching AiClient about the UI.
+    publishAiState(aiPhase(ai?.getState()))
+
+    while (Date.now() < deadline) {
+      if (ai?.isReady() === true) return true
+      await new Promise((resolve) => setTimeout(resolve, AI_POLL_MS))
+    }
+
+    console.warn("[Gate4] AI 연결 대기 실패. aiState=", ai?.getState())
+    publishAiState(aiPhase(ai?.getState()), `${AI_WAIT_MS}ms 안에 AI 세션이 준비되지 않았다`)
+    return false
+  }
+
   // --- shared cleanup -----------------------------------------------------
 
   /**
@@ -507,6 +985,11 @@ registerMiniapp((session) => {
   async function cleanupStream(reason: string, opts: {notifyAi: boolean}): Promise<void> {
     const streamId = activeStreamId
     activeStreamId = undefined
+    // No LED call here on purpose: both callers (runStopSequence, rollback)
+    // setState immediately afterwards, and that setState drives patch →
+    // applyLed to the correct light. Darkening here would only add a second
+    // blackout on the way through.
+    publishStreamState(`cleanup: ${reason}`)
     console.log(`[Gate4] cleanup 시작 (${reason}). streamId=`, streamId)
 
     // 1. AI WebSocket first.
@@ -591,13 +1074,21 @@ registerMiniapp((session) => {
       setState("error")
       return
     }
-    if (ai?.isReady() !== true) {
-      console.error("[Gate4] AI 세션이 준비되지 않았다 — 스트림 시작 불가. aiState=", ai?.getState())
-      return
-    }
-
     startInFlight = true
     try {
+      // 0. AI 세션. 한 번 보고 포기하지 않고 잠깐 기다린다 — 소켓이 죽어도
+      // AiClient 가 1s→2s→4s… 로 알아서 재연결하고, 그 사이 누른 롱프레스는
+      // 원래대로면 조용히 리턴했다. hasDisplay=false 라 착용자에게 아무 피드백이
+      // 없어서 버튼이 고장 난 것처럼 보였던 자리다.
+      //
+      // 실패해도 error 로 떨어뜨리지 않는다: 재연결은 계속 진행 중이므로
+      // 상태를 보존한 채 다시 누르면 그때 성공한다. startInFlight 안쪽이라
+      // 대기 중 두 번째 롱프레스가 병렬 진입하는 일은 없다.
+      if (!(await waitForAi())) {
+        console.error("[Gate4] AI 세션이 준비되지 않았다 — 스트림 시작 불가. 다시 눌러라")
+        return
+      }
+
       // 1. Wi-Fi.
       setState("waiting_wifi")
       if (!(await waitForWifi())) {
@@ -627,8 +1118,29 @@ registerMiniapp((session) => {
       // that actually won, so D's 15 isn't reported as 30.
       console.log("[Gate4] fps 요청=", requestedFps, "/ resolvedConfig=", result?.resolvedConfig?.video?.fps)
 
+      // Diagnostics before validation: a rung that "succeeded" but produced no
+      // webrtcUrl is exactly the case worth showing, and the rollback below
+      // would otherwise return before anything reached the UI.
+      //
+      // `requestedFps` is the winning rung's own request, not the nominal 30 —
+      // rung D asks for 15 and reporting 30 there would be a lie.
+      // resolvedConfig is OPTIONAL: every hop is optional-chained.
+      // Host via parseUrlParts() — `new URL()` does not exist in this runtime.
+      patch("stream:diagnostics", {
+        requestedFps,
+        resolvedFps: result?.resolvedConfig?.video?.fps ?? null,
+        transport: result?.resolvedConfig?.transport ?? null,
+        webrtcHost:
+          typeof webrtcUrl === "string" && webrtcUrl.length > 0
+            ? (parseUrlParts(webrtcUrl)?.hostname ?? null)
+            : null,
+        mode: result?.mode ?? null,
+        status: result?.status ?? null,
+      })
+
       // Track it before validation so a rollback can always find the id.
       activeStreamId = streamId
+      publishStreamState()
 
       // 3. Validate the WHEP URL. Anything unusable here is a hard failure —
       // the server could not pull it either.
@@ -653,7 +1165,12 @@ registerMiniapp((session) => {
       }
 
       // 4. Hand the URL to the AI server.
-      if (!ai.sendStreamStart(streamId, webrtcUrl)) {
+      // `ai?.` rather than `ai.`: the old `ai?.isReady() !== true` guard narrowed
+      // `ai` for the rest of the function, but waitForAi returns a plain boolean
+      // so TS can't carry that through. Undefined can't actually reach here
+      // (waitForAi only returns true via `ai?.isReady() === true`), and if it
+      // somehow did, `!undefined` rolls back — which is the right answer anyway.
+      if (!ai?.sendStreamStart(streamId, webrtcUrl)) {
         console.error("[Gate4] stream_start 전송 실패 — 롤백한다")
         await rollback("stream_start 전송 실패")
         return
@@ -723,7 +1240,13 @@ registerMiniapp((session) => {
         // gesture would be unguessable.
         switch (appState) {
           case "ai_ready":
+          case "connecting_ai":
           case "waiting_wifi":
+            // connecting_ai is accepted because waitForAi handles it: the AI
+            // socket may be mid-(re)connect and land well inside 3s. idle is
+            // deliberately NOT here — there `ai` hasn't been constructed yet,
+            // so there is nothing to wait for.
+            //
             // waiting_wifi is a retry entry point: the user connects Wi-Fi via
             // the setup flow, comes back, and presses again.
             void runStartSequence().catch((err) => {
@@ -750,7 +1273,7 @@ registerMiniapp((session) => {
             return
 
           default:
-            // idle / connecting_ai: AI not up yet.
+            // idle: AI client not constructed yet ("ready" hasn't fired).
             // starting_stream (~5s) / stopping: in flight, second press would race.
             console.warn("[Gate4] 지금은 롱프레스를 받지 않는다. state=", appState)
             return

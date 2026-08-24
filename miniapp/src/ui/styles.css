@@ -1,43 +1,389 @@
+/**
+ * Plain CSS. No Tailwind, no component library.
+ *
+ * miniapp/ has no Tailwind toolchain and this is not the moment to add one:
+ * it would mean Tailwind v4 + Radix + cva + lucide wired into build.ts, which
+ * is SDK-managed and whose plugin compatibility is unverified. The 8/26
+ * deadline does not have room for that risk.
+ *
+ * Dark mode: MentraProvider toggles `.dark` on documentElement during render
+ * (before children paint, so no flash). `:root` and `.dark` below are the only
+ * two token blocks — nothing else hardcodes a color.
+ *
+ * FONTS: the IBM Plex families are declared in the stacks but the font FILES
+ * are not bundled and no remote @import is used on purpose — a WebView on a
+ * phone that happens to be offline would block on it, and shipping webfont
+ * binaries is a separate decision. Where Plex is absent the stack falls back to
+ * the platform Korean UI face, which is legible everywhere we demo.
+ */
+
 :root {
   color-scheme: light dark;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  --gs-brand: #0b4fd8;
+  --gs-streaming: #00a862;
+  --gs-waiting: #e08a00;
+  --gs-error: #e5342a;
+  --gs-idle: #5a6b84;
+
+  --gs-bg: #f2f6fc;
+  --gs-fg: #0a1424;
+  --gs-surface: #ffffff;
+  --gs-border: #d3deee;
+  --gs-muted: #5a6b84;
+
+  /* 4 / 8 / 10 only. Heavier rounding reads as consumer-app, not emergency tool. */
+  --gs-r-sm: 4px;
+  --gs-r-md: 8px;
+  --gs-r-lg: 10px;
+
+  --gs-font-ui: "IBM Plex Sans KR", "IBM Plex Sans", -apple-system, BlinkMacSystemFont,
+    "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
+  --gs-font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.dark {
+  --gs-brand: #5b8df0;
+  --gs-streaming: #2cc183;
+  --gs-waiting: #f0a430;
+  --gs-error: #ff6357;
+  --gs-idle: #93a4bc;
+
+  --gs-bg: #0a1424;
+  --gs-fg: #e8eef7;
+  --gs-surface: #121e31;
+  --gs-border: #24344c;
+  --gs-muted: #93a4bc;
+}
+
+* {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
-  background: #0b0b0b;
-  color: #f5f5f5;
+  min-height: 100vh;
+  background: var(--gs-bg);
+  color: var(--gs-fg);
+  font-family: var(--gs-font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --------------------------------------------------------------------------
+   Tone → color. One class, used by dots, cards and the pulse.
+   Tone is never the ONLY signal: every place that uses it also varies text,
+   border-style or weight.
+   -------------------------------------------------------------------------- */
+
+.gs-tone-idle {
+  --gs-tone: var(--gs-idle);
+}
+.gs-tone-connecting {
+  --gs-tone: var(--gs-brand);
+}
+.gs-tone-waiting {
+  --gs-tone: var(--gs-waiting);
+}
+.gs-tone-streaming {
+  --gs-tone: var(--gs-streaming);
+}
+.gs-tone-error {
+  --gs-tone: var(--gs-error);
+}
+
+/* --------------------------------------------------------------------------
+   Layout
+   -------------------------------------------------------------------------- */
+
+.gs-root {
   min-height: 100vh;
   display: flex;
+  flex-direction: column;
+}
+
+/* MiniappHeader is "unstyled beyond the layout" — it computes marginTop /
+   paddingLeft / paddingRight / height inline and leaves the paint to us. */
+.gs-header {
+  border-bottom: 1px solid var(--gs-border);
+  color: var(--gs-fg);
+}
+
+.gs-main {
+  flex: 1;
+  padding: 12px 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   Notices (loading / snapshot failure)
+   -------------------------------------------------------------------------- */
+
+.gs-notice {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-md);
+  background: var(--gs-surface);
+  color: var(--gs-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.gs-notice-error {
+  border-color: var(--gs-error);
+  color: var(--gs-fg);
+}
+
+/* --------------------------------------------------------------------------
+   Status badges
+   -------------------------------------------------------------------------- */
+
+.gs-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.gs-badge {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-sm);
+  background: var(--gs-surface);
 }
 
-.app {
+.gs-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gs-tone, var(--gs-idle));
+}
+
+.gs-badge-name {
+  flex: none;
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  color: var(--gs-muted);
+}
+
+.gs-badge-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--gs-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
+}
+
+/* --------------------------------------------------------------------------
+   Status card — the screen's centrepiece, replacing a live video pane
+   -------------------------------------------------------------------------- */
+
+.gs-card {
+  padding: 16px;
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-lg);
+  background: var(--gs-surface);
+}
+
+.gs-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
   text-align: center;
-  padding: 24px;
+  /* Tone reaches the card as a left rule, not a fill — readable in flat
+     lighting and when the demo video crushes saturation. */
+  border-left: 3px solid var(--gs-tone, var(--gs-idle));
 }
 
-h1 {
+.gs-status-label {
+  margin: 0;
   font-size: 1.5rem;
-  margin: 0 0 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
-p {
-  margin: 8px 0 24px;
+.gs-status-detail {
+  margin: 0;
+  max-width: 34ch;
+  font-size: 0.875rem;
+  line-height: 1.55;
+  color: var(--gs-muted);
+}
+
+.gs-visual {
+  position: relative;
+  width: 84px;
+  height: 84px;
+  display: grid;
+  place-items: center;
+}
+
+.gs-pulse-core {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--gs-tone, var(--gs-idle));
+}
+
+.gs-pulse-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--gs-tone, var(--gs-idle));
+  opacity: 0.25;
+}
+
+.gs-pulse-on {
+  animation: gs-pulse 1.8s ease-out infinite;
+}
+
+@keyframes gs-pulse {
+  0% {
+    transform: scale(0.4);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
+
+/* The indicator is decoration; state is always in text beside it. */
+@media (prefers-reduced-motion: reduce) {
+  .gs-pulse-on {
+    animation: none;
+    opacity: 0.35;
+  }
+}
+
+.gs-hint {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--gs-border);
+  border-radius: var(--gs-r-md);
+  text-align: center;
+  font-size: 0.875rem;
+  color: var(--gs-muted);
+}
+
+/* --------------------------------------------------------------------------
+   Recognition results
+   -------------------------------------------------------------------------- */
+
+.gs-card-title {
+  margin: 0 0 10px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--gs-muted);
+}
+
+.gs-empty {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--gs-muted);
+}
+
+.gs-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.gs-chip {
+  padding: 4px 9px;
+  border-radius: var(--gs-r-sm);
+  font-family: var(--gs-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8125rem;
+}
+
+/* Final vs interim differs by border STYLE, weight and opacity — plus the "…"
+   the component appends. Never by hue alone. */
+.gs-chip-final {
+  border: 1px solid var(--gs-brand);
+  color: var(--gs-fg);
+  font-weight: 600;
+  opacity: 1;
+}
+
+.gs-chip-interim {
+  border: 1px dashed var(--gs-border);
+  color: var(--gs-muted);
+  font-weight: 400;
   opacity: 0.7;
 }
 
-button {
-  font-size: 1rem;
-  padding: 12px 24px;
-  border-radius: 12px;
-  border: none;
-  background: #4a9eff;
-  color: white;
-  cursor: pointer;
+.gs-sentence {
+  margin: 12px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--gs-border);
+  font-size: 1.125rem;
+  line-height: 1.6;
+  font-weight: 500;
 }
 
-button:active {
-  transform: scale(0.97);
+/* --------------------------------------------------------------------------
+   Diagnostics — collapsed by default
+   -------------------------------------------------------------------------- */
+
+.gs-diag {
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-md);
+  background: var(--gs-surface);
+}
+
+.gs-diag-summary {
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  color: var(--gs-muted);
+}
+
+.gs-diag-list {
+  margin: 0;
+  padding: 0 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gs-diag-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  border-top: 1px solid var(--gs-border);
+}
+
+.gs-diag-row dt {
+  flex: none;
+  font-size: 0.75rem;
+  color: var(--gs-muted);
+}
+
+.gs-diag-row dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+  font-size: 0.75rem;
+}
+
+.gs-mono {
+  font-family: var(--gs-font-mono);
+  /* Digits line up column-wise as values tick — fps, battery, window index. */
+  font-variant-numeric: tabular-nums;
 }

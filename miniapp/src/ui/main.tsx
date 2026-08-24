@@ -25,6 +25,7 @@ createRoot(root).render(
   </MentraProvider>,
 )
 
-// MUST call mentra.ready() on bootstrap so the host knows the WebView is
-// mounted and can flush any buffered `session.ui.send` calls.
-mentra.ready()
+// mentra.ready() is NOT called here. It lives in App's mount effect instead, so
+// it fires only after the channel handlers are armed — render() is concurrent,
+// so a call on this line would land before any subscription existed. It stays a
+// once-per-bootstrap call either way; the SDK documents it as idempotent.

@@ -97,6 +97,22 @@ function logFetchError(label: string, err: unknown): void {
 // Client
 // ---------------------------------------------------------------------------
 
+/**
+ * A parsed `result` payload, handed to the caller via the `onResult` callback.
+ *
+ * Deliberately plain data with no UI types: this module owns the AI socket and
+ * nothing else. index.ts decides what reaches the WebView.
+ *
+ * `windowIndex` comes from `result.sequence.window_index` — there is no
+ * `result.sequence_index` on the wire. `-1` means the server didn't send one.
+ */
+export interface AiRecognitionResult {
+  text: string
+  confidence: number
+  isFinal: boolean
+  windowIndex: number
+}
+
 export type AiClientState =
   | "idle"
   | "creating_session"
@@ -143,10 +159,13 @@ export class AiClient {
    * @param userId  session.userId, sent as `user_id` on POST /v1/sessions.
    * @param onReady Fired every time a `ready` arrives — including after a
    *                reconnect, so the caller can re-enter its ai_ready state.
+   * @param onResult Fired once per `result` message with the parsed fields.
+   *                Pure data out; this class holds no reference to the UI.
    */
   constructor(
     private readonly userId: string,
     private readonly onReady?: () => void,
+    private readonly onResult?: (result: AiRecognitionResult) => void,
   ) {}
 
   getState(): AiClientState {
@@ -498,6 +517,23 @@ export class AiClient {
         // sequence_service.metadata(). There is no `sequence_index` on the wire.
         console.log("[Gate3] result.sequence.window_index=", asRecord(r?.sequence)?.window_index)
         console.log("[Gate3] result.sequence=", JSON.stringify(r?.sequence))
+
+        // Hand the parsed values out. Every field is re-checked because these
+        // came off the wire as `unknown`; the callback's signature promises
+        // concrete types. A throwing consumer must not kill the socket.
+        if (this.onResult !== undefined) {
+          const windowIndex = asRecord(r?.sequence)?.window_index
+          try {
+            this.onResult({
+              text: typeof r?.text === "string" ? r.text : "",
+              confidence: typeof r?.confidence === "number" ? r.confidence : 0,
+              isFinal: r?.is_final === true,
+              windowIndex: typeof windowIndex === "number" ? windowIndex : -1,
+            })
+          } catch (err) {
+            console.error("[Gate3] onResult 콜백 예외:", err)
+          }
+        }
         break
       }
 
