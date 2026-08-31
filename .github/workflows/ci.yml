@@ -57,20 +57,19 @@ jobs:
           print("contracts JSON validation passed.")
           PY
 
-      - name: Set up Node.js
-        if: ${{ hashFiles('mentra/package.json') != '' }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+      # mentra/ 를 대상으로 하던 Node 스텝 두 개("Set up Node.js" / "Check Mentra
+      # MiniApp build") 는 여기서 뺐다. mentra/package.json 에 build 스크립트가
+      # 없어서 `npm run build --if-present` 가 아무것도 검증하지 않고 통과했고,
+      # mentra/ 는 bun 프로젝트(bun.lock, bunfig.toml)라 npm install 이 lockfile 도
+      # 무시했다. 디렉터리는 그대로 있고 CI 대상에서만 빠진 것이다.
+      - name: Set up Bun
+        if: ${{ hashFiles('miniapp/package.json') != '' }}
+        uses: oven-sh/setup-bun@v2
 
-      - name: Check Mentra MiniApp build
-        if: ${{ hashFiles('mentra/package.json') != '' }}
-        working-directory: mentra
+      - name: Check MiniApp
+        if: ${{ hashFiles('miniapp/package.json') != '' }}
+        working-directory: miniapp
         run: |
-          if [ -f "package-lock.json" ]; then
-            npm ci
-          else
-            npm install
-          fi
-
-          npm run build --if-present
+          bun install --frozen-lockfile
+          bun run typecheck
+          bun run build
