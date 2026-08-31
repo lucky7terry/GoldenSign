@@ -495,6 +495,7 @@ registerMiniapp((session) => {
     diagnostics: {
       requestedFps: null,
       resolvedFps: null,
+      processedFps: null,
       transport: null,
       webrtcHost: null,
       mode: null,
@@ -679,6 +680,58 @@ registerMiniapp((session) => {
     }
   }
 
+  // --- 처리 fps ---------------------------------------------------------------
+
+  /**
+   * 서버 최상위 `sequence_index`(= 누적 처리 프레임 수) 의 직전 값과 그 수신 시각.
+   * 두 지점의 차분으로 처리 fps 를 낸다. 절대값이 아니라 차분인 이유는
+   * sequence_index 가 스트림 시작 이후의 누적치라, 나눌 기준 시각이 따로 없기
+   * 때문이다.
+   */
+  let lastSequenceIndex: number | undefined
+  let lastSequenceAt = 0
+
+  /** 새 스트림에서 서버 카운터가 1부터 다시 시작하므로 기준점도 함께 버린다. */
+  function resetProcessedFps(): void {
+    lastSequenceIndex = undefined
+    lastSequenceAt = 0
+  }
+
+  /**
+   * 스로틀 이전, 서버가 보낸 모든 result 에서 부른다. 방송된 것만 세면 우리가
+   * 건 스로틀이 서버의 처리 속도로 둔갑한다.
+   */
+  function trackProcessedFps(sequenceIndex: number | null): void {
+    if (sequenceIndex === null) return
+
+    const now = Date.now()
+    const prevIndex = lastSequenceIndex
+    const prevAt = lastSequenceAt
+    lastSequenceIndex = sequenceIndex
+    lastSequenceAt = now
+
+    // 첫 표본은 기준점만 남기고 끝낸다 — 차분을 낼 짝이 아직 없다.
+    if (prevIndex === undefined) return
+
+    const frames = sequenceIndex - prevIndex
+    const elapsedSec = (now - prevAt) / 1000
+    // 인덱스가 되감겼거나(서버 재시작·새 스트림) 같은 밀리초에 두 건이 온 경우.
+    // 기준점은 위에서 이미 갱신했으니 다음 result 부터 정상 복귀한다.
+    if (frames <= 0 || elapsedSec <= 0) return
+
+    patch("stream:diagnostics", {
+      ...snapshot.diagnostics,
+      // patch 는 진단 슬롯을 통째로 갈아 끼우므로 나머지 필드를 함께 실어야 한다.
+      processedFps: Math.round((frames / elapsedSec) * 10) / 10,
+    })
+  }
+
+  /** AiClient 가 result 를 받을 때마다 부르는 곳. fps 를 먼저 세고 방송한다. */
+  function handleResult(next: Channels["recognition:result"]): void {
+    trackProcessedFps(next.sequenceIndex)
+    publishResult(next)
+  }
+
   // 정확히 한 번만 등록한다. 같은 채널에 두 번째로 등록하면 ui.handle 이 동기적
   // 으로 throw 한다(채널당 핸들러 하나). 두 번 실행될 수 있는 자리로 옮기면
   // 안 된다. 반환값은 해제 함수다.
@@ -770,7 +823,7 @@ registerMiniapp((session) => {
         },
         // 결과는 순수 데이터로 넘어온다. AiClient 는 `ui` 를 보지 못한다 —
         // 브리지는 전적으로 이쪽에 있다.
-        publishResult,
+        handleResult,
       )
       ai.connect()
     }),
@@ -1106,9 +1159,13 @@ registerMiniapp((session) => {
       //
       // resolvedConfig 는 Optional 이다. 모든 단계를 옵셔널 체이닝으로 탄다.
       // 호스트명은 parseUrlParts() 로 뽑는다 — 이 런타임에 `new URL()` 은 없다.
+      // 새 스트림의 서버 카운터는 1부터 다시 시작한다. 이전 스트림의 처리 fps 를
+      // 그대로 들고 있으면 안 되므로 기준점과 표시값을 함께 비운다.
+      resetProcessedFps()
       patch("stream:diagnostics", {
         requestedFps,
         resolvedFps: result?.resolvedConfig?.video?.fps ?? null,
+        processedFps: null,
         transport: result?.resolvedConfig?.transport ?? null,
         webrtcHost:
           typeof webrtcUrl === "string" && webrtcUrl.length > 0

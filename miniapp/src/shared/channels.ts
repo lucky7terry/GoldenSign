@@ -86,17 +86,22 @@ export interface Channels {
    * 인식 결과 한 건.
    *
    * `windowIndex` 는 서버의 `result.sequence.window_index` 에서 온다
-   * (sequence_service.metadata()). `result.sequence_index` 라는 필드는
-   * 서버에 존재하지 않는다.
+   * (sequence_service.metadata()).
    *
    * 서버는 60프레임이 차기 전 구간에서 window_index 를 null 로 보낸다.
    * 그 경우 background 가 -1 센티널을 넣는다.
+   *
+   * `sequenceIndex` 는 `result` 안이 아니라 서버 메시지 **최상위** 의
+   * `sequence_index` 에서 온다. 서버가 실제로 처리한 누적 프레임 수이고,
+   * background 는 이 값으로 처리 fps 를 계산해 stream:diagnostics 에 싣는다.
    */
   "recognition:result": {
     text: string
     confidence: number
     isFinal: boolean
     windowIndex: number
+    /** 서버 누적 처리 프레임 수. 서버가 숫자로 주지 않으면 null. */
+    sequenceIndex: number | null
   }
 
   "glasses:state": {
@@ -113,6 +118,12 @@ export interface Channels {
   "stream:diagnostics": {
     requestedFps?: number | null
     resolvedFps?: number | null
+    /**
+     * 서버가 실제로 처리하고 있는 fps. 연속한 두 result 의 최상위
+     * `sequence_index` 차이를 경과 시간으로 나눈 값이라, 첫 result 하나만으로는
+     * 계산되지 않는다(그동안은 null).
+     */
+    processedFps?: number | null
     transport?: string | null
     /** 호스트명만. parseUrlParts() 로 뽑는다. `new URL()` 은 런타임에 없다. */
     webrtcHost?: string | null

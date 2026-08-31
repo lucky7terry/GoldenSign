@@ -103,15 +103,21 @@ function logFetchError(label: string, err: unknown): void {
  * 무엇을 보낼지는 index.ts 가 정한다.
  *
  * `windowIndex` 의 출처는 `result.sequence.window_index` 다.
- * `result.sequence_index` 라는 필드는 와이어에 존재하지 않는다.
  * 서버는 60프레임이 차기 전 구간에서 window_index 를 null 로 보내는데,
  * 그 경우 -1 을 넣는다(센티널).
+ *
+ * `sequenceIndex` 는 `result` 안이 아니라 메시지 최상위의 `sequence_index` 에서
+ * 온다(whep_service.py 의 result 전송 블록). 서버가 실제로 처리한 누적 프레임
+ * 수이며, 숫자가 아니면 null 이다. `result.sequence_index` 라는 중첩 필드는
+ * 없으니 헷갈리지 말 것.
  */
 export interface AiRecognitionResult {
   text: string
   confidence: number
   isFinal: boolean
   windowIndex: number
+  /** 서버 누적 처리 프레임 수. 없거나 숫자가 아니면 null. */
+  sequenceIndex: number | null
 }
 
 export type AiClientState =
@@ -516,10 +522,12 @@ export class AiClient {
         console.log("[AI] result.text=", r?.text)
         console.log("[AI] result.confidence=", r?.confidence)
         console.log("[AI] result.is_final=", r?.is_final)
-        // 인덱스 필드는 result.sequence.window_index 다. sequence_service.
-        // metadata() 로 확인했다. 와이어에 `sequence_index` 는 없다.
+        // 인덱스 필드는 두 개고 층이 다르다. 창 번호는 result.sequence.
+        // window_index (sequence_service.metadata()), 누적 처리 프레임 수는
+        // result 안이 아니라 메시지 최상위의 sequence_index 다.
         console.log("[AI] result.sequence.window_index=", asRecord(r?.sequence)?.window_index)
         console.log("[AI] result.sequence=", JSON.stringify(r?.sequence))
+        console.log("[AI] 최상위 sequence_index=", m?.sequence_index)
 
         // 파싱한 값을 밖으로 넘긴다. 전부 와이어에서 `unknown` 으로 온 값인데
         // 콜백 시그니처는 구체 타입을 약속하므로 필드마다 다시 검사한다.
@@ -528,12 +536,15 @@ export class AiClient {
         // 구간에서 null 로 온다). 소비자가 던지는 예외로 소켓이 죽으면 안 된다.
         if (this.onResult !== undefined) {
           const windowIndex = asRecord(r?.sequence)?.window_index
+          // r 이 아니라 m 에서 읽는다 — 최상위 형제 필드다.
+          const sequenceIndex = m?.sequence_index
           try {
             this.onResult({
               text: typeof r?.text === "string" ? r.text : "",
               confidence: typeof r?.confidence === "number" ? r.confidence : 0,
               isFinal: r?.is_final === true,
               windowIndex: typeof windowIndex === "number" ? windowIndex : -1,
+              sequenceIndex: typeof sequenceIndex === "number" ? sequenceIndex : null,
             })
           } catch (err) {
             console.error("[AI] onResult 콜백 예외:", err)

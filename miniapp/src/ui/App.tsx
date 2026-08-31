@@ -271,12 +271,11 @@ function DiagnosticsPanel({snap}: {snap: Snapshot}) {
           <dt>fps</dt>
           <dd className="gs-mono">
             {/*
-              세 칸이지만 앱이 아는 것은 둘뿐이다. 세 번째 — AI 서버가 실제로
-              처리한 프레임 수 — 는 미니앱에 닿지 않는다. 실어 오는 채널도 없고
-              서버 `result` 페이로드에도 그런 필드가 없다. 추측하는 대신 "—" 로
-              둔다.
+              요청 → 협상 → 서버가 실제로 처리 중인 값. 세 번째는 background 가
+              연속한 두 result 의 최상위 `sequence_index` 차분으로 계산한다.
+              첫 result 한 건만으로는 차분이 안 나오므로 그동안은 "—" 다.
             */}
-            {fmt(d.requestedFps)} → {fmt(d.resolvedFps)} → —
+            {fmt(d.requestedFps)} → {fmt(d.resolvedFps)} → {fmt(d.processedFps)}
           </dd>
         </div>
         <div className="gs-diag-row">
