@@ -1,0 +1,398 @@
+/**
+ * 플레인 CSS. Tailwind 도 컴포넌트 라이브러리도 쓰지 않는다.
+ *
+ * miniapp/ 에는 Tailwind 툴체인이 없고 지금 넣을 때가 아니다. 넣으려면
+ * Tailwind v4 + Radix + cva + lucide 를 build.ts 에 물려야 하는데, build.ts 는
+ * SDK 관리 대상이고 플러그인 호환성이 미검증이다. 마감을 앞두고 질 위험이 아니다.
+ *
+ * 다크 모드: MentraProvider 가 렌더 중 documentElement 의 `.dark` 를 토글한다
+ * (자식이 그려지기 전이라 깜빡임이 없다). 아래 `:root` 와 `.dark` 두 블록이
+ * 토큰의 전부이며, 그 밖에 색을 하드코딩한 곳은 없다.
+ *
+ * 폰트: IBM Plex 계열을 스택에 선언했지만 폰트 파일은 번들하지 않았고 원격
+ * @import 도 일부러 쓰지 않았다. 오프라인 상태의 폰에서 WebView 가 그 요청에
+ * 막힐 수 있고, 웹폰트 바이너리를 싣는 것은 별개의 결정이기 때문이다. Plex 가
+ * 없는 기기에서는 플랫폼 한글 UI 서체로 폴백하며, 시연 환경에서는 모두 읽힌다.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  --gs-brand: #0b4fd8;
+  --gs-streaming: #00a862;
+  --gs-waiting: #e08a00;
+  --gs-error: #e5342a;
+  --gs-idle: #5a6b84;
+
+  --gs-bg: #f2f6fc;
+  --gs-fg: #0a1424;
+  --gs-surface: #ffffff;
+  --gs-border: #d3deee;
+  --gs-muted: #5a6b84;
+
+  /* 4 / 8 / 10 만 쓴다. 더 둥글면 응급 도구가 아니라 소비자 앱처럼 읽힌다. */
+  --gs-r-sm: 4px;
+  --gs-r-md: 8px;
+  --gs-r-lg: 10px;
+
+  --gs-font-ui: "IBM Plex Sans KR", "IBM Plex Sans", -apple-system, BlinkMacSystemFont,
+    "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
+  --gs-font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.dark {
+  --gs-brand: #5b8df0;
+  --gs-streaming: #2cc183;
+  --gs-waiting: #f0a430;
+  --gs-error: #ff6357;
+  --gs-idle: #93a4bc;
+
+  --gs-bg: #0a1424;
+  --gs-fg: #e8eef7;
+  --gs-surface: #121e31;
+  --gs-border: #24344c;
+  --gs-muted: #93a4bc;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--gs-bg);
+  color: var(--gs-fg);
+  font-family: var(--gs-font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --------------------------------------------------------------------------
+   톤 → 색. 점·카드·맥동이 같은 클래스를 쓴다.
+   톤이 유일한 신호인 곳은 없다. 톤을 쓰는 자리마다 문구나 테두리 스타일,
+   굵기도 함께 달라진다.
+   -------------------------------------------------------------------------- */
+
+.gs-tone-idle {
+  --gs-tone: var(--gs-idle);
+}
+.gs-tone-connecting {
+  --gs-tone: var(--gs-brand);
+}
+.gs-tone-waiting {
+  --gs-tone: var(--gs-waiting);
+}
+.gs-tone-streaming {
+  --gs-tone: var(--gs-streaming);
+}
+.gs-tone-error {
+  --gs-tone: var(--gs-error);
+}
+
+/* --------------------------------------------------------------------------
+   레이아웃
+   -------------------------------------------------------------------------- */
+
+.gs-root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* MiniappHeader 위쪽에 폰 상태 표시줄 자리를 확보한다. paddingTop 과 minHeight 는
+   useSafeArea 값으로 JSX 에서 인라인으로 준다 — 그쪽 주석 참고.
+
+   flex-column 은 장식이 아니다. insets.top 이 0 일 때 헤더 자신의 marginTop 이
+   이 래퍼를 뚫고 마진 붕괴하는 것을 막는다. */
+.gs-headerbar {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+}
+
+/* MiniappHeader 는 "unstyled beyond the layout" 이다 — marginTop / paddingLeft /
+   paddingRight / height 를 인라인으로 계산해 주고 색칠은 우리에게 맡긴다. */
+.gs-header {
+  border-bottom: 1px solid var(--gs-border);
+  color: var(--gs-fg);
+}
+
+.gs-main {
+  flex: 1;
+  padding: 12px 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   알림 (로딩 / 스냅샷 실패)
+   -------------------------------------------------------------------------- */
+
+.gs-notice {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-md);
+  background: var(--gs-surface);
+  color: var(--gs-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.gs-notice-error {
+  border-color: var(--gs-error);
+  color: var(--gs-fg);
+}
+
+/* --------------------------------------------------------------------------
+   상태 배지
+   -------------------------------------------------------------------------- */
+
+.gs-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.gs-badge {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-sm);
+  background: var(--gs-surface);
+}
+
+.gs-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gs-tone, var(--gs-idle));
+}
+
+.gs-badge-name {
+  flex: none;
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  color: var(--gs-muted);
+}
+
+.gs-badge-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--gs-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
+}
+
+/* --------------------------------------------------------------------------
+   상태 카드 — 라이브 영상 자리를 대신하는 화면의 중심
+   -------------------------------------------------------------------------- */
+
+.gs-card {
+  padding: 16px;
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-lg);
+  background: var(--gs-surface);
+}
+
+.gs-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+  /* 톤을 채우기가 아니라 좌측 세로선으로 표현한다. 평평한 조명에서도, 시연
+     영상이 채도를 뭉개도 읽힌다. */
+  border-left: 3px solid var(--gs-tone, var(--gs-idle));
+}
+
+.gs-status-label {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.gs-status-detail {
+  margin: 0;
+  max-width: 34ch;
+  font-size: 0.875rem;
+  line-height: 1.55;
+  color: var(--gs-muted);
+}
+
+.gs-visual {
+  position: relative;
+  width: 84px;
+  height: 84px;
+  display: grid;
+  place-items: center;
+}
+
+.gs-pulse-core {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--gs-tone, var(--gs-idle));
+}
+
+.gs-pulse-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--gs-tone, var(--gs-idle));
+  opacity: 0.25;
+}
+
+.gs-pulse-on {
+  animation: gs-pulse 1.8s ease-out infinite;
+}
+
+@keyframes gs-pulse {
+  0% {
+    transform: scale(0.4);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
+
+/* 인디케이터는 장식이다. 상태는 언제나 옆의 글자에 있다. */
+@media (prefers-reduced-motion: reduce) {
+  .gs-pulse-on {
+    animation: none;
+    opacity: 0.35;
+  }
+}
+
+.gs-hint {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--gs-border);
+  border-radius: var(--gs-r-md);
+  text-align: center;
+  font-size: 0.875rem;
+  color: var(--gs-muted);
+}
+
+/* --------------------------------------------------------------------------
+   인식 결과
+   -------------------------------------------------------------------------- */
+
+.gs-card-title {
+  margin: 0 0 10px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--gs-muted);
+}
+
+.gs-empty {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--gs-muted);
+}
+
+.gs-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.gs-chip {
+  padding: 4px 9px;
+  border-radius: var(--gs-r-sm);
+  font-family: var(--gs-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8125rem;
+}
+
+/* 확정과 중간은 테두리 스타일·굵기·투명도로 갈린다. 여기에 컴포넌트가 붙이는
+   "…" 까지 더해진다. 색조만으로 구분하지 않는다. */
+.gs-chip-final {
+  border: 1px solid var(--gs-brand);
+  color: var(--gs-fg);
+  font-weight: 600;
+  opacity: 1;
+}
+
+.gs-chip-interim {
+  border: 1px dashed var(--gs-border);
+  color: var(--gs-muted);
+  font-weight: 400;
+  opacity: 0.7;
+}
+
+.gs-sentence {
+  margin: 12px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--gs-border);
+  font-size: 1.125rem;
+  line-height: 1.6;
+  font-weight: 500;
+}
+
+/* --------------------------------------------------------------------------
+   진단 — 기본은 접힘
+   -------------------------------------------------------------------------- */
+
+.gs-diag {
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-md);
+  background: var(--gs-surface);
+}
+
+.gs-diag-summary {
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  color: var(--gs-muted);
+}
+
+.gs-diag-list {
+  margin: 0;
+  padding: 0 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gs-diag-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  border-top: 1px solid var(--gs-border);
+}
+
+.gs-diag-row dt {
+  flex: none;
+  font-size: 0.75rem;
+  color: var(--gs-muted);
+}
+
+.gs-diag-row dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+  font-size: 0.75rem;
+}
+
+.gs-mono {
+  font-family: var(--gs-font-mono);
+  /* 값이 바뀔 때 숫자가 세로로 정렬된다 — fps, 배터리, window index. */
+  font-variant-numeric: tabular-nums;
+}

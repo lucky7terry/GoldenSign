@@ -1,0 +1,35 @@
+{
+  "$schema": "./node_modules/@mentra/miniapp-cli/schema/miniapp.schema.json",
+  "packageName": "com.goldensign.miniapp",
+  "version": "1.0.0",
+  "name": "Golden Sign",
+  "description": "응급 상황 전용 수어-자연어 변환 앱",
+  "icon": "icon.png",
+  "type": "standard",
+  "sdkVersion": "0.3.0",
+  "minHostVersion": "1.42.0",
+  "entry": {
+    "background": "background/index.js",
+    "ui": "ui/index.html"
+  },
+  "permissions": [
+    {
+      "type": "CAMERA",
+      "description": "상대방의 수어를 인식하기 위해 안경 카메라를 사용합니다"
+    }
+  ],
+  "hardwareRequirements": [
+    {
+      "type": "CAMERA",
+      "level": "REQUIRED"
+    },
+    {
+      "type": "MICROPHONE",
+      "level": "OPTIONAL"
+    },
+    {
+      "type": "WIFI",
+      "level": "OPTIONAL"
+    }
+  ]
+}
