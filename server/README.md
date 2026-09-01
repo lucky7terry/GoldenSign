@@ -23,6 +23,11 @@ The model download script prepares:
 Run this script in every local, CI, and deployment environment before starting
 the server. The MediaPipe model files are not committed to the repository.
 
+세 파일이 모두 있어야 한다. 하나라도 없으면 서버는 기동 로그에
+`MediaPipe landmarkers unavailable` 을 남기고, `/health` 가 503 과
+`status: degraded` 를 돌려주며, 프레임 요청에는 `model_unavailable`
+(`retryable: false`) 로 응답한다. 파일을 채운 뒤 서버를 재시작해야 한다.
+
 ## Run
 
 ```bash

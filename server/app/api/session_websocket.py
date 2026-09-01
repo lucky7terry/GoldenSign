@@ -27,6 +27,7 @@ from app.schemas.websocket import (
 )
 from app.services.mediapipe_service import (
     MediaPipeProcessingError,
+    MediaPipeUnavailableError,
     decode_base64_image_data,
 )
 from app.services.model_service import (
@@ -157,6 +158,20 @@ async def _run_frame_recognition(
         )
     except SequenceSessionClosed:
         return
+    except MediaPipeUnavailableError as exc:
+        # 모델 파일이 없는 상태다. 다시 보내도 결과가 같으므로 재시도시키지 않는다.
+        logger.error(
+            "Keypoint extraction unavailable",
+            extra={"session_id": session_id, "error": str(exc)},
+        )
+        payload = error_message(
+            SCHEMA_VERSION,
+            session_id,
+            "model_unavailable",
+            "Keypoint extraction is unavailable on this server.",
+            client_message_id,
+            retryable=False,
+        )
     except Exception:
         logger.exception(
             "Frame recognition failed",

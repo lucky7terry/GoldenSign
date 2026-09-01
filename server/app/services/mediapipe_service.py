@@ -19,6 +19,14 @@ class MediaPipeProcessingError(Exception):
     """이미지 디코딩 또는 MediaPipe 처리 실패 예외."""
 
 
+class MediaPipeUnavailableError(RuntimeError):
+    """랜드마커 모델을 로드하지 못해 키포인트 추출이 불가능한 상태.
+
+    모델 파일이 없는 경우가 대부분이다. 프레임마다 다시 시도해도 결과가
+    같으므로 재시도 대상이 아니다. 클라이언트에는 retryable=false 로 나가야 한다.
+    """
+
+
 def decode_base64_image_data(encoded_image: str) -> bytes:
     if "," in encoded_image:
         encoded_image = encoded_image.split(",", 1)[1]
@@ -376,13 +384,60 @@ class MediaPipeService:
 
 
 _mediapipe_service: MediaPipeService | None = None
+_initialization_error: MediaPipeUnavailableError | None = None
 _mediapipe_service_lock = threading.Lock()
 
 
 def get_mediapipe_service() -> MediaPipeService:
-    global _mediapipe_service
-    if _mediapipe_service is None:
-        with _mediapipe_service_lock:
-            if _mediapipe_service is None:
-                _mediapipe_service = MediaPipeService()
+    """랜드마커 서비스를 돌려준다. 로드에 실패했으면 매번 같은 예외를 던진다.
+
+    실패를 기억하지 않으면 프레임마다 모델 로딩을 다시 시도하게 된다.
+    모델 파일이 없는 상태에서 초당 수십 번 같은 실패를 반복하는 셈이라,
+    한 번 실패하면 그 사실을 붙잡고 있는다. 파일을 채운 뒤에는 서버를
+    재시작해야 한다 — 조용히 반쯤 살아나는 것보다 낫다.
+    """
+    global _mediapipe_service, _initialization_error
+
+    if _mediapipe_service is not None:
+        return _mediapipe_service
+
+    with _mediapipe_service_lock:
+        if _mediapipe_service is not None:
+            return _mediapipe_service
+        if _initialization_error is not None:
+            raise _initialization_error
+        try:
+            _mediapipe_service = MediaPipeService()
+        except Exception as exc:
+            _initialization_error = MediaPipeUnavailableError(str(exc))
+            raise _initialization_error from exc
+
     return _mediapipe_service
+
+
+def preload_mediapipe_service() -> bool:
+    """기동 시 모델을 미리 로드한다. 실패해도 예외를 밖으로 내지 않는다.
+
+    첫 프레임이 들어올 때 로딩하면 그 프레임이 타임아웃되고, 모델이 없으면
+    무엇이 잘못됐는지 로그에도 안 남는다. 기동 시점에 크게 한 번 알린다.
+    """
+    try:
+        get_mediapipe_service()
+    except MediaPipeUnavailableError as exc:
+        logger.error(
+            "MediaPipe landmarkers unavailable; keypoint extraction is disabled",
+            extra={"error": str(exc)},
+        )
+        return False
+    logger.info("MediaPipe landmarkers loaded")
+    return True
+
+
+def keypoint_extraction_available() -> bool:
+    return _mediapipe_service is not None
+
+
+def keypoint_extraction_error() -> str | None:
+    if _initialization_error is None:
+        return None
+    return str(_initialization_error)

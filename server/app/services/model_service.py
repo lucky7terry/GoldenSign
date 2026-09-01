@@ -1,6 +1,8 @@
 from app.services.mediapipe_service import (
     MediaPipeProcessingError,
     get_mediapipe_service,
+    keypoint_extraction_available,
+    keypoint_extraction_error,
 )
 from app.services.openpose_converter import convert_to_openpose
 from app.services.sequence_service import sequence_store
@@ -37,6 +39,13 @@ def get_model_health_status():
 
     인식 모델을 붙일 때 이 함수가 실제 로딩 상태를 읽도록 바꿔야 한다.
     """
+    if not keypoint_extraction_available():
+        return {
+            "loaded": False,
+            "mode": "unavailable",
+            "version": keypoint_extraction_error() or "landmarkers not loaded",
+        }
+
     return {
         "loaded": False,
         "mode": "keypoints_only",

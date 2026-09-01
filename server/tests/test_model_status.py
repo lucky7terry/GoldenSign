@@ -9,12 +9,16 @@ _SOURCE = (Path(__file__).resolve().parents[1]
            / "app" / "services" / "model_service.py").read_text(encoding="utf-8")
 
 
-def _function(name):
+def _function(name, **injected):
     """model_service 는 mediapipe 를 끌어오므로 함수 정의만 떼어 실행한다."""
     tree = ast.parse(_SOURCE)
     node = next(n for n in tree.body
                 if isinstance(n, ast.FunctionDef) and n.name == name)
-    namespace = {}
+    namespace = {
+        "keypoint_extraction_available": lambda: True,
+        "keypoint_extraction_error": lambda: None,
+    }
+    namespace.update(injected)
     exec(compile(ast.Module([node], []), "<model_service>", "exec"), namespace)
     return namespace[name]
 
@@ -35,6 +39,19 @@ class ModelStatusTest(unittest.TestCase):
             set(_function("get_model_health_status")()),
             {"loaded", "mode", "version"},
         )
+
+    def test_status_says_unavailable_when_landmarkers_failed_to_load(self):
+        status = _function(
+            "get_model_health_status",
+            keypoint_extraction_available=lambda: False,
+            keypoint_extraction_error=lambda: "Face model not found: models/face_landmarker.task",
+        )()
+
+        self.assertFalse(status["loaded"])
+        self.assertEqual(status["mode"], "unavailable")
+        self.assertIn("face_landmarker", status["version"])
+        # 필드 모양은 추출 가능 여부와 무관하게 같아야 한다.
+        self.assertEqual(set(status), {"loaded", "mode", "version"})
 
     def test_result_does_not_claim_a_recognized_word(self):
         # 자리표시자 문자열을 넣으면 그게 그대로 안경 화면에 뜬다.
