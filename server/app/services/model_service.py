@@ -27,10 +27,20 @@ def _raise_frame_validation_error_if_client_error(
 
 
 def get_model_health_status():
+    """모델 상태.
+
+    loaded 는 "수어 단어를 인식할 수 있는가"를 뜻한다. MediaPipe 좌표 추출은
+    동작하지만 단어를 판정하는 인식 모델은 아직 연결 전이므로 False 다.
+
+    여기서 True 를 반환하면 /health 가 항상 정상을 보고하고, 미니앱은
+    인식이 되는 것처럼 표시한다. 실제로는 좌표만 뽑고 있다.
+
+    인식 모델을 붙일 때 이 함수가 실제 로딩 상태를 읽도록 바꿔야 한다.
+    """
     return {
-        "loaded": True,
-        "mode": "mediapipe",
-        "version": "tasks-0.10.35",
+        "loaded": False,
+        "mode": "keypoints_only",
+        "version": "mediapipe tasks-0.10.35",
     }
 
 
@@ -39,8 +49,11 @@ def _recognition_result(
     session_id: str | None = None,
     sequence_generation: int | None = None,
 ):
+    # 인식 모델이 없으므로 단어를 주장하지 않는다. text 에 자리표시자
+    # 문자열을 넣으면 그게 그대로 안경 화면에 뜬다("keypoints_extracted").
+    # 인식된 단어가 없음은 null 로 표현하고, 판단은 소비자에게 맡긴다.
     payload = {
-        "text": "keypoints_extracted",
+        "text": None,
         "confidence": 0.0,
         "is_final": False,
         "keypoints": keypoints.model_dump(by_alias=True),

@@ -162,6 +162,10 @@ WebRTC results are stream-based, not one result per client frame request. Theref
 - `sequence_index`: optional server-generated result sequence number.
 - `is_final: false`: interim recognition result.
 - `is_final: true`: finalized sentence or signing segment.
+- `text: null`: 아직 인식된 단어가 없다는 뜻이다. 소비자는 이 경우 아무것도
+  표시하지 않아야 한다. **인식 모델이 연결되기 전까지 서버는 항상 `null` 을
+  보낸다** — 자리표시자 문자열을 넣으면 그게 그대로 안경 화면에 뜬다.
+  이때 `model.loaded` 도 `false` 이므로 상태를 구분할 수 있다.
 
 ### Server -> Client: stream_unavailable
 
