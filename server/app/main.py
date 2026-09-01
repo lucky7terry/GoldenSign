@@ -1,15 +1,12 @@
-import logging
-
 from fastapi import FastAPI
 
 from app.api.health import router as health_router
 from app.api.session_websocket import router as session_websocket_router
 from app.api.sessions import router as session_router
 from app.config import LOG_LEVEL
+from app.logging_config import configure_logging
 
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-)
+configure_logging(LOG_LEVEL)
 
 app = FastAPI(
     title="Golden Sign AI Server",

@@ -21,40 +21,41 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: server/requirements-test.txt
+
+      - name: Install server test dependencies
+        working-directory: server
+        run: pip install -r requirements-test.txt
 
       - name: Check server Python syntax
-        run: |
-          if [ -d "server" ]; then
-            python -m compileall server
-          else
-            echo "server/ not found. skipped."
-          fi
+        run: python -m compileall server
 
-      - name: Validate contracts JSON
+      - name: Run server tests
+        working-directory: server
+        run: python -m unittest discover -s tests -v
+
+      - name: Validate fixture JSON
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
 
-          contracts_dir = Path("contracts")
-
-          if not contracts_dir.exists():
-              print("contracts/ not found. skipped.")
-              raise SystemExit(0)
-
-          json_files = list(contracts_dir.rglob("*.json"))
+          # 계약 예시는 contracts/ 가 아니라 fixtures/ 에 있다.
+          # 없으면 조용히 넘어가지 않고 실패시킨다.
+          fixtures_dir = Path("fixtures")
+          json_files = sorted(fixtures_dir.rglob("*.json"))
 
           if not json_files:
-              print("No JSON files in contracts/. skipped.")
-              raise SystemExit(0)
+              raise SystemExit("fixtures/ 에 JSON 파일이 없습니다.")
 
           for file in json_files:
               with file.open("r", encoding="utf-8") as f:
                   json.load(f)
               print(f"valid json: {file}")
 
-          print("contracts JSON validation passed.")
+          print("fixture JSON validation passed.")
           PY
 
       # mentra/ 를 대상으로 하던 Node 스텝 두 개("Set up Node.js" / "Check Mentra
