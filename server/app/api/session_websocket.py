@@ -46,6 +46,32 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 _recognition_semaphore = asyncio.Semaphore(MAX_CONCURRENT_RECOGNITIONS)
 
+# 유휴 여부를 얼마나 자주 확인할지. 타임아웃 자체보다 짧아야 한다.
+_IDLE_POLL_SECONDS = 5.0
+
+
+class ConnectionActivity:
+    """이 연결에 마지막으로 무언가 오간 시각.
+
+    WHEP 스트리밍 중에는 클라이언트가 WebSocket 으로 아무것도 보내지 않는다.
+    영상은 서버가 Cloudflare 에서 직접 당겨오고, 서버는 결과만 내보낸다.
+    그래서 유휴 판정을 수신만으로 하면 정상 동작 중인 스트림을 끊게 된다.
+    송신도 활동으로 친다.
+
+    글래스 쪽 연결이 실제로 죽으면 WHEP 프레임이 먼저 끊기고
+    (WHEP_FRAME_IDLE_TIMEOUT_SECONDS), 그러면 보낼 결과도 없어지므로
+    이 타이머가 다시 의미를 갖는다.
+    """
+
+    def __init__(self) -> None:
+        self._last = monotonic()
+
+    def touch(self) -> None:
+        self._last = monotonic()
+
+    def idle_seconds(self) -> float:
+        return monotonic() - self._last
+
 
 @dataclass
 class FrameRecognitionJob:
@@ -77,9 +103,16 @@ def _validate_common_message(message: WebSocketMessage, session_id: str):
     return None
 
 
-async def _send_json(websocket: WebSocket, send_lock: asyncio.Lock, payload: dict):
+async def _send_json(
+    websocket: WebSocket,
+    send_lock: asyncio.Lock,
+    payload: dict,
+    activity: ConnectionActivity | None = None,
+):
     async with send_lock:
         await websocket.send_json(payload)
+    if activity is not None:
+        activity.touch()
 
 
 async def _run_frame_recognition(
@@ -185,6 +218,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
 
     await websocket.accept()
     connected_at = monotonic()
+    activity = ConnectionActivity()
     close_reason = "unknown"
     logger.info(
         "WebSocket connected",
@@ -210,21 +244,25 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
     )
 
     async def send_stream_payload(payload: dict):
-        await _send_json(websocket, send_lock, payload)
+        await _send_json(websocket, send_lock, payload, activity)
 
     try:
         while True:
             try:
                 raw_message = await asyncio.wait_for(
                     websocket.receive_json(),
-                    timeout=WS_IDLE_TIMEOUT_SECONDS,
+                    timeout=_IDLE_POLL_SECONDS,
                 )
             except asyncio.TimeoutError:
+                # 수신이 없어도 결과를 내보내고 있으면 살아있는 연결이다.
+                if activity.idle_seconds() < WS_IDLE_TIMEOUT_SECONDS:
+                    continue
                 close_reason = "idle_timeout"
                 logger.warning(
                     "WebSocket idle timeout; closing",
                     extra={
                         "session_id": session_id,
+                        "idle_seconds": round(activity.idle_seconds(), 1),
                         "idle_timeout_seconds": WS_IDLE_TIMEOUT_SECONDS,
                     },
                 )
@@ -270,6 +308,8 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     )
                 )
                 continue
+
+            activity.touch()
 
             validation_error = _validate_common_message(message, session_id)
             if validation_error is not None:
