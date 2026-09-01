@@ -10,6 +10,7 @@ import mediapipe as mp
 import numpy as np
 
 from app.constants import MAX_FRAME_BYTES
+from app.services.hand_assignment import assign_hands
 
 logger = logging.getLogger(__name__)
 
@@ -244,12 +245,6 @@ class MediaPipeService:
             getattr(category, "score", None),
         )
 
-    @staticmethod
-    def _score_or_default(score: float | None) -> float:
-        if score is None:
-            return -1.0
-        return score
-
     def extract_keypoints_from_image(
         self,
         image: np.ndarray,
@@ -297,6 +292,12 @@ class MediaPipeService:
         pose: list[dict[str, float | None]] = []
         image_height, image_width = image.shape[:2]
 
+        # Pose 결과 — 손 좌우 배정에 손목 좌표를 쓰므로 먼저 계산한다.
+        if pose_result.pose_landmarks:
+            pose = self._serialize_pose_landmarks(
+                pose_result.pose_landmarks[0]
+            )
+
         # 손 결과 분류
         hand_candidates: list[dict[str, Any]] = []
         for index, landmarks in enumerate(
@@ -325,63 +326,13 @@ class MediaPipeService:
                 }
             )
 
-        selected_hand_indexes: set[int] = set()
-
-        for label in ("left", "right"):
-            labeled_candidates = [
-                candidate
-                for candidate in hand_candidates
-                if candidate["label"] == label
-            ]
-            if not labeled_candidates:
-                continue
-            if len(labeled_candidates) > 1:
-                logger.warning(
-                    "Duplicate %s hand detected; preserving higher score",
-                    label,
-                )
-            selected_candidate = max(
-                labeled_candidates,
-                key=lambda candidate: self._score_or_default(candidate["score"]),
-            )
-            selected_hand_indexes.add(selected_candidate["index"])
-            if label == "left":
-                left_hand = selected_candidate["landmarks"]
-            else:
-                right_hand = selected_candidate["landmarks"]
-
-        for label in ("left", "right"):
-            if label == "left" and left_hand:
-                continue
-            if label == "right" and right_hand:
-                continue
-
-            remaining_candidates = [
-                candidate
-                for candidate in hand_candidates
-                if candidate["index"] not in selected_hand_indexes
-            ]
-            if not remaining_candidates:
-                continue
-            selected_candidate = max(
-                remaining_candidates,
-                key=lambda candidate: self._score_or_default(candidate["score"]),
-            )
-            selected_hand_indexes.add(selected_candidate["index"])
-            logger.warning(
-                "Reassigned duplicate or unlabeled hand to missing %s hand",
-                label,
-            )
-            if label == "left":
-                left_hand = selected_candidate["landmarks"]
-            else:
-                right_hand = selected_candidate["landmarks"]
-
-        # Pose 결과
-        if pose_result.pose_landmarks:
-            pose = self._serialize_pose_landmarks(
-                pose_result.pose_landmarks[0]
-            )
+        # 안경 카메라에서는 검출기 handedness의 좌우가 뒤집히므로
+        # Pose 손목 좌표를 기준으로 배정한다(app/services/hand_assignment.py).
+        assignment = assign_hands(hand_candidates, pose)
+        if assignment["left"] is not None:
+            left_hand = assignment["left"]["landmarks"]
+        if assignment["right"] is not None:
+            right_hand = assignment["right"]["landmarks"]
 
         # Face 결과
         if face_result.face_landmarks:
