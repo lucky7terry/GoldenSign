@@ -155,6 +155,9 @@ export class AiClient {
    * 멱등성 가드. 같은 stream_id 로 stream_start / stream_stop 이 두 번 나가면
    * 안 된다. 정리 경로가 stop·error·disconnect 세 갈래라 겹칠 수 있고, 중복이
    * 나가면 서버의 스트림 상태와 어긋난다.
+   *
+   * 범위는 세션당 한 번이다. 막으려는 대상이 서버의 스트림 상태인데 그 상태는
+   * 세션에 딸려 있으므로, 새 session_id 를 받으면 openSocket 이 둘 다 비운다.
    */
   private readonly streamStartSent = new Set<string>()
   private readonly streamStopSent = new Set<string>()
@@ -323,6 +326,11 @@ export class AiClient {
   private openSocket(created: {sessionId: string; wsUrl: string}): void {
     this.sessionId = created.sessionId
     this.wsUrl = created.wsUrl
+    // 새 세션은 이전 세션의 스트림을 모른다. 가드를 그대로 두면 재연결 이후
+    // stream_start 가 영영 막힌다. session_id 가 바뀌는 이 지점이 유일한
+    // 초기화 시점이다 — 같은 세션 안에서의 중복은 계속 막힌다.
+    this.streamStartSent.clear()
+    this.streamStopSent.clear()
     this.setState("connecting_ws")
     console.log("[AI] WebSocket 연결 시도:", created.wsUrl)
 
@@ -487,6 +495,13 @@ export class AiClient {
         this.readyModel = m?.model
         console.log("[AI] ready model=", JSON.stringify(this.readyModel))
         console.log("[AI] ready 전문:", JSON.stringify(parsed, null, 2))
+        // sendStopMessage 는 소켓을 연 채로 shuttingDown 만 세운다. 그 뒤에 온
+        // ready 로 onReady 가 돌면 종료 중에 스트림을 다시 붙이게 된다. 가드가
+        // 여기 있는 것은 의도다 — 위의 타이머 정리와 로그는 종료 중에도 필요하다.
+        if (this.shuttingDown) {
+          console.log("[AI] 종료 중에 ready 수신 — onReady 를 부르지 않는다")
+          break
+        }
         // 재연결 때도 다시 불리므로 호출부가 ai_ready 로 복귀할 수 있다.
         try {
           this.onReady?.()
@@ -628,7 +643,8 @@ export class AiClient {
   /**
    * Mentra WHEP 스트림을 당겨 가라고 AI 서버에 알린다.
    *
-   * `streamStartSent` 가 막아 준다 — stream_id 하나당 start 는 평생 한 번이다.
+   * `streamStartSent` 가 막아 준다 — 한 세션 안에서 stream_id 하나당 한 번이다.
+   * 재연결로 세션이 바뀌면 다시 보낼 수 있다.
    * 동기 함수라 어느 콜백에서 불러도 안전하다. 아무것도 안 보냈으면 false.
    */
   sendStreamStart(streamId: string, webrtcUrl: string): boolean {

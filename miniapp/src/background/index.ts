@@ -13,7 +13,7 @@
  * ─────────────────────────────────────────────────────────────────────────
  * background/register.js 기준으로, dev 리로드는 JSContext 를 죽이고 다시
  * 띄운다. 폴리필과 번들이 재평가되고 핸들러가 완전히 새 세션으로 다시 돈다.
- * 모듈 상태는 살아남지 못한다 — 아래 `appState` 와 `activeStreamId` 는 초기값
+ * 모듈 상태는 살아남지 못한다 — 아래 `appState` 와 `activeStream` 은 초기값
  * 으로 돌아간다.
  *
  * 그래서 스트림이 도는 중에 저장하면 새 컨텍스트에는 streamId 가 없어 stop() 을
@@ -443,7 +443,15 @@ registerMiniapp((session) => {
   // 세션 단위이며 저장되지 않는다. 파일 상단의 핫 리로드 경고 참고 — dev
   // 리로드가 전부 초기화한다.
   let appState: AppState = "idle"
-  let activeStreamId: string | undefined
+  /**
+   * 활성 스트림. 재연결 뒤 stream_start 를 다시 보내려면 id 만으로는 부족해서
+   * webrtcUrl 을 같이 들고 있는다. 둘이 따로 놀지 않도록 한 객체로 묶었다.
+   *
+   * `webrtcUrl` 이 undefined 인 구간이 있는 것은 의도다 — 롤백이 id 를 찾을 수
+   * 있도록 URL 검증 *전에* 먼저 기록하기 때문이다. 재전송은 URL 이 채워진
+   * 뒤에만 가능하다.
+   */
+  let activeStream: {streamId: string; webrtcUrl: string | undefined} | undefined
   /** 안경 WiFi 최신 상태. 첫 onWifi 전달 전까지 undefined 다. */
   let latestWifi: WifiData | undefined
   /**
@@ -610,9 +618,9 @@ registerMiniapp((session) => {
     sendBroadcast(channel, next)
   }
 
-  /** 현재 시점의 appState 와 activeStreamId 짝을 그대로 방송한다. */
+  /** 현재 시점의 appState 와 activeStream 짝을 그대로 방송한다. */
   function publishStreamState(message: string | null = null): void {
-    patch("stream:state", {state: appState, streamId: activeStreamId ?? null, message})
+    patch("stream:state", {state: appState, streamId: activeStream?.streamId ?? null, message})
   }
 
   /** 현재 시점의 AI 단계와 세션 식별 정보를 방송한다. */
@@ -822,6 +830,20 @@ registerMiniapp((session) => {
           // 조건 없이 방송한다. AI 단계는 별개의 축이라, 이미 스트리밍 중일 때
           // 재연결이 성공하면 appState 는 그대로여도 UI 에는 알려야 한다.
           publishAiState("ready")
+
+          // 재연결이면 세션이 새로 발급됐고 서버는 이 스트림을 모른다. 살아있는
+          // 스트림을 다시 붙여 준다 — 이게 없으면 사용자가 앱을 재시작할 때까지
+          // 프레임이 영영 흐르지 않는다. 첫 연결에서는 activeStream 이 undefined
+          // 라 아무것도 하지 않고, 시작 시퀀스가 제 자리에서 보낸다.
+          const live = activeStream
+          if (live?.webrtcUrl === undefined) return
+          console.log("[Stream] ready 이후 stream_start 재전송. streamId=", live.streamId)
+          if (!ai?.sendStreamStart(live.streamId, live.webrtcUrl)) {
+            // 롤백도 error 방송도 하지 않는다. ready 직후라 소켓은 열려 있으므로
+            // 여기서 false 가 나오는 현실적인 경우는 같은 세션에서 이미 보냈다는
+            // 중복 가드뿐이고, 그건 정상이다. 스트림도 살아 있다.
+            console.warn("[Stream] stream_start 재전송 실패 streamId=", live.streamId)
+          }
         },
         // 결과는 순수 데이터로 넘어온다. AiClient 는 `ui` 를 보지 못한다 —
         // 브리지는 전적으로 이쪽에 있다.
@@ -872,9 +894,9 @@ registerMiniapp((session) => {
       // 종료 후에도 불이 켜져 있는 쪽이 가끔 닿지 않는 호출보다 나쁘고, 불을
       // 끄는 동기 수단은 존재하지 않는다.
       turnOffLed(`beforeDisconnect: ${r}`)
-      if (activeStreamId !== undefined) {
+      if (activeStream !== undefined) {
         // stop 보다 stream_stop 을 먼저 보내 서버가 pull 을 먼저 풀게 한다.
-        ai?.sendStreamStop(activeStreamId)
+        ai?.sendStreamStop(activeStream.streamId)
       }
       ai?.sendStopMessage(`beforeDisconnect: ${r}`)
     }),
@@ -884,8 +906,8 @@ registerMiniapp((session) => {
     session.on("disconnect", (r) => {
       console.log("[Session] disconnect:", r)
 
-      if (activeStreamId !== undefined || appState === "streaming") {
-        console.warn("[Stream] disconnect 시점에 스트림이 살아있었다. streamId=", activeStreamId)
+      if (activeStream !== undefined || appState === "streaming") {
+        console.warn("[Stream] disconnect 시점에 스트림이 살아있었다. streamId=", activeStream?.streamId)
       }
 
       ai?.closeNow(`disconnect: ${r}`)
@@ -897,7 +919,7 @@ registerMiniapp((session) => {
 
       // 여기부터는 best effort 다. 전송 계층이 이미 사라지는 중이라 둘 다 완료를
       // 보장할 수 없다.
-      const idAtDisconnect = activeStreamId
+      const idAtDisconnect = activeStream?.streamId
       void session.stream
         .stop(idAtDisconnect)
         .then(() => console.log("[Stream] disconnect stream.stop 성공"))
@@ -911,7 +933,7 @@ registerMiniapp((session) => {
       // 1시간)에 스스로 만료되므로 이게 끝내 완료되지 않아도 영구히 새지 않는다.
       ai?.postStopBestEffort()
 
-      activeStreamId = undefined
+      activeStream = undefined
       publishStreamState(`disconnect: ${r}`)
       setState("idle")
 
@@ -1027,15 +1049,15 @@ registerMiniapp((session) => {
   /**
    * 단일 종료 경로. 정지 시퀀스·롤백·에러 복구가 모두 재사용한다. 반복 호출해도
    * 안전하다.
-   *   - `activeStreamId` 를 먼저 비우므로 같은 id 에 대한 두 번째 호출은 무동작.
+   *   - `activeStream` 을 먼저 비우므로 같은 id 에 대한 두 번째 호출은 무동작.
    *   - stream_stop 은 AiClient 내부의 Set 이 한 번 더 막는다.
    *
    * 순서는 의도적이다. Mentra 스트림이 사라지기 *전에* AI 서버에 pull 중지를
    * 알린다. 반대로 하면 서버가 죽은 WHEP 엔드포인트를 계속 당긴다.
    */
   async function cleanupStream(reason: string, opts: {notifyAi: boolean}): Promise<void> {
-    const streamId = activeStreamId
-    activeStreamId = undefined
+    const streamId = activeStream?.streamId
+    activeStream = undefined
     // 여기서 LED 를 건드리지 않는 건 의도다. 호출부 둘(runStopSequence, rollback)
     // 모두 직후에 setState 를 부르고, 그 setState 가 patch → applyLed 로 불을
     // 정확히 다시 잡는다. 여기서 끄면 지나가는 길에 암전만 하나 더 생긴다.
@@ -1178,7 +1200,8 @@ registerMiniapp((session) => {
       })
 
       // 검증 전에 기록해 둔다. 롤백이 언제든 id 를 찾을 수 있어야 한다.
-      activeStreamId = streamId
+      // webrtcUrl 은 아래 검증을 통과한 뒤에 채운다.
+      activeStream = typeof streamId === "string" ? {streamId, webrtcUrl: undefined} : undefined
       publishStreamState()
 
       // 3. WHEP URL 검증. 여기서 쓸 수 없는 값은 치명적 실패다 — 서버도 그것을
@@ -1202,6 +1225,9 @@ registerMiniapp((session) => {
         await rollback("streamId 없음")
         return
       }
+
+      // 검증된 URL 을 보관한다. 재연결 뒤 onReady 가 이걸로 재전송한다.
+      activeStream = {streamId, webrtcUrl}
 
       // 4. URL 을 AI 서버에 넘긴다.
       // `ai.` 가 아니라 `ai?.` 인 이유: 예전의 `ai?.isReady() !== true` 가드는
