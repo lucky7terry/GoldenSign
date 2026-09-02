@@ -10,6 +10,7 @@
 
 import logging
 import os
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -160,3 +161,64 @@ def make_predictor(model, batch_size: int = 1):
         return model(features, training=False)
 
     return _infer
+
+
+_model = None
+_initialization_error: RecognitionModelUnavailableError | None = None
+_model_lock = threading.Lock()
+
+
+def get_recognition_model():
+    """모델을 한 번만 읽어 재사용한다. 실패했으면 같은 예외를 즉시 돌려준다.
+
+    로딩에 수 초가 걸린다(실측 3~8초). 캐싱하지 않으면 부를 때마다 그만큼
+    멈추고, 실패를 기억하지 않으면 단어마다 로딩을 재시도하게 된다.
+    MediaPipe 쪽에서 같은 실수로 프레임마다 재시도가 돌았던 적이 있다.
+    """
+    global _model, _initialization_error
+
+    if _model is not None:
+        return _model
+
+    with _model_lock:
+        if _model is not None:
+            return _model
+        if _initialization_error is not None:
+            raise _initialization_error
+        try:
+            _model = load_recognition_model()
+        except RecognitionModelUnavailableError as exc:
+            _initialization_error = exc
+            raise
+        except Exception as exc:
+            _initialization_error = RecognitionModelUnavailableError(str(exc))
+            raise _initialization_error from exc
+
+    return _model
+
+
+def preload_recognition_model() -> bool:
+    """기동 시 모델을 미리 올린다. 실패해도 예외를 밖으로 내지 않는다.
+
+    아직 lifespan 에 연결하지 않았다. 추론을 실제로 돌리는 단계에서 붙인다 —
+    지금 붙이면 쓰지도 않는 모델 때문에 기동이 수 초 느려진다.
+    """
+    try:
+        get_recognition_model()
+    except RecognitionModelUnavailableError as exc:
+        logger.error(
+            "Recognition model unavailable; word recognition is disabled",
+            extra={"error": str(exc)},
+        )
+        return False
+    return True
+
+
+def recognition_model_available() -> bool:
+    return _model is not None
+
+
+def recognition_model_error() -> str | None:
+    if _initialization_error is None:
+        return None
+    return str(_initialization_error)
