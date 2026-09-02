@@ -821,7 +821,14 @@ registerMiniapp((session) => {
       // onReady 는 재연결 이후에도 발생하므로, 사용자가 아무것도 하지 않아도
       // ai_ready 로 복귀한다.
       // 이 경로를 두 번 타면 이전 인스턴스가 참조만 잃은 채 재연결을 계속한다.
-      ai?.closeNow("새 AiClient 로 교체")
+      //
+      // 생성과 종료를 같은 id 로 남긴다. 두 줄의 개수가 맞지 않으면 살아남은
+      // 인스턴스가 있다는 뜻이고, 예고 없는 "재연결 N회차 실행" 이 어느
+      // 인스턴스에서 나온 것인지도 접두사로 짚을 수 있다.
+      if (ai !== undefined) {
+        console.log("[AI] 인스턴스 종료", ai.getId(), "(새 AiClient 로 교체)")
+        ai.closeNow("새 AiClient 로 교체")
+      }
       ai = new AiClient(
         session.userId,
         () => {
@@ -849,6 +856,7 @@ registerMiniapp((session) => {
         // 브리지는 전적으로 이쪽에 있다.
         handleResult,
       )
+      console.log("[AI] 인스턴스 생성", ai.getId())
       ai.connect()
     }),
   )
@@ -910,6 +918,7 @@ registerMiniapp((session) => {
         console.warn("[Stream] disconnect 시점에 스트림이 살아있었다. streamId=", activeStream?.streamId)
       }
 
+      if (ai !== undefined) console.log("[AI] 인스턴스 종료", ai.getId(), `(disconnect: ${r})`)
       ai?.closeNow(`disconnect: ${r}`)
       turnOffLed(`disconnect: ${r}`)
       publishAiState("disconnected", `disconnect: ${r}`)

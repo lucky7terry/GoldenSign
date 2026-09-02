@@ -75,21 +75,21 @@ function asRecord(value: unknown): UnknownRecord | undefined {
  *   - LAN IP 오류          → timeout / no route to host
  * 문구는 플랫폼마다 다르므로 결국 원본 message 가 판단 근거다.
  */
-function logFetchError(label: string, err: unknown): void {
-  console.error(`[AI] ${label} fetch 실패 — err:`, err)
-  console.error(`[AI] ${label} JSON:`, JSON.stringify(err))
+function logFetchError(tag: string, label: string, err: unknown): void {
+  console.error(`${tag} ${label} fetch 실패 — err:`, err)
+  console.error(`${tag} ${label} JSON:`, JSON.stringify(err))
 
   const e = asRecord(err)
-  console.error(`[AI] ${label} name=`, String(e?.name))
-  console.error(`[AI] ${label} message=`, String(e?.message))
+  console.error(`${tag} ${label} name=`, String(e?.name))
+  console.error(`${tag} ${label} message=`, String(e?.message))
   if (err instanceof Error && err.stack) {
-    console.error(`[AI] ${label} stack=`, err.stack)
+    console.error(`${tag} ${label} stack=`, err.stack)
   }
   console.error(
-    `[AI] ${label} 판별 힌트: 요청이 나가기도 전에 거부됐다면 iOS ATS / Android cleartext 차단,` +
+    `${tag} ${label} 판별 힌트: 요청이 나가기도 전에 거부됐다면 iOS ATS / Android cleartext 차단,` +
       ` connection refused 면 서버 미기동, timeout 이면 AI_HTTP 의 IP 가 틀렸을 가능성.`,
   )
-  console.error(`[AI] ${label} 현재 AI_HTTP=`, AI_HTTP)
+  console.error(`${tag} ${label} 현재 AI_HTTP=`, AI_HTTP)
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +137,28 @@ const RECONNECT_CAP_MS = 30_000
 /** hello 를 보낸 뒤 ready 를 기다리는 한도. 넘기면 실패로 처리한다. */
 const HANDSHAKE_TIMEOUT_MS = 10_000
 
+/**
+ * `result` 한 건의 전체 필드를 찍을지. 기본은 꺼짐이다.
+ *
+ * 켜면 건당 3줄이 된다. 실측으로 초당 114줄까지 나와 콘솔이 밀렸고, 그 바람에
+ * ready / stream_start 처럼 드물지만 중요한 줄이 통째로 유실됐다. 이 모듈
+ * 안에서만 쓰는 디버그 스위치라 shared/config.ts 가 아니라 여기에 둔다 —
+ * 거기는 UI 번들과 공유하는 값들의 자리다.
+ */
+const RESULT_VERBOSE = false
+
 export class AiClient {
+  /**
+   * 로그에서 인스턴스를 눈으로 구분하기 위한 짧은 id. 고아 인스턴스가 남아
+   * 타이머를 발화시키는 정황을 추적하려면 어느 인스턴스가 찍은 줄인지 알아야
+   * 한다. 사람이 읽는 용도라 충돌 가능성은 문제되지 않는다.
+   */
+  private readonly instanceId = Math.random().toString(16).slice(2, 6)
+  /** 이 인스턴스가 찍는 모든 로그의 접두사. */
+  private readonly tag = `[AI#${this.instanceId}]`
+  /** 스트림 계열 로그용. 기존 `[Stream]` 과 같은 자리에 쓴다. */
+  private readonly streamTag = `[Stream#${this.instanceId}]`
+
   private state: AiClientState = "idle"
   private ws: WebSocket | undefined
   private sessionId: string | undefined
@@ -178,6 +199,14 @@ export class AiClient {
     private readonly onResult?: (result: AiRecognitionResult) => void,
   ) {}
 
+  /**
+   * 로그 접두사 `[AI#xxx]` 에 쓰인 짧은 id. 호출부가 인스턴스의 생성과 종료를
+   * 같은 이름으로 셀 수 있게 공개한다.
+   */
+  getId(): string {
+    return this.instanceId
+  }
+
   getState(): AiClientState {
     return this.state
   }
@@ -202,7 +231,7 @@ export class AiClient {
 
   private setState(next: AiClientState): void {
     this.state = next
-    console.log("[AI] state ->", next)
+    console.log(`${this.tag} state ->`, next)
   }
 
   // -------------------------------------------------------------------------
@@ -216,12 +245,12 @@ export class AiClient {
    */
   connect(): void {
     if (this.state !== "idle" && this.state !== "error") {
-      console.warn("[AI] connect 무시 — 이미 진행 중이다. state=", this.state)
+      console.warn(`${this.tag} connect 무시 — 이미 진행 중이다. state=`, this.state)
       return
     }
     void this.runConnect().catch((err) => {
       this.setState("error")
-      console.error("[AI] connect 최상위 예외 (여기까지 왔으면 버그다):", err)
+      console.error(`${this.tag} connect 최상위 예외 (여기까지 왔으면 버그다):`, err)
     })
   }
 
@@ -243,7 +272,7 @@ export class AiClient {
     const url = `${AI_HTTP}/v1/sessions`
     const body = {client: CLIENT_NAME, user_id: this.userId}
 
-    console.log("[AI] POST", url, JSON.stringify(body))
+    console.log(`${this.tag} POST`, url, JSON.stringify(body))
 
     let response: Response
     try {
@@ -255,11 +284,11 @@ export class AiClient {
     } catch (err) {
       // 전송 계층 실패. 요청 자체가 완료되지 않았다. ATS / cleartext 차단이
       // 여기로 떨어진다.
-      logFetchError("POST /v1/sessions", err)
+      logFetchError(this.tag, "POST /v1/sessions", err)
       return undefined
     }
 
-    console.log("[AI] POST /v1/sessions status=", response.status, response.statusText)
+    console.log(`${this.tag} POST /v1/sessions status=`, response.status, response.statusText)
 
     // 먼저 텍스트로 읽는다. JSON 이 아닌 본문(프록시 에러 페이지, HTML)이
     // 파싱 에러에 묻히지 않고 로그에 남는다.
@@ -267,12 +296,12 @@ export class AiClient {
     try {
       raw = await response.text()
     } catch (err) {
-      logFetchError("POST /v1/sessions body 읽기", err)
+      logFetchError(this.tag, "POST /v1/sessions body 읽기", err)
       return undefined
     }
 
     if (!response.ok) {
-      console.error("[AI] POST /v1/sessions 실패 body:", raw)
+      console.error(`${this.tag} POST /v1/sessions 실패 body:`, raw)
       return undefined
     }
 
@@ -280,25 +309,25 @@ export class AiClient {
     try {
       parsed = JSON.parse(raw)
     } catch (err) {
-      console.error("[AI] POST /v1/sessions JSON 파싱 실패. 원문:", raw)
-      console.error("[AI] 파싱 에러:", err)
+      console.error(`${this.tag} POST /v1/sessions JSON 파싱 실패. 원문:`, raw)
+      console.error(`${this.tag} 파싱 에러:`, err)
       return undefined
     }
 
     // 응답 전문을 펼쳐서 찍는다. 문서에 없는 필드를 발견하는 통로다.
-    console.log("[AI] 세션 생성 응답:", JSON.stringify(parsed, null, 2))
+    console.log(`${this.tag} 세션 생성 응답:`, JSON.stringify(parsed, null, 2))
 
     const p = asRecord(parsed)
     const sessionId = p?.session_id
     // 줄을 따로 뺀 이유: dev 리로드가 세션을 고아로 남기는데, 서버 로그와
     // 대조해 그것을 찾아내는 열쇠가 이 id 다.
-    console.log("[AI] session_id =", sessionId)
-    console.log("[AI] status =", p?.status)
-    console.log("[AI] schema_version =", p?.schema_version)
-    console.log("[AI] expires_at =", p?.expires_at)
+    console.log(`${this.tag} session_id =`, sessionId)
+    console.log(`${this.tag} status =`, p?.status)
+    console.log(`${this.tag} schema_version =`, p?.schema_version)
+    console.log(`${this.tag} expires_at =`, p?.expires_at)
 
     if (typeof sessionId !== "string" || sessionId.length === 0) {
-      console.error("[AI] 응답에 session_id 가 없다 — 중단")
+      console.error(`${this.tag} 응답에 session_id 가 없다 — 중단`)
       return undefined
     }
 
@@ -312,9 +341,9 @@ export class AiClient {
       // 스키마상 `ws_url: str | None` 이다. 직접 조립하는 건 폴백일 뿐이다 —
       // 서버가 이미 알던 정보를 우리가 다시 추측하는 셈이라서.
       wsUrl = `${AI_HTTP.replace(/^http/i, "ws")}/v1/sessions/${sessionId}/ws`
-      console.warn("[AI] ws_url 이 null — AI_HTTP 기반으로 폴백 조립했다:", wsUrl)
+      console.warn(`${this.tag} ws_url 이 null — AI_HTTP 기반으로 폴백 조립했다:`, wsUrl)
     }
-    console.log("[AI] ws_url =", wsUrl)
+    console.log(`${this.tag} ws_url =`, wsUrl)
 
     return {sessionId, wsUrl}
   }
@@ -332,7 +361,7 @@ export class AiClient {
     this.streamStartSent.clear()
     this.streamStopSent.clear()
     this.setState("connecting_ws")
-    console.log("[AI] WebSocket 연결 시도:", created.wsUrl)
+    console.log(`${this.tag} WebSocket 연결 시도:`, created.wsUrl)
 
     let ws: WebSocket
     try {
@@ -340,8 +369,8 @@ export class AiClient {
     } catch (err) {
       // onerror 가 아니라 생성자가 throw 했다면 대개 URL 형식 오류이거나
       // 런타임이 아예 거부하는 scheme 이다.
-      console.error("[AI] WebSocket 생성자 throw:", err)
-      console.error("[AI] WebSocket 생성자 throw JSON:", JSON.stringify(err))
+      console.error(`${this.tag} WebSocket 생성자 throw:`, err)
+      console.error(`${this.tag} WebSocket 생성자 throw JSON:`, JSON.stringify(err))
       this.setState("error")
       this.scheduleReconnect("WebSocket 생성 실패")
       return
@@ -349,7 +378,7 @@ export class AiClient {
     this.ws = ws
 
     ws.onopen = () => {
-      console.log("[AI] ws onopen")
+      console.log(`${this.tag} ws onopen`)
       this.sendHello()
     }
 
@@ -358,25 +387,25 @@ export class AiClient {
         this.handleMessage(event.data)
       } catch (err) {
         // 여기서 throw 가 새어 나가면 소켓 콜백이 조용히 죽는다.
-        console.error("[AI] onmessage 처리 중 예외:", err)
+        console.error(`${this.tag} onmessage 처리 중 예외:`, err)
       }
     }
 
     ws.onerror = (event: Event) => {
       // 대부분의 엔진에서 error 이벤트에는 쓸 만한 정보가 없다. 실제 원인은
       // 뒤따르는 onclose 에 담긴다.
-      console.error("[AI] ws onerror. type=", (event as Event & {type?: string})?.type)
-      console.error("[AI] ws onerror event JSON:", JSON.stringify(event))
-      console.error("[AI] 자세한 원인은 다음 onclose 의 code/reason 참고")
+      console.error(`${this.tag} ws onerror. type=`, (event as Event & {type?: string})?.type)
+      console.error(`${this.tag} ws onerror event JSON:`, JSON.stringify(event))
+      console.error(`${this.tag} 자세한 원인은 다음 onclose 의 code/reason 참고`)
     }
 
     ws.onclose = (event: CloseEvent) => {
       const code = (event as CloseEvent & {code?: number})?.code
       const reason = (event as CloseEvent & {reason?: string})?.reason
       const wasClean = (event as CloseEvent & {wasClean?: boolean})?.wasClean
-      console.log("[AI] ws onclose code=", code)
-      console.log("[AI] ws onclose reason=", reason === "" ? "(빈 문자열)" : reason)
-      console.log("[AI] ws onclose wasClean=", wasClean)
+      console.log(`${this.tag} ws onclose code=`, code)
+      console.log(`${this.tag} ws onclose reason=`, reason === "" ? "(빈 문자열)" : reason)
+      console.log(`${this.tag} ws onclose wasClean=`, wasClean)
       // 실측: wasClean 이 null 로 온다. 그래서 종료 원인은 code 로만 판단한다.
       //
       // session_websocket.py 는 미존재/stopped/만료 세션에 close(1008) 을
@@ -387,16 +416,16 @@ export class AiClient {
       // protocol error, 대부분은 1006 abnormal closure) 세 값을 같은
       // "세션 거부" 로 묶어 처리한다.
       if (code === 1008 || code === 1002 || code === 1006) {
-        console.error(`[AI] code=${String(code)} — 핸드셰이크 거부로 보인다 (HTTP 403)`)
-        console.error("[AI] 원인 후보: session_id 미존재 / 이미 stopped / TTL 만료")
-        console.error("[AI] 서버 로그에서 같은 시각의 '403 Forbidden' 줄과 대조 필요")
+        console.error(`${this.tag} code=${String(code)} — 핸드셰이크 거부로 보인다 (HTTP 403)`)
+        console.error(`${this.tag} 원인 후보: session_id 미존재 / 이미 stopped / TTL 만료`)
+        console.error(`${this.tag} 서버 로그에서 같은 시각의 '403 Forbidden' 줄과 대조 필요`)
       }
 
       this.clearHandshakeTimer()
       this.ws = undefined
 
       if (this.shuttingDown) {
-        console.log("[AI] 의도된 종료였다 — 재연결하지 않는다")
+        console.log(`${this.tag} 의도된 종료였다 — 재연결하지 않는다`)
         this.setState("idle")
         return
       }
@@ -408,7 +437,7 @@ export class AiClient {
   private sendHello(): void {
     const sessionId = this.sessionId
     if (sessionId === undefined) {
-      console.error("[AI] sendHello 인데 session_id 가 없다 — 버그")
+      console.error(`${this.tag} sendHello 인데 session_id 가 없다 — 버그`)
       return
     }
     this.setState("handshaking")
@@ -424,7 +453,7 @@ export class AiClient {
     // 소켓은 받아 놓고 답을 주지 않는 서버에 대한 방어.
     this.handshakeTimer = setTimeout(() => {
       if (this.state === "handshaking") {
-        console.error(`[AI] hello 후 ${HANDSHAKE_TIMEOUT_MS}ms 안에 ready 가 오지 않았다`)
+        console.error(`${this.tag} hello 후 ${HANDSHAKE_TIMEOUT_MS}ms 안에 ready 가 오지 않았다`)
         this.setState("error")
         // 닫으면 onclose 가 뜨고, 그 경로가 재연결을 굴린다.
         this.closeSocket(4000, "handshake timeout")
@@ -443,20 +472,20 @@ export class AiClient {
   private sendJson(payload: object, label: string): boolean {
     const ws = this.ws
     if (ws === undefined) {
-      console.error(`[AI] ${label} 전송 불가 — ws 없음`)
+      console.error(`${this.tag} ${label} 전송 불가 — ws 없음`)
       return false
     }
     if (ws.readyState !== 1 /* OPEN */) {
-      console.error(`[AI] ${label} 전송 불가 — readyState=`, ws.readyState)
+      console.error(`${this.tag} ${label} 전송 불가 — readyState=`, ws.readyState)
       return false
     }
     try {
       ws.send(JSON.stringify(payload))
-      console.log(`[AI] ${label} 전송:`, JSON.stringify(payload))
+      console.log(`${this.tag} ${label} 전송:`, JSON.stringify(payload))
       return true
     } catch (err) {
-      console.error(`[AI] ${label} 전송 실패:`, err)
-      console.error(`[AI] ${label} 전송 실패 JSON:`, JSON.stringify(err))
+      console.error(`${this.tag} ${label} 전송 실패:`, err)
+      console.error(`${this.tag} ${label} 전송 실패 JSON:`, JSON.stringify(err))
       return false
     }
   }
@@ -468,7 +497,7 @@ export class AiClient {
   private handleMessage(data: unknown): void {
     if (typeof data !== "string") {
       // 바이너리 프레임은 이 규약에 없다. 버리지 말고 남겨서 드러나게 한다.
-      console.warn("[AI] 문자열이 아닌 메시지 수신. typeof=", typeof data)
+      console.warn(`${this.tag} 문자열이 아닌 메시지 수신. typeof=`, typeof data)
       return
     }
 
@@ -476,8 +505,8 @@ export class AiClient {
     try {
       parsed = JSON.parse(data)
     } catch (err) {
-      console.error("[AI] 수신 JSON 파싱 실패. 원문:", data)
-      console.error("[AI] 파싱 에러:", err)
+      console.error(`${this.tag} 수신 JSON 파싱 실패. 원문:`, data)
+      console.error(`${this.tag} 파싱 에러:`, err)
       return
     }
 
@@ -490,33 +519,33 @@ export class AiClient {
         // 여기 도달해야 비로소 세션이 쓸 수 있는 상태가 된다.
         this.setState("ai_ready")
         this.reconnectAttempt = 0
-        console.log("[AI] ready 수신. 클라이언트 수신 시각=", new Date().toISOString())
-        console.log("[AI] ready server_time=", m?.server_time)
+        console.log(`${this.tag} ready 수신. 클라이언트 수신 시각=`, new Date().toISOString())
+        console.log(`${this.tag} ready server_time=`, m?.server_time)
         this.readyModel = m?.model
-        console.log("[AI] ready model=", JSON.stringify(this.readyModel))
-        console.log("[AI] ready 전문:", JSON.stringify(parsed, null, 2))
+        console.log(`${this.tag} ready model=`, JSON.stringify(this.readyModel))
+        console.log(`${this.tag} ready 전문:`, JSON.stringify(parsed, null, 2))
         // sendStopMessage 는 소켓을 연 채로 shuttingDown 만 세운다. 그 뒤에 온
         // ready 로 onReady 가 돌면 종료 중에 스트림을 다시 붙이게 된다. 가드가
         // 여기 있는 것은 의도다 — 위의 타이머 정리와 로그는 종료 중에도 필요하다.
         if (this.shuttingDown) {
-          console.log("[AI] 종료 중에 ready 수신 — onReady 를 부르지 않는다")
+          console.log(`${this.tag} 종료 중에 ready 수신 — onReady 를 부르지 않는다`)
           break
         }
         // 재연결 때도 다시 불리므로 호출부가 ai_ready 로 복귀할 수 있다.
         try {
           this.onReady?.()
         } catch (err) {
-          console.error("[AI] onReady 콜백 예외:", err)
+          console.error(`${this.tag} onReady 콜백 예외:`, err)
         }
         break
       }
 
       case "ack": {
         const cmid = m?.client_message_id
-        console.log("[AI] ack status=", m?.status)
-        console.log("[AI] ack stream_id=", m?.stream_id)
-        console.log("[AI] ack client_message_id=", cmid)
-        console.log("[AI] ack 수신 시각=", new Date().toISOString())
+        console.log(`${this.tag} ack status=`, m?.status)
+        console.log(`${this.tag} ack stream_id=`, m?.stream_id)
+        console.log(`${this.tag} ack client_message_id=`, cmid)
+        console.log(`${this.tag} ack 수신 시각=`, new Date().toISOString())
 
         // 우리가 보낸 stream_start / stream_stop 의 왕복 시간. 서버가 따라오고
         // 있는지를 말해 주는 수치다.
@@ -524,24 +553,28 @@ export class AiClient {
           const pending = this.pendingAcks.get(cmid)
           if (pending !== undefined) {
             this.pendingAcks.delete(cmid)
-            console.log(`[AI] ack ${pending.label} 왕복 ${Date.now() - pending.sentAt}ms`)
+            console.log(`${this.tag} ack ${pending.label} 왕복 ${Date.now() - pending.sentAt}ms`)
           }
         }
-        console.log("[AI] ack 전문:", JSON.stringify(parsed))
+        console.log(`${this.tag} ack 전문:`, JSON.stringify(parsed))
         break
       }
 
       case "result": {
         const r = asRecord(m?.result)
-        console.log("[AI] result.text=", r?.text)
-        console.log("[AI] result.confidence=", r?.confidence)
-        console.log("[AI] result.is_final=", r?.is_final)
         // 인덱스 필드는 두 개고 층이 다르다. 창 번호는 result.sequence.
         // window_index (sequence_service.metadata()), 누적 처리 프레임 수는
         // result 안이 아니라 메시지 최상위의 sequence_index 다.
-        console.log("[AI] result.sequence.window_index=", asRecord(r?.sequence)?.window_index)
-        console.log("[AI] result.sequence=", JSON.stringify(r?.sequence))
-        console.log("[AI] 최상위 sequence_index=", m?.sequence_index)
+        console.log(
+          `${this.tag} result text=${JSON.stringify(r?.text)}` +
+            ` conf=${String(r?.confidence)} final=${String(r?.is_final)}` +
+            ` window=${String(asRecord(r?.sequence)?.window_index)}` +
+            ` seq=${String(m?.sequence_index)}`,
+        )
+        if (RESULT_VERBOSE) {
+          console.log(`${this.tag} result.sequence=`, JSON.stringify(r?.sequence))
+          console.log(`${this.tag} result 전문:`, JSON.stringify(parsed))
+        }
 
         // 파싱한 값을 밖으로 넘긴다. 전부 와이어에서 `unknown` 으로 온 값인데
         // 콜백 시그니처는 구체 타입을 약속하므로 필드마다 다시 검사한다.
@@ -561,25 +594,25 @@ export class AiClient {
               sequenceIndex: typeof sequenceIndex === "number" ? sequenceIndex : null,
             })
           } catch (err) {
-            console.error("[AI] onResult 콜백 예외:", err)
+            console.error(`${this.tag} onResult 콜백 예외:`, err)
           }
         }
         break
       }
 
       case "error": {
-        console.error("[AI] error code=", m?.code)
-        console.error("[AI] error message=", m?.message)
-        console.error("[AI] error retryable=", m?.retryable)
-        console.error("[AI] error 전문:", JSON.stringify(parsed))
+        console.error(`${this.tag} error code=`, m?.code)
+        console.error(`${this.tag} error message=`, m?.message)
+        console.error(`${this.tag} error retryable=`, m?.retryable)
+        console.error(`${this.tag} error 전문:`, JSON.stringify(parsed))
         break
       }
 
       default: {
         // 미지의 타입을 조용히 버리면 안 된다. 클라이언트와 서버의 스키마가
         // 어긋난 걸 알아채는 통로가 여기다.
-        console.warn("[AI] 미지의 메시지 type=", type)
-        console.warn("[AI] 미지의 메시지 원문:", data)
+        console.warn(`${this.tag} 미지의 메시지 type=`, type)
+        console.warn(`${this.tag} 미지의 메시지 원문:`, data)
         break
       }
     }
@@ -591,11 +624,13 @@ export class AiClient {
 
   private scheduleReconnect(why: string): void {
     if (this.shuttingDown) {
-      console.log("[AI] 종료 중이라 재연결하지 않는다")
+      console.log(`${this.tag} 종료 중이라 재연결하지 않는다`)
       return
     }
     if (this.reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
-      console.error(`[AI] 재연결 ${MAX_RECONNECT_ATTEMPTS}회 모두 실패 — 포기한다. 마지막 사유: ${why}`)
+      console.error(
+        `${this.tag} 재연결 ${MAX_RECONNECT_ATTEMPTS}회 모두 실패 — 포기한다. 마지막 사유: ${why}`,
+      )
       this.setState("error")
       return
     }
@@ -603,20 +638,20 @@ export class AiClient {
     this.reconnectAttempt += 1
     const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, this.reconnectAttempt - 1), RECONNECT_CAP_MS)
     console.warn(
-      `[AI] 재연결 ${this.reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS} 회차 — ${delay}ms 후 시도. 사유: ${why}`,
+      `${this.tag} 재연결 ${this.reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS} 회차 — ${delay}ms 후 시도. 사유: ${why}`,
     )
 
     if (this.reconnectTimer !== undefined) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined
       if (this.shuttingDown) return
-      console.log(`[AI] 재연결 ${this.reconnectAttempt}회차 실행`)
+      console.log(`${this.tag} 재연결 ${this.reconnectAttempt}회차 실행`)
       // 재연결은 항상 새 세션을 발급받는다. 기존 session_id 를 이어 쓰지
       // 않는다 — 서버에서 이미 stopped 이거나 만료됐을 수 있고, 그러면 1008 만
       // 받는다. 새 id 로 hello → ready 를 처음부터 다시 밟는다.
       void this.runConnect().catch((err) => {
         this.setState("error")
-        console.error("[AI] 재연결 중 예외:", err)
+        console.error(`${this.tag} 재연결 중 예외:`, err)
       })
     }, delay)
   }
@@ -630,9 +665,9 @@ export class AiClient {
     if (ws === undefined) return
     try {
       ws.close(code, reason)
-      console.log(`[AI] ws.close(${code}) 호출`)
+      console.log(`${this.tag} ws.close(${code}) 호출`)
     } catch (err) {
-      console.error("[AI] ws.close 실패:", err)
+      console.error(`${this.tag} ws.close 실패:`, err)
     }
   }
 
@@ -650,11 +685,11 @@ export class AiClient {
   sendStreamStart(streamId: string, webrtcUrl: string): boolean {
     const sessionId = this.sessionId
     if (sessionId === undefined) {
-      console.error("[Stream] stream_start 전송 불가 — AI session_id 없음")
+      console.error(`${this.streamTag} stream_start 전송 불가 — AI session_id 없음`)
       return false
     }
     if (this.streamStartSent.has(streamId)) {
-      console.warn("[Stream] stream_start 중복 방지 — 이미 보낸 stream_id:", streamId)
+      console.warn(`${this.streamTag} stream_start 중복 방지 — 이미 보낸 stream_id:`, streamId)
       return false
     }
 
@@ -675,10 +710,10 @@ export class AiClient {
 
     this.streamStartSent.add(streamId)
     this.pendingAcks.set(clientMessageId, {label: "stream_start", sentAt: Date.now()})
-    console.log("[Stream] stream_start 전송 시각=", new Date().toISOString())
+    console.log(`${this.streamTag} stream_start 전송 시각=`, new Date().toISOString())
     // 여기서 다시 찍는 건 의도다. 프레임은 흐르는데 result 가 하나도 안 올 때
     // "그 시점에 모델이 로드돼 있었나" 에 답해 주는 줄이다.
-    console.log("[Stream] 스트림 시작 시점 model=", JSON.stringify(this.readyModel))
+    console.log(`${this.streamTag} 스트림 시작 시점 model=`, JSON.stringify(this.readyModel))
     return sent
   }
 
@@ -690,11 +725,11 @@ export class AiClient {
   sendStreamStop(streamId: string): boolean {
     const sessionId = this.sessionId
     if (sessionId === undefined) {
-      console.error("[Stream] stream_stop 전송 불가 — AI session_id 없음")
+      console.error(`${this.streamTag} stream_stop 전송 불가 — AI session_id 없음`)
       return false
     }
     if (this.streamStopSent.has(streamId)) {
-      console.warn("[Stream] stream_stop 중복 방지 — 이미 보낸 stream_id:", streamId)
+      console.warn(`${this.streamTag} stream_stop 중복 방지 — 이미 보낸 stream_id:`, streamId)
       return false
     }
 
@@ -713,7 +748,7 @@ export class AiClient {
 
     this.streamStopSent.add(streamId)
     this.pendingAcks.set(clientMessageId, {label: "stream_stop", sentAt: Date.now()})
-    console.log("[Stream] stream_stop 전송 시각=", new Date().toISOString())
+    console.log(`${this.streamTag} stream_stop 전송 시각=`, new Date().toISOString())
     return sent
   }
 
@@ -725,7 +760,7 @@ export class AiClient {
   sendStopMessage(reason: string): boolean {
     const sessionId = this.sessionId
     if (sessionId === undefined) {
-      console.warn("[AI] stop 전송 생략 — session_id 없음")
+      console.warn(`${this.tag} stop 전송 생략 — session_id 없음`)
       return false
     }
     this.shuttingDown = true
@@ -768,17 +803,17 @@ export class AiClient {
   postStopBestEffort(): void {
     const sessionId = this.sessionId
     void this.postStop(sessionId).catch((err) => {
-      console.warn("[AI] postStop 예외 (정상 취급 — 세션은 expires_at 에 만료된다):", err)
+      console.warn(`${this.tag} postStop 예외 (정상 취급 — 세션은 expires_at 에 만료된다):`, err)
     })
   }
 
   private async postStop(sessionId: string | undefined): Promise<void> {
     if (sessionId === undefined) {
-      console.warn("[AI] POST /stop 생략 — session_id 없음")
+      console.warn(`${this.tag} POST /stop 생략 — session_id 없음`)
       return
     }
     const url = `${AI_HTTP}/v1/sessions/${sessionId}/stop`
-    console.log("[AI] POST", url)
+    console.log(`${this.tag} POST`, url)
 
     let response: Response
     try {
@@ -787,20 +822,20 @@ export class AiClient {
         headers: {Accept: "application/json"},
       })
     } catch (err) {
-      logFetchError("POST /stop", err)
+      logFetchError(this.tag, "POST /stop", err)
       return
     }
 
-    console.log("[AI] POST /stop status=", response.status, response.statusText)
+    console.log(`${this.tag} POST /stop status=`, response.status, response.statusText)
     try {
       const raw = await response.text()
-      console.log("[AI] POST /stop body:", raw)
+      console.log(`${this.tag} POST /stop body:`, raw)
     } catch (err) {
-      console.error("[AI] POST /stop body 읽기 실패:", err)
+      console.error(`${this.tag} POST /stop body 읽기 실패:`, err)
     }
 
     if (response.status === 404) {
-      console.warn("[AI] POST /stop 404 — 세션이 이미 서버에서 사라졌다 (TTL 만료 등)")
+      console.warn(`${this.tag} POST /stop 404 — 세션이 이미 서버에서 사라졌다 (TTL 만료 등)`)
     }
 
     this.sessionId = undefined
