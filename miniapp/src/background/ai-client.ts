@@ -342,7 +342,6 @@ export class AiClient {
 
     ws.onopen = () => {
       console.log("[AI] ws onopen")
-      this.reconnectAttempt = 0
       this.sendHello()
     }
 
