@@ -47,6 +47,8 @@ export interface Snapshot {
   diagnostics: Channels["stream:diagnostics"]
   /** 최근 결과. 오래된 것부터 버린다. 상한은 background 가 건다. */
   results: Channels["recognition:result"][]
+  /** 마지막으로 받은 에러. 아직 없으면 null. */
+  error: Channels["error"] | null
 }
 
 export interface Channels {

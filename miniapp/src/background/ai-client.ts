@@ -120,6 +120,17 @@ export interface AiRecognitionResult {
   sequenceIndex: number | null
 }
 
+/**
+ * 파싱된 서버 `error` 페이로드. `onError` 콜백으로 호출부에 전달된다.
+ * `AiRecognitionResult` 와 같이 UI 타입이 섞이지 않은 순수 데이터다.
+ */
+export interface AiServerError {
+  code: string
+  message: string
+  /** 서버가 boolean 으로 주지 않으면 null. */
+  retryable: boolean | null
+}
+
 export type AiClientState =
   | "idle"
   | "creating_session"
@@ -199,11 +210,14 @@ export class AiClient {
    *                호출부가 ai_ready 상태로 복귀할 수 있다.
    * @param onResult `result` 메시지 한 건마다 파싱된 필드로 호출된다.
    *                순수 데이터만 나가며 이 클래스는 UI 를 참조하지 않는다.
+   * @param onError `error` 메시지 한 건마다 호출된다. stream_unavailable 처럼
+   *                서버가 손을 뗀 상황이 호출부까지 닿는 유일한 통로다.
    */
   constructor(
     private readonly userId: string,
     private readonly onReady?: () => void,
     private readonly onResult?: (result: AiRecognitionResult) => void,
+    private readonly onError?: (error: AiServerError) => void,
   ) {}
 
   /**
@@ -668,6 +682,22 @@ export class AiClient {
         console.error(`${this.tag} error message=`, m?.message)
         console.error(`${this.tag} error retryable=`, m?.retryable)
         console.error(`${this.tag} error 전문:`, JSON.stringify(parsed))
+
+        // 와이어에서 unknown 으로 온 값이라 필드마다 다시 검사한다.
+        if (this.onError !== undefined) {
+          const code = m?.code
+          const message = m?.message
+          const retryable = m?.retryable
+          try {
+            this.onError({
+              code: typeof code === "string" ? code : "unknown",
+              message: typeof message === "string" ? message : "",
+              retryable: typeof retryable === "boolean" ? retryable : null,
+            })
+          } catch (err) {
+            console.error(`${this.tag} onError 콜백 예외:`, err)
+          }
+        }
         break
       }
 

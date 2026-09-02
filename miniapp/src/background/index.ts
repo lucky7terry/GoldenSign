@@ -54,7 +54,7 @@ import {
   type WifiData,
 } from "@mentra/miniapp/background"
 import type {Channels, Snapshot} from "../shared/channels"
-import {AiClient, probeRuntime, type AiClientState} from "./ai-client"
+import {AiClient, probeRuntime, type AiClientState, type AiServerError} from "./ai-client"
 
 /**
  * background 엔트리는 `StreamModule` 은 re-export 하지만 옵션/결과 인터페이스는
@@ -510,6 +510,7 @@ registerMiniapp((session) => {
       status: null,
     },
     results: [],
+    error: null,
   }
 
   // --- LED ------------------------------------------------------------------
@@ -611,8 +612,12 @@ registerMiniapp((session) => {
           snapshot.results.splice(0, snapshot.results.length - MAX_RESULTS)
         }
         break
+      case "error":
+        // 이벤트이면서 동시에 마지막 값을 남긴다. 늦게 마운트된 UI 도 직전
+        // 에러를 볼 수 있어야 한다.
+        snapshot.error = next as Channels["error"]
+        break
       default:
-        // "error" 는 상태가 아니라 이벤트다. 스냅샷 슬롯이 없고 방송만 한다.
         break
     }
     sendBroadcast(channel, next)
@@ -740,6 +745,14 @@ registerMiniapp((session) => {
     publishResult(next)
   }
 
+  /**
+   * AiClient 가 서버 `error` 를 받을 때마다 부르는 곳. 지금은 방송만 한다 —
+   * LED 매핑은 단어 단위 입력 설계가 확정된 뒤에 붙인다.
+   */
+  function handleAiError(err: AiServerError): void {
+    patch("error", {code: err.code, message: err.message, retryable: err.retryable})
+  }
+
   // 정확히 한 번만 등록한다. 같은 채널에 두 번째로 등록하면 ui.handle 이 동기적
   // 으로 throw 한다(채널당 핸들러 하나). 두 번 실행될 수 있는 자리로 옮기면
   // 안 된다. 반환값은 해제 함수다.
@@ -855,6 +868,7 @@ registerMiniapp((session) => {
         // 결과는 순수 데이터로 넘어온다. AiClient 는 `ui` 를 보지 못한다 —
         // 브리지는 전적으로 이쪽에 있다.
         handleResult,
+        handleAiError,
       )
       console.log("[AI] 인스턴스 생성", ai.getId())
       ai.connect()

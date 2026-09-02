@@ -42,6 +42,7 @@ const EMPTY_SNAPSHOT: Snapshot = {
     status: null,
   },
   results: [],
+  error: null,
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +409,9 @@ export function App() {
           glasses: seen.has("glasses") ? s.glasses : snapshot.glasses,
           diagnostics: seen.has("diagnostics") ? s.diagnostics : snapshot.diagnostics,
           results: seen.has("results") ? mergeResults(snapshot.results, s.results) : snapshot.results,
+          // 아직 "error" 채널을 구독하지 않으므로 seen 에 들어오지 않는다.
+          // 통로만 열어 둔 상태이고 UI 표시는 붙이지 않았다.
+          error: seen.has("error") ? s.error : snapshot.error,
         }))
         setPhase({kind: "ready"})
       })
