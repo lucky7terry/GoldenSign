@@ -362,10 +362,10 @@ function aiPhase(state: AiClientState | undefined): Channels["ai:state"]["state"
  * 지속 상태용 LED 명령 하나가 유지되도록 요청하는 시간.
  *
  * blink 의 `count` 도 solid 의 `duration` 도 유한한데 ai_ready 와 streaming 은
- * 몇 분씩 간다. 갱신용 인터벌을 새로 만드는 대신(얹을 기존 타이머가 없다 —
- * ping 을 넣지 않기로 했다) 전이마다 넉넉한 시간으로 걸어 두고, 상태가 실제로
- * 바뀔 때만 다시 건다. 다음 전이 전에 불이 꺼지는 게 관측되면 그때 갱신 방법을
- * 다시 논의한다.
+ * 몇 분씩 간다. 갱신용 인터벌을 새로 만드는 대신 전이마다 넉넉한 시간으로 걸어
+ * 두고, 상태가 실제로 바뀔 때만 다시 건다.
+ * AiClient 에 ping 타이머가 생겼지만 거기에 얹지 않는다. 그쪽은 소켓 수명에
+ * 묶여 있어 재연결마다 서고 다시 도는데, LED 는 소켓과 무관하게 유지돼야 한다.
  */
 const LED_HOLD_MS = 30_000
 

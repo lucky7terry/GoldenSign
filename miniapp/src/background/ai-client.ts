@@ -138,6 +138,11 @@ const RECONNECT_CAP_MS = 30_000
 const HANDSHAKE_TIMEOUT_MS = 10_000
 
 /**
+ * ping 주기.
+ */
+const PING_INTERVAL_MS = 20_000
+
+/**
  * `result` 한 건의 전체 필드를 찍을지. 기본은 꺼짐이다.
  *
  * 켜면 건당 3줄이 된다. 실측으로 초당 114줄까지 나와 콘솔이 밀렸고, 그 바람에
@@ -166,6 +171,8 @@ export class AiClient {
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
   private handshakeTimer: ReturnType<typeof setTimeout> | undefined
+  /** ready 이후에만 돈다. 유휴 상태로 끊기는 것을 막는다. */
+  private pingTimer: ReturnType<typeof setTimeout> | undefined
   /** 의도된 종료 직전에 세운다. onclose 가 재연결을 걸지 않게 하는 유일한 근거. */
   private shuttingDown = false
 
@@ -377,7 +384,11 @@ export class AiClient {
     }
     this.ws = ws
 
+    // 이 소켓이 열린 적이 있는지. onclose 진단이 "핸드셰이크 거부" 와 "열린 연결이 끊김" 을 가르는 근거.
+    let opened = false
+
     ws.onopen = () => {
+      opened = true
       console.log(`${this.tag} ws onopen`)
       this.sendHello()
     }
@@ -415,13 +426,18 @@ export class AiClient {
       // 못한다. 실패한 업그레이드를 엔진마다 다르게 보고하므로(Bun 은 1002
       // protocol error, 대부분은 1006 abnormal closure) 세 값을 같은
       // "세션 거부" 로 묶어 처리한다.
-      if (code === 1008 || code === 1002 || code === 1006) {
+
+      if (!opened && (code === 1008 || code === 1002 || code === 1006)) {
         console.error(`${this.tag} code=${String(code)} — 핸드셰이크 거부로 보인다 (HTTP 403)`)
         console.error(`${this.tag} 원인 후보: session_id 미존재 / 이미 stopped / TTL 만료`)
         console.error(`${this.tag} 서버 로그에서 같은 시각의 '403 Forbidden' 줄과 대조 필요`)
+      } else if (opened && code !== 1000 && code !== 4000) {
+        console.error(`${this.tag} code=${String(code)} — 연결 유지 실패. 열린 연결이 끊겼다`)
+        console.error(`${this.tag} 원인 후보: 네트워크 단절 / 서버 종료 / 유휴 타임아웃`)
       }
 
       this.clearHandshakeTimer()
+      this.clearPingTimer()
       this.ws = undefined
 
       if (this.shuttingDown) {
@@ -459,6 +475,41 @@ export class AiClient {
         this.closeSocket(4000, "handshake timeout")
       }
     }, HANDSHAKE_TIMEOUT_MS)
+  }
+
+  /**
+   * ready 이후 PING_INTERVAL_MS 마다 ping 을 보낸다.
+   *
+   * setInterval 이 아니라 setTimeout 재귀인 이유: 이 런타임에서 실측된 것은
+   * setTimeout 뿐이고 파일 전체가 그 패턴을 쓴다.
+   */
+  private startPingLoop(): void {
+    this.clearPingTimer()
+    this.pingTimer = setTimeout(() => {
+      this.pingTimer = undefined
+      if (this.shuttingDown) return
+      const sessionId = this.sessionId
+      if (sessionId === undefined) return
+      const sent = this.sendJson(
+        {
+          type: "ping",
+          schema_version: HELLO_SCHEMA,
+          session_id: sessionId,
+          client_message_id: `ping-${Date.now()}`,
+        },
+        "ping",
+      )
+      // 실패면 소켓이 이미 죽은 것이다. 다시 걸지 않는다 — onclose 가 재연결을
+      // 굴리고, 새 소켓이 ready 를 받으면 거기서 다시 시작한다.
+      if (sent) this.startPingLoop()
+    }, PING_INTERVAL_MS)
+  }
+
+  private clearPingTimer(): void {
+    if (this.pingTimer !== undefined) {
+      clearTimeout(this.pingTimer)
+      this.pingTimer = undefined
+    }
   }
 
   private clearHandshakeTimer(): void {
@@ -531,6 +582,8 @@ export class AiClient {
           console.log(`${this.tag} 종료 중에 ready 수신 — onReady 를 부르지 않는다`)
           break
         }
+        // 핸드셰이크가 끝난 여기서 시작한다.
+        this.startPingLoop()
         // 재연결 때도 다시 불리므로 호출부가 ai_ready 로 복귀할 수 있다.
         try {
           this.onReady?.()
@@ -600,6 +653,16 @@ export class AiClient {
         break
       }
 
+      case "pong": {
+        // default 로 떨어뜨리면 20초마다 "미지의 메시지" 경고가 찍혀 스키마 불일치처럼 보인다.
+        // client_message_id 는 서버가 echo 한 값이라 어떤 ping 의 응답인지 짚힌다.
+        console.log(
+          `${this.tag} pong client_message_id=${String(m?.client_message_id)}` +
+            ` server_time=${String(m?.server_time)}`,
+        )
+        break
+      }
+
       case "error": {
         console.error(`${this.tag} error code=`, m?.code)
         console.error(`${this.tag} error message=`, m?.message)
@@ -623,6 +686,7 @@ export class AiClient {
   // -------------------------------------------------------------------------
 
   private scheduleReconnect(why: string): void {
+    this.clearPingTimer()
     if (this.shuttingDown) {
       console.log(`${this.tag} 종료 중이라 재연결하지 않는다`)
       return
@@ -780,6 +844,7 @@ export class AiClient {
   closeNow(reason: string): void {
     this.shuttingDown = true
     this.clearHandshakeTimer()
+    this.clearPingTimer()
     if (this.reconnectTimer !== undefined) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = undefined
