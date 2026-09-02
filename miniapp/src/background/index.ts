@@ -812,6 +812,8 @@ registerMiniapp((session) => {
       publishAiState("connecting")
       // onReady 는 재연결 이후에도 발생하므로, 사용자가 아무것도 하지 않아도
       // ai_ready 로 복귀한다.
+      // 이 경로를 두 번 타면 이전 인스턴스가 참조만 잃은 채 재연결을 계속한다.
+      ai?.closeNow("새 AiClient 로 교체")
       ai = new AiClient(
         session.userId,
         () => {
