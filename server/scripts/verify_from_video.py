@@ -69,14 +69,37 @@ def extract_openpose_sequence(path: Path, every: int) -> np.ndarray:
     return np.array(rows, dtype=np.float32)
 
 
+def resample_time(features: np.ndarray, target: int = SEQUENCE_LENGTH) -> np.ndarray:
+    """시간축을 target 길이로 리샘플한다.
+
+    학습이 tf.image.resize(method="bilinear") 로 하는 것과 같은 좌표 규칙을
+    쓴다(half-pixel centers). 출력 i 번째가 보는 원본 위치는
+    (i + 0.5) * T / target - 0.5 다. np.linspace(0, T-1, target) 로 하면
+    양 끝을 맞추는 다른 규칙이 되어 값이 조금씩 어긋난다.
+    """
+    count = len(features)
+    positions = (np.arange(target) + 0.5) * (count / target) - 0.5
+    positions = np.clip(positions, 0.0, count - 1.0)
+    source = np.arange(count)
+    return np.stack(
+        [np.interp(positions, source, features[:, dim])
+         for dim in range(features.shape[1])],
+        axis=1,
+    ).astype(np.float32)
+
+
+def word_window(features: np.ndarray) -> np.ndarray:
+    """구간 전체를 60프레임으로 리샘플해 윈도우 하나로 만든다.
+
+    사용자가 한 단어의 시작과 끝을 표시하는 방식일 때의 서버 동작이다.
+    학습 증강(crop_resample)이 가변 길이 구간을 60으로 늘리는 것과 같다.
+    """
+    return resample_time(features)[None]
+
+
 def sliding_windows(features: np.ndarray, stride: int) -> np.ndarray:
     if len(features) < SEQUENCE_LENGTH:
-        source = np.linspace(0, len(features) - 1, SEQUENCE_LENGTH)
-        stretched = np.stack([
-            np.interp(source, np.arange(len(features)), features[:, dim])
-            for dim in range(features.shape[1])
-        ], axis=1)
-        return stretched[None].astype(np.float32)
+        return word_window(features)
     starts = range(0, len(features) - SEQUENCE_LENGTH + 1, stride)
     return np.stack([features[s:s + SEQUENCE_LENGTH] for s in starts])
 
@@ -88,6 +111,8 @@ def main() -> None:
                         help="N프레임마다 하나씩 처리 (기본 1 = 전부)")
     parser.add_argument("--stride", type=int, default=8)
     parser.add_argument("--topk", type=int, default=5)
+    parser.add_argument("--word-mode", action="store_true",
+                        help="구간 전체를 60프레임으로 리샘플해 한 번만 추론한다")
     args = parser.parse_args()
 
     print(f"[1/4] 영상 읽기 + MediaPipe: {args.video.name}")
@@ -108,13 +133,21 @@ def main() -> None:
     print("  (학습 데이터: mean=0.086 std=0.364)")
 
     print("\n[3/4] 윈도우 + 추론")
-    windows = sliding_windows(features, args.stride)
+    if args.word_mode:
+        windows = word_window(features)
+        seconds = len(raw) * args.every / 30.0
+        print(f"  단어 단위: {len(features)}프레임 -> 60프레임으로 리샘플 (윈도우 1개)")
+        print(f"  이 구간이 덮는 실제 시간: 약 {seconds:.1f}초")
+        print("  (학습은 영상의 50~100% 구간을 60으로 리샘플해서 배웠다)")
+    else:
+        windows = sliding_windows(features, args.stride)
+        print(f"  윈도우 {len(windows)}개 (stride={args.stride})")
+
     model = load_recognition_model()
     infer = make_predictor(model)
     per_window = np.stack(
         [np.array(infer(w[None].astype(np.float32)))[0] for w in windows]
     )
-    print(f"  윈도우 {len(windows)}개 (stride={args.stride})")
 
     probabilities = per_window.mean(axis=0)
     order = np.argsort(-probabilities)[: args.topk]
@@ -123,10 +156,11 @@ def main() -> None:
     for rank, index in enumerate(order, 1):
         print(f"  {rank}. {word_for_index(int(index)):<8} {probabilities[index]:.3f}")
 
-    winners = [int(w.argmax()) for w in per_window]
-    print("\n  윈도우별 1위 분포:")
-    for index in sorted(set(winners), key=winners.count, reverse=True)[:5]:
-        print(f"    {word_for_index(index):<8} {winners.count(index)}/{len(winners)}")
+    if len(per_window) > 1:
+        winners = [int(w.argmax()) for w in per_window]
+        print("\n  윈도우별 1위 분포:")
+        for index in sorted(set(winners), key=winners.count, reverse=True)[:5]:
+            print(f"    {word_for_index(index):<8} {winners.count(index)}/{len(winners)}")
 
     name = args.video.stem
     if name.startswith("WORD"):
