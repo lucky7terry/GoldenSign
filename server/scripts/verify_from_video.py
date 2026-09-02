@@ -12,7 +12,22 @@
 """
 
 import argparse
+import os
 import sys
+
+# TensorFlow / MediaPipe 가 stderr 로 쏟는 C++ 로그를 줄인다. 반드시
+# 그 라이브러리들을 임포트하기 전에 설정해야 한다. 이 스크립트의 출력은
+# 사람이 읽는 것이라, 진단 수치가 로그에 묻히면 쓸모가 없다.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("GLOG_minloglevel", "3")
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+
+# Windows 기본 콘솔 인코딩(cp949)은 일부 기호를 못 쓴다. 파일로 리다이렉트하면
+# 터미널과 달리 cp949 가 적용돼 출력 도중 죽는다. UTF-8 로 고정한다.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
 import time
 from pathlib import Path
 
@@ -152,7 +167,7 @@ def main() -> None:
     probabilities = per_window.mean(axis=0)
     order = np.argsort(-probabilities)[: args.topk]
 
-    print("\n[4/4] 결과 — 영상 전체 평균")
+    print("\n[4/4] 결과 - 영상 전체 평균")
     for rank, index in enumerate(order, 1):
         print(f"  {rank}. {word_for_index(int(index)):<8} {probabilities[index]:.3f}")
 
