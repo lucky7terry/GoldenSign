@@ -30,6 +30,19 @@ def _env_float(name: str, default: float) -> float:
     return value
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value == "":
+        return default
+
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean.")
+
+
 def _env_csv(name: str, default: str) -> tuple[str, ...]:
     raw_value = os.getenv(name, default)
     return tuple(
@@ -48,6 +61,11 @@ SEQUENCE_WINDOW_SIZE = _env_int("SEQUENCE_WINDOW_SIZE", 60)
 SEQUENCE_STRIDE = _env_int("SEQUENCE_STRIDE", 1)
 PUBLIC_WS_BASE_URL = os.getenv("PUBLIC_WS_BASE_URL")
 WS_IDLE_TIMEOUT_SECONDS = _env_float("WS_IDLE_TIMEOUT_SECONDS", 60.0)
+
+# result 메시지에 좌표를 실을지. 좌표는 실수 959개로 메시지의 94% 를 차지하는데
+# (8,338 -> 479 바이트) 미니앱은 읽지 않는다. 기본은 빼고, 서버 좌표를 눈으로
+# 확인해야 할 때만 켠다. 켜면 초당 13개 결과 기준 110KB/s 가 나간다.
+INCLUDE_KEYPOINTS_IN_RESULT = _env_bool("INCLUDE_KEYPOINTS_IN_RESULT", False)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 WHEP_MAX_RETRIES = _env_int("WHEP_MAX_RETRIES", 5)
 WHEP_RETRY_DELAY_SECONDS = _env_float("WHEP_RETRY_DELAY_SECONDS", 1.0)

@@ -1,3 +1,4 @@
+from app.config import INCLUDE_KEYPOINTS_IN_RESULT
 from app.services.mediapipe_service import (
     MediaPipeProcessingError,
     get_mediapipe_service,
@@ -51,6 +52,21 @@ def get_model_health_status():
         "mode": "keypoints_only",
         "version": "mediapipe tasks-0.10.35",
     }
+
+
+def public_result(result: dict) -> dict:
+    """클라이언트로 내보낼 형태.
+
+    keypoints 는 좌표 959개라 result 메시지의 94% 를 차지하는데
+    (8,338 -> 479 바이트) 미니앱은 text / confidence / is_final /
+    sequence.window_index 만 읽는다. 안경이 폰을 거쳐 받는 구조라
+    초당 13개면 110KB/s 가 그냥 버려진다.
+
+    서버 로그의 검출률 요약은 원본 result 를 쓰므로 영향받지 않는다.
+    """
+    if INCLUDE_KEYPOINTS_IN_RESULT:
+        return result
+    return {key: value for key, value in result.items() if key != "keypoints"}
 
 
 def _recognition_result(

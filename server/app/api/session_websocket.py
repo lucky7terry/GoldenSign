@@ -33,6 +33,7 @@ from app.services.mediapipe_service import (
 from app.services.model_service import (
     FrameValidationError,
     get_model_health_status,
+    public_result,
     recognize_frame_from_image_bytes,
 )
 from app.services.sequence_service import SequenceSessionClosed, sequence_store
@@ -143,7 +144,7 @@ async def _run_frame_recognition(
             "request_id": frame_message.request_id,
             "frame_index": frame_message.frame_index,
             "captured_at": frame_message.captured_at,
-            "result": result,
+            "result": public_result(result),
             "model": get_model_health_status(),
             "processed_at": _utc_now_iso(),
         }
