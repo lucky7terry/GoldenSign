@@ -10,12 +10,21 @@ import mediapipe as mp
 import numpy as np
 
 from app.constants import MAX_FRAME_BYTES
+from app.services.hand_assignment import assign_hands
 
 logger = logging.getLogger(__name__)
 
 
 class MediaPipeProcessingError(Exception):
     """이미지 디코딩 또는 MediaPipe 처리 실패 예외."""
+
+
+class MediaPipeUnavailableError(RuntimeError):
+    """랜드마커 모델을 로드하지 못해 키포인트 추출이 불가능한 상태.
+
+    모델 파일이 없는 경우가 대부분이다. 프레임마다 다시 시도해도 결과가
+    같으므로 재시도 대상이 아니다. 클라이언트에는 retryable=false 로 나가야 한다.
+    """
 
 
 def decode_base64_image_data(encoded_image: str) -> bytes:
@@ -244,12 +253,6 @@ class MediaPipeService:
             getattr(category, "score", None),
         )
 
-    @staticmethod
-    def _score_or_default(score: float | None) -> float:
-        if score is None:
-            return -1.0
-        return score
-
     def extract_keypoints_from_image(
         self,
         image: np.ndarray,
@@ -297,6 +300,12 @@ class MediaPipeService:
         pose: list[dict[str, float | None]] = []
         image_height, image_width = image.shape[:2]
 
+        # Pose 결과 — 손 좌우 배정에 손목 좌표를 쓰므로 먼저 계산한다.
+        if pose_result.pose_landmarks:
+            pose = self._serialize_pose_landmarks(
+                pose_result.pose_landmarks[0]
+            )
+
         # 손 결과 분류
         hand_candidates: list[dict[str, Any]] = []
         for index, landmarks in enumerate(
@@ -325,63 +334,13 @@ class MediaPipeService:
                 }
             )
 
-        selected_hand_indexes: set[int] = set()
-
-        for label in ("left", "right"):
-            labeled_candidates = [
-                candidate
-                for candidate in hand_candidates
-                if candidate["label"] == label
-            ]
-            if not labeled_candidates:
-                continue
-            if len(labeled_candidates) > 1:
-                logger.warning(
-                    "Duplicate %s hand detected; preserving higher score",
-                    label,
-                )
-            selected_candidate = max(
-                labeled_candidates,
-                key=lambda candidate: self._score_or_default(candidate["score"]),
-            )
-            selected_hand_indexes.add(selected_candidate["index"])
-            if label == "left":
-                left_hand = selected_candidate["landmarks"]
-            else:
-                right_hand = selected_candidate["landmarks"]
-
-        for label in ("left", "right"):
-            if label == "left" and left_hand:
-                continue
-            if label == "right" and right_hand:
-                continue
-
-            remaining_candidates = [
-                candidate
-                for candidate in hand_candidates
-                if candidate["index"] not in selected_hand_indexes
-            ]
-            if not remaining_candidates:
-                continue
-            selected_candidate = max(
-                remaining_candidates,
-                key=lambda candidate: self._score_or_default(candidate["score"]),
-            )
-            selected_hand_indexes.add(selected_candidate["index"])
-            logger.warning(
-                "Reassigned duplicate or unlabeled hand to missing %s hand",
-                label,
-            )
-            if label == "left":
-                left_hand = selected_candidate["landmarks"]
-            else:
-                right_hand = selected_candidate["landmarks"]
-
-        # Pose 결과
-        if pose_result.pose_landmarks:
-            pose = self._serialize_pose_landmarks(
-                pose_result.pose_landmarks[0]
-            )
+        # 안경 카메라에서는 검출기 handedness의 좌우가 뒤집히므로
+        # Pose 손목 좌표를 기준으로 배정한다(app/services/hand_assignment.py).
+        assignment = assign_hands(hand_candidates, pose)
+        if assignment["left"] is not None:
+            left_hand = assignment["left"]["landmarks"]
+        if assignment["right"] is not None:
+            right_hand = assignment["right"]["landmarks"]
 
         # Face 결과
         if face_result.face_landmarks:
@@ -425,13 +384,60 @@ class MediaPipeService:
 
 
 _mediapipe_service: MediaPipeService | None = None
+_initialization_error: MediaPipeUnavailableError | None = None
 _mediapipe_service_lock = threading.Lock()
 
 
 def get_mediapipe_service() -> MediaPipeService:
-    global _mediapipe_service
-    if _mediapipe_service is None:
-        with _mediapipe_service_lock:
-            if _mediapipe_service is None:
-                _mediapipe_service = MediaPipeService()
+    """랜드마커 서비스를 돌려준다. 로드에 실패했으면 매번 같은 예외를 던진다.
+
+    실패를 기억하지 않으면 프레임마다 모델 로딩을 다시 시도하게 된다.
+    모델 파일이 없는 상태에서 초당 수십 번 같은 실패를 반복하는 셈이라,
+    한 번 실패하면 그 사실을 붙잡고 있는다. 파일을 채운 뒤에는 서버를
+    재시작해야 한다 — 조용히 반쯤 살아나는 것보다 낫다.
+    """
+    global _mediapipe_service, _initialization_error
+
+    if _mediapipe_service is not None:
+        return _mediapipe_service
+
+    with _mediapipe_service_lock:
+        if _mediapipe_service is not None:
+            return _mediapipe_service
+        if _initialization_error is not None:
+            raise _initialization_error
+        try:
+            _mediapipe_service = MediaPipeService()
+        except Exception as exc:
+            _initialization_error = MediaPipeUnavailableError(str(exc))
+            raise _initialization_error from exc
+
     return _mediapipe_service
+
+
+def preload_mediapipe_service() -> bool:
+    """기동 시 모델을 미리 로드한다. 실패해도 예외를 밖으로 내지 않는다.
+
+    첫 프레임이 들어올 때 로딩하면 그 프레임이 타임아웃되고, 모델이 없으면
+    무엇이 잘못됐는지 로그에도 안 남는다. 기동 시점에 크게 한 번 알린다.
+    """
+    try:
+        get_mediapipe_service()
+    except MediaPipeUnavailableError as exc:
+        logger.error(
+            "MediaPipe landmarkers unavailable; keypoint extraction is disabled",
+            extra={"error": str(exc)},
+        )
+        return False
+    logger.info("MediaPipe landmarkers loaded")
+    return True
+
+
+def keypoint_extraction_available() -> bool:
+    return _mediapipe_service is not None
+
+
+def keypoint_extraction_error() -> str | None:
+    if _initialization_error is None:
+        return None
+    return str(_initialization_error)
