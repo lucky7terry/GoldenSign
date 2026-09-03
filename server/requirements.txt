@@ -7,3 +7,7 @@ aiortc>=1.9.0,<2.0.0
 mediapipe==0.10.35
 opencv-python-headless==4.11.0.86
 numpy>=1.26.0,<2.0.0
+
+# 수어 인식 모델. 학습이 TF 2.17 / Keras 3.10 이므로 같은 계열로 고정한다.
+# TF 2.17 은 Python 3.13 을 지원하지 않는다 — 서버는 3.12 로 맞출 것.
+tensorflow-cpu>=2.17.0,<2.18.0
