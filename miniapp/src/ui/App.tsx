@@ -42,6 +42,7 @@ const EMPTY_SNAPSHOT: Snapshot = {
     status: null,
   },
   results: [],
+  error: null,
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +390,8 @@ export function App() {
       }),
       mentra.on("error", (e) => {
         console.error("[UI] error", e.code, e.message)
+        seen.add("error")
+        setSnap((s) => ({...s, error: e}))
       }),
     ]
 
@@ -408,6 +411,9 @@ export function App() {
           glasses: seen.has("glasses") ? s.glasses : snapshot.glasses,
           diagnostics: seen.has("diagnostics") ? s.diagnostics : snapshot.diagnostics,
           results: seen.has("results") ? mergeResults(snapshot.results, s.results) : snapshot.results,
+          // 다른 슬롯과 같은 규칙이다. 방송으로 이미 받았으면 그쪽이 더 새롭다.
+          // 스냅샷에는 담기지만 화면 표시는 아직 붙이지 않았다.
+          error: seen.has("error") ? s.error : snapshot.error,
         }))
         setPhase({kind: "ready"})
       })
