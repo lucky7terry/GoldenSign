@@ -390,6 +390,8 @@ export function App() {
       }),
       mentra.on("error", (e) => {
         console.error("[UI] error", e.code, e.message)
+        seen.add("error")
+        setSnap((s) => ({...s, error: e}))
       }),
     ]
 
@@ -409,8 +411,8 @@ export function App() {
           glasses: seen.has("glasses") ? s.glasses : snapshot.glasses,
           diagnostics: seen.has("diagnostics") ? s.diagnostics : snapshot.diagnostics,
           results: seen.has("results") ? mergeResults(snapshot.results, s.results) : snapshot.results,
-          // 아직 "error" 채널을 구독하지 않으므로 seen 에 들어오지 않는다.
-          // 통로만 열어 둔 상태이고 UI 표시는 붙이지 않았다.
+          // 다른 슬롯과 같은 규칙이다. 방송으로 이미 받았으면 그쪽이 더 새롭다.
+          // 스냅샷에는 담기지만 화면 표시는 아직 붙이지 않았다.
           error: seen.has("error") ? s.error : snapshot.error,
         }))
         setPhase({kind: "ready"})
