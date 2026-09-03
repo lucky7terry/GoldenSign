@@ -1,0 +1,4 @@
+# 테스트 실행에 필요한 최소 의존성.
+# 현재 테스트는 스키마(pydantic)와 순수 로직만 다루므로 mediapipe/opencv는 받지 않는다.
+# requirements.txt의 pydantic 핀과 반드시 같이 움직일 것.
+pydantic>=2.8.0,<3.0.0

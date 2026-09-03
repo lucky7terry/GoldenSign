@@ -30,6 +30,12 @@ def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _public_result(result: dict) -> dict:
+    from app.services.model_service import public_result
+
+    return public_result(result)
+
+
 def _recognize_whep_frame(session_id: str, sequence_generation: int, image):
     from app.services.model_service import (
         get_model_health_status,
@@ -523,7 +529,8 @@ class WhepPullService:
                     "client_message_id": handle.client_message_id,
                     "stream_id": handle.stream_id,
                     "sequence_index": processed_frame_count,
-                    "result": result,
+                    # 로그의 검출률 요약은 아래에서 원본 result 를 그대로 쓴다.
+                    "result": _public_result(result),
                     "model": model_status,
                     "processed_at": _utc_now_iso(),
                 }

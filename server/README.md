@@ -23,6 +23,11 @@ The model download script prepares:
 Run this script in every local, CI, and deployment environment before starting
 the server. The MediaPipe model files are not committed to the repository.
 
+세 파일이 모두 있어야 한다. 하나라도 없으면 서버는 기동 로그에
+`MediaPipe landmarkers unavailable` 을 남기고, `/health` 가 503 과
+`status: degraded` 를 돌려주며, 프레임 요청에는 `model_unavailable`
+(`retryable: false`) 로 응답한다. 파일을 채운 뒤 서버를 재시작해야 한다.
+
 ## Run
 
 ```bash
@@ -58,6 +63,19 @@ proxy:
 ```bash
 PUBLIC_WS_BASE_URL=wss://api.example.com
 ```
+
+## Result Payload
+
+result 메시지에 좌표를 실으려면(디버깅용):
+
+```bash
+INCLUDE_KEYPOINTS_IN_RESULT=true
+```
+
+기본은 꺼져 있다. 좌표는 실수 959개로 메시지의 94% 를 차지하는데
+(8,338 -> 479 바이트) 미니앱은 읽지 않는다. 켜면 초당 13개 결과 기준
+110KB/s 가 나가고, 안경이 폰을 거쳐 받는 구조라 모바일 데이터에 직접
+영향을 준다. 서버 로그의 파트별 검출률 요약은 이 값과 무관하게 나온다.
 
 ## Swagger
 

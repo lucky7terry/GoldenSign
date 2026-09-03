@@ -2,11 +2,16 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from time import monotonic
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
-from app.config import FRAME_QUEUE_MAX_SIZE, MAX_CONCURRENT_RECOGNITIONS
+from app.config import (
+    FRAME_QUEUE_MAX_SIZE,
+    MAX_CONCURRENT_RECOGNITIONS,
+    WS_IDLE_TIMEOUT_SECONDS,
+)
 from app.constants import (
     MAX_FRAME_BYTES,
     SCHEMA_VERSION,
@@ -22,11 +27,13 @@ from app.schemas.websocket import (
 )
 from app.services.mediapipe_service import (
     MediaPipeProcessingError,
+    MediaPipeUnavailableError,
     decode_base64_image_data,
 )
 from app.services.model_service import (
     FrameValidationError,
     get_model_health_status,
+    public_result,
     recognize_frame_from_image_bytes,
 )
 from app.services.sequence_service import SequenceSessionClosed, sequence_store
@@ -40,6 +47,32 @@ from app.services.whep_service import whep_pull_service
 router = APIRouter()
 logger = logging.getLogger(__name__)
 _recognition_semaphore = asyncio.Semaphore(MAX_CONCURRENT_RECOGNITIONS)
+
+# 유휴 여부를 얼마나 자주 확인할지. 타임아웃 자체보다 짧아야 한다.
+_IDLE_POLL_SECONDS = 5.0
+
+
+class ConnectionActivity:
+    """이 연결에 마지막으로 무언가 오간 시각.
+
+    WHEP 스트리밍 중에는 클라이언트가 WebSocket 으로 아무것도 보내지 않는다.
+    영상은 서버가 Cloudflare 에서 직접 당겨오고, 서버는 결과만 내보낸다.
+    그래서 유휴 판정을 수신만으로 하면 정상 동작 중인 스트림을 끊게 된다.
+    송신도 활동으로 친다.
+
+    글래스 쪽 연결이 실제로 죽으면 WHEP 프레임이 먼저 끊기고
+    (WHEP_FRAME_IDLE_TIMEOUT_SECONDS), 그러면 보낼 결과도 없어지므로
+    이 타이머가 다시 의미를 갖는다.
+    """
+
+    def __init__(self) -> None:
+        self._last = monotonic()
+
+    def touch(self) -> None:
+        self._last = monotonic()
+
+    def idle_seconds(self) -> float:
+        return monotonic() - self._last
 
 
 @dataclass
@@ -72,9 +105,16 @@ def _validate_common_message(message: WebSocketMessage, session_id: str):
     return None
 
 
-async def _send_json(websocket: WebSocket, send_lock: asyncio.Lock, payload: dict):
+async def _send_json(
+    websocket: WebSocket,
+    send_lock: asyncio.Lock,
+    payload: dict,
+    activity: ConnectionActivity | None = None,
+):
     async with send_lock:
         await websocket.send_json(payload)
+    if activity is not None:
+        activity.touch()
 
 
 async def _run_frame_recognition(
@@ -104,7 +144,7 @@ async def _run_frame_recognition(
             "request_id": frame_message.request_id,
             "frame_index": frame_message.frame_index,
             "captured_at": frame_message.captured_at,
-            "result": result,
+            "result": public_result(result),
             "model": get_model_health_status(),
             "processed_at": _utc_now_iso(),
         }
@@ -119,6 +159,20 @@ async def _run_frame_recognition(
         )
     except SequenceSessionClosed:
         return
+    except MediaPipeUnavailableError as exc:
+        # 모델 파일이 없는 상태다. 다시 보내도 결과가 같으므로 재시도시키지 않는다.
+        logger.error(
+            "Keypoint extraction unavailable",
+            extra={"session_id": session_id, "error": str(exc)},
+        )
+        payload = error_message(
+            SCHEMA_VERSION,
+            session_id,
+            "model_unavailable",
+            "Keypoint extraction is unavailable on this server.",
+            client_message_id,
+            retryable=False,
+        )
     except Exception:
         logger.exception(
             "Frame recognition failed",
@@ -171,10 +225,25 @@ def _decode_frame_image_data(image_data: str) -> bytes:
 async def stream_recognition_frames(websocket: WebSocket, session_id: str):
     session = validate_recognition_session(session_id)
     if session is None:
+        logger.info(
+            "WebSocket rejected",
+            extra={"session_id": session_id, "reason": "session_invalid"},
+        )
         await websocket.close(code=1008)
         return
 
     await websocket.accept()
+    connected_at = monotonic()
+    activity = ConnectionActivity()
+    close_reason = "unknown"
+    logger.info(
+        "WebSocket connected",
+        extra={
+            "session_id": session_id,
+            "client": session.client,
+            "user_id": session.user_id,
+        },
+    )
     send_lock = asyncio.Lock()
     sequence_generation = sequence_store.start_session(session_id)
     frame_queue: asyncio.Queue[FrameRecognitionJob] = asyncio.Queue(
@@ -191,12 +260,30 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
     )
 
     async def send_stream_payload(payload: dict):
-        await _send_json(websocket, send_lock, payload)
+        await _send_json(websocket, send_lock, payload, activity)
 
     try:
         while True:
             try:
-                raw_message = await websocket.receive_json()
+                raw_message = await asyncio.wait_for(
+                    websocket.receive_json(),
+                    timeout=_IDLE_POLL_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                # 수신이 없어도 결과를 내보내고 있으면 살아있는 연결이다.
+                if activity.idle_seconds() < WS_IDLE_TIMEOUT_SECONDS:
+                    continue
+                close_reason = "idle_timeout"
+                logger.warning(
+                    "WebSocket idle timeout; closing",
+                    extra={
+                        "session_id": session_id,
+                        "idle_seconds": round(activity.idle_seconds(), 1),
+                        "idle_timeout_seconds": WS_IDLE_TIMEOUT_SECONDS,
+                    },
+                )
+                await websocket.close(code=1001)
+                return
             except ValueError:
                 await _send_json(
                     websocket,
@@ -238,6 +325,8 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                 )
                 continue
 
+            activity.touch()
+
             validation_error = _validate_common_message(message, session_id)
             if validation_error is not None:
                 await _send_json(websocket, send_lock, validation_error)
@@ -249,6 +338,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
             if message_type == "hello":
                 session = activate_recognition_session(session_id)
                 if session is None:
+                    close_reason = "session_invalid"
                     await websocket.close(code=1008)
                     return
                 await _send_json(
@@ -265,6 +355,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
             elif message_type == "frame":
                 session = validate_recognition_session(session_id)
                 if session is None:
+                    close_reason = "session_invalid"
                     await websocket.close(code=1008)
                     return
 
@@ -374,6 +465,11 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     }
                 )
             elif message_type == "ping":
+                session = validate_recognition_session(session_id)
+                if session is None:
+                    close_reason = "session_invalid"
+                    await websocket.close(code=1008)
+                    return
                 await _send_json(
                     websocket,
                     send_lock,
@@ -518,6 +614,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     }
                 )
             elif message_type == "stop":
+                close_reason = "client_stop"
                 stop_session(session_id)
                 await websocket.close(code=1000)
                 return
@@ -534,9 +631,18 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     )
                 )
     except WebSocketDisconnect:
+        close_reason = "client_disconnect"
         return
     finally:
         await whep_pull_service.stop_session(session_id)
         recognition_worker.cancel()
         await asyncio.gather(recognition_worker, return_exceptions=True)
         sequence_store.clear_session(session_id)
+        logger.info(
+            "WebSocket closed",
+            extra={
+                "session_id": session_id,
+                "reason": close_reason,
+                "duration_seconds": round(monotonic() - connected_at, 1),
+            },
+        )
