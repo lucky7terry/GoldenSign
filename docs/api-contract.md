@@ -1,6 +1,6 @@
 # API Contract — Golden Sign AI Server
 
-Mentra MiniApp(`mentra/`)과 FastAPI AI 서버(`server/`) 사이의 통신 계약이다.
+Mentra MiniApp(`miniapp/`)과 FastAPI AI 서버(`server/`) 사이의 통신 계약이다.
 서버가 아직 구현되지 않은 상태에서도 이 문서 기준으로 양쪽이 독립적으로 개발을 진행할 수 있도록 만들었다.
 
 ## 현재 상태 (Week 1)
@@ -49,7 +49,7 @@ Mentra MiniApp(`mentra/`)과 FastAPI AI 서버(`server/`) 사이의 통신 계�
 
 ```json
 {
-  "client": "mentra",
+  "client": "mentra-local-miniapp",
   "user_id": "mentra-user-id"
 }
 ```
