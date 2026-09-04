@@ -72,7 +72,7 @@ interface BaseMessage {
   "schema_version": "dev-0.2",
   "session_id": "abc-123",
   "client_message_id": "msg-001",
-  "client": "mentra",
+  "client": "mentra-local-miniapp",
   "user_id": "mentra-user-id",
   "capabilities": {
     "frame_encoding": ["jpeg_base64"],
@@ -91,7 +91,7 @@ interface BaseMessage {
   "schema_version": "dev-0.2",
   "session_id": "abc-123",
   "client_message_id": "frame-000001",
-  "request_id": "mentra-photo-request-id",
+  "request_id": "req-000001",
   "frame_index": 1,
   "captured_at": "2026-07-15T12:00:00.000Z",
   "image": {
@@ -168,7 +168,7 @@ WebSocket 스트림 종료 의도를 알린다.
   "schema_version": "dev-0.2",
   "session_id": "abc-123",
   "client_message_id": "frame-000001",
-  "request_id": "mentra-photo-request-id",
+  "request_id": "req-000001",
   "received_at": "2026-07-15T12:00:00.250Z"
 }
 ```
@@ -183,7 +183,7 @@ WebSocket 스트림 종료 의도를 알린다.
   "schema_version": "dev-0.2",
   "session_id": "abc-123",
   "client_message_id": "frame-000001",
-  "request_id": "mentra-photo-request-id",
+  "request_id": "req-000001",
   "frame_index": 1,
   "captured_at": "2026-07-15T12:00:00.000Z",
   "result": {
