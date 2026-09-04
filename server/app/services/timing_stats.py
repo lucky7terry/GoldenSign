@@ -58,10 +58,13 @@ class TimingReporter:
             raise ValueError(f"interval must be non-negative: {interval_seconds}")
         self._interval = float(interval_seconds)
         self._last_report = time.monotonic()
+        self._lock = threading.Lock()
 
     def should_report(self) -> bool:
-        now = time.monotonic()
-        if now - self._last_report < self._interval:
-            return False
-        self._last_report = now
-        return True
+        # 확인과 갱신을 한 락 안에서 처리해야 두 스레드가 같은 주기를 함께 통과하지 않는다.
+        with self._lock:
+            now = time.monotonic()
+            if now - self._last_report < self._interval:
+                return False
+            self._last_report = now
+            return True

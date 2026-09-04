@@ -1,4 +1,5 @@
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -73,6 +74,22 @@ class TimingReporterTest(unittest.TestCase):
         reporter._last_report -= 61.0  # 시계를 앞당겨 sleep 없이 확인
         self.assertTrue(reporter.should_report())
         self.assertFalse(reporter.should_report())  # 보고 후 시각이 갱신됨
+
+    def test_check_and_update_happen_while_holding_the_lock(self):
+        reporter = TimingReporter(interval_seconds=60.0)
+        reporter._last_report -= 61.0
+        finished = threading.Event()
+
+        def call_should_report():
+            reporter.should_report()
+            finished.set()
+
+        # 락을 잡은 채로 부르면, 확인부터 갱신까지 전부 기다려야 한다.
+        with reporter._lock:
+            threading.Thread(target=call_should_report, daemon=True).start()
+            self.assertFalse(finished.wait(timeout=0.1))
+
+        self.assertTrue(finished.wait(timeout=2.0))
 
     def test_zero_interval_always_reports(self):
         reporter = TimingReporter(interval_seconds=0.0)
