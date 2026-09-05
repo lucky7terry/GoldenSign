@@ -153,62 +153,74 @@ class PipelineOrderTest(unittest.TestCase):
 
 
 class IrregularSpacingTest(unittest.TestCase):
-    """[1] 단계가 실제로 하는 일 - 불규칙한 간격을 펴는 것.
+    """[1] 단계가 하는 일 - 불규칙한 간격을 촘촘한 격자 위로 편다.
 
     프레임이 불규칙하게 버려지면 궤적이 시간축으로 일그러진다. 촘촘하게
     살아남은 구간은 느리게, 성기게 살아남은 구간은 빠르게 움직인 것처럼
-    보인다. 영상 5개 실측에서 이것이 확신도를 0.782 -> 0.637 로 떨어뜨렸고
-    한 번은 오답을 냈다.
+    보인다. 실측에서 이것이 확신도를 0.782 -> 0.637 로 떨어뜨렸고 한 번은
+    오답을 냈다.
+
+    격자는 원본 영상과 같은 30fps 여야 한다. 구간의 관측 간격으로 잡으면
+    프레임 수는 보존되지만 각 프레임이 원래 시각에서 밀려나서, 8프레임
+    구간에서 확신도가 임계값 아래(0.479)로 무너졌다.
     """
 
     @staticmethod
-    def _reference(times: list[float]) -> np.ndarray:
+    def _reference(times_ms: list[float]) -> np.ndarray:
         frames = np.asarray(
-            [_motion_frame(t / 1000.0) for t in times], dtype=np.float64
+            [_motion_frame(t / 1000.0) for t in times_ms], dtype=np.float64
         )
         return resample_index_half_pixel(build_features(frames), 60)
 
-    def test_restoring_the_grid_recovers_the_uniform_trajectory(self):
-        duration_ms = 2000.0
-        uniform_times = [i * 1000.0 / 30.0 for i in range(60)]
-
-        # 불규칙하게 살아남은 프레임: 앞은 촘촘, 뒤는 성기게.
-        kept = [i * 1000.0 / 30.0 for i in range(0, 24, 1)]
+    @staticmethod
+    def _uneven_times() -> list[float]:
+        """앞은 촘촘, 뒤는 성기게 살아남은 구간."""
+        kept = [i * 1000.0 / 30.0 for i in range(24)]
         kept += [800.0 + i * 200.0 for i in range(7)]
-        kept = [t for t in kept if t <= duration_ms]
-        frames = [_motion_frame(t / 1000.0) for t in kept]
+        return kept
 
-        truth = self._reference(uniform_times)
+    def test_restoring_the_grid_recovers_the_uniform_trajectory(self):
+        kept = self._uneven_times()
+        frames = [_motion_frame(t / 1000.0) for t in kept]
+        truth = self._reference([i * 1000.0 / 30.0 for i in range(60)])
+
         restored, on_time, _ = build_model_input(frames, kept)
         raw_only = resample_index_half_pixel(
             build_features(np.asarray(frames, dtype=np.float64)), 60
         )
 
         self.assertTrue(on_time)
-        restored_error = float(np.abs(restored - truth).mean())
-        raw_error = float(np.abs(raw_only - truth).mean())
-        self.assertLess(restored_error, raw_error)
-
-    def test_observed_rate_is_identity_on_uniform_input(self):
-        """간격이 이미 균일하면 [1] 은 아무것도 하지 않아야 한다.
-
-        도착하지 않은 프레임을 지어내면 실측에서 오히려 손해였다
-        (uniform 확신도 0.708 대 0.714).
-        """
-        count = 40
-        frames = [_motion_frame(i / 12.7) for i in range(count)]
-        times = [i * 1000.0 / 12.7 for i in range(count)]
-
-        out, on_time = resample_to_uniform_fps(frames, times, fps=None)
-
-        self.assertTrue(on_time)
-        self.assertEqual(out.shape[0], count)
-        np.testing.assert_allclose(
-            out, np.asarray(frames, dtype=np.float64), atol=1e-9
+        self.assertLess(
+            float(np.abs(restored - truth).mean()),
+            float(np.abs(raw_only - truth).mean()),
         )
 
-    def test_explicit_fps_still_rescales(self):
-        """WORD_SOURCE_FPS 를 주면 그 간격으로 되돌린다(선택 기능)."""
+    def test_the_grid_is_fine_enough_to_place_frames_near_their_own_time(self):
+        """격자가 성기면(=관측 간격) 프레임이 제 시각에서 밀려난다.
+
+        간격이 100ms~1500ms 로 들쭉날쭉한 8프레임 구간에서, 30fps 격자는
+        원래 시각의 절반 칸(16.7ms) 안에 표본을 놓는다. 관측 간격
+        (약 1.5fps)으로 잡으면 수백 ms 씩 밀린다.
+        """
+        times = [0.0, 100.0, 200.0, 300.0, 1800.0, 2000.0, 3500.0, 4600.0]
+        frames = [_motion_frame(t / 1000.0) for t in times]
+
+        fine, _ = resample_to_uniform_fps(frames, times, fps=30.0)
+        coarse, _ = resample_to_uniform_fps(frames, times, fps=1.5)
+
+        span_seconds = (times[-1] - times[0]) / 1000.0
+        self.assertGreater(fine.shape[0], int(span_seconds * 25))
+        self.assertLess(coarse.shape[0], 12)
+
+        truth = np.asarray(frames, dtype=np.float64)
+        # 촘촘한 격자에서는 원래 표본이 거의 그대로 다시 나타난다.
+        for row, moment in zip(truth, times):
+            index = int(round((moment - times[0]) / 1000.0 * 30.0))
+            np.testing.assert_allclose(
+                fine[index, 0], row[0], atol=1.0
+            )
+
+    def test_uniform_low_fps_input_is_upsampled_to_the_grid(self):
         count = 26
         frames = [_motion_frame(i / 12.7) for i in range(count)]
         times = [i * 1000.0 / 12.7 for i in range(count)]
@@ -216,7 +228,6 @@ class IrregularSpacingTest(unittest.TestCase):
         out, on_time = resample_to_uniform_fps(frames, times, fps=30.0)
 
         self.assertTrue(on_time)
-        # 2초 구간을 30fps 로 채우면 60프레임 근처가 된다.
         self.assertGreater(out.shape[0], count)
 
 
@@ -357,8 +368,8 @@ class WordSegmentStoreTest(unittest.TestCase):
         self.assertEqual(segment.word_index, 1)
         self.assertTrue(segment.resampled_on_time)
         self.assertTrue(np.all(np.isfinite(segment.sequence)))
-        # 일정한 간격으로 도착했으므로 [1] 은 항등 - 프레임 수가 그대로다.
-        self.assertEqual(segment.uniform_frame_count, 25)
+        # 12.7fps 로 받은 25프레임을 30fps 격자에 올리면 늘어난다.
+        self.assertGreater(segment.uniform_frame_count, 25)
 
     def test_metadata_reports_the_model_input_shape(self):
         self.store.start_word("s1", self.generation)

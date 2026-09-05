@@ -189,8 +189,9 @@ def summarize(probabilities: np.ndarray) -> tuple[int, float, float]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("videos", type=Path, nargs="+")
-    parser.add_argument("--every", type=int, default=3,
-                        help="평균적으로 N개마다 하나만 처리 (기본 3 = 10fps)")
+    parser.add_argument("--every", type=int, nargs="+", default=[3],
+                        help="평균적으로 N개마다 하나만 처리. 여러 개 주면 "
+                             "차례로 돈다 (기본 3 = 10fps)")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -212,48 +213,61 @@ def main() -> None:
         print(f"  [기준] 30fps 전부 {len(full)}프레임  "
               f"{word_for_index(top):<8} 확신도 {confidence:.3f}")
 
-        for mode, chooser in DROP_MODES.items():
-            kept = chooser(len(full), args.every, rng)
-            if len(kept) < 8:
-                continue
-            raw = full[kept]
-            times = [i * 1000.0 / SOURCE_FPS for i in kept]
-            gaps = np.diff(times)
-            print(f"\n  [{mode}] {len(kept)}프레임  "
-                  f"간격 평균 {gaps.mean():.1f}ms "
-                  f"최소 {gaps.min():.1f} 최대 {gaps.max():.1f}ms")
+        for every in args.every:
+            for mode, chooser in DROP_MODES.items():
+                kept = chooser(len(full), every, rng)
+                if len(kept) < 3:
+                    continue
+                raw = full[kept]
+                times = [i * 1000.0 / SOURCE_FPS for i in kept]
+                gaps = np.diff(times)
+                print(f"\n  [{mode}] every={every} -> {len(kept)}프레임  "
+                      f"간격 평균 {gaps.mean():.1f}ms "
+                      f"최소 {gaps.min():.1f} 최대 {gaps.max():.1f}ms")
 
-            for method, builder in BUILDERS.items():
-                probabilities = np.array(infer(builder(raw, times)[None]))[0]
-                top, confidence, margin = summarize(probabilities)
-                correct = None if answer is None else (top == answer)
-                rows.append({
-                    "mode": mode, "method": method,
-                    "confidence": confidence, "margin": margin,
-                    "correct": correct,
-                })
-                mark = "" if correct is None else (" 정답" if correct else " 오답")
-                print(f"    {method:<12} {word_for_index(top):<8} "
-                      f"확신도 {confidence:.3f}  격차 {margin:.3f}{mark}")
+                for method, builder in BUILDERS.items():
+                    probabilities = np.array(infer(builder(raw, times)[None]))[0]
+                    top, confidence, margin = summarize(probabilities)
+                    correct = None if answer is None else (top == answer)
+                    rows.append({
+                        "every": every, "frames": len(kept),
+                        "mode": mode, "method": method,
+                        "confidence": confidence, "margin": margin,
+                        "correct": correct,
+                    })
+                    mark = "" if correct is None else (" 정답" if correct else " 오답")
+                    print(f"    {method:<12} {word_for_index(top):<8} "
+                          f"확신도 {confidence:.3f}  격차 {margin:.3f}{mark}")
 
-    print("\n" + "=" * 66)
-    print(f"요약  (every={args.every}, 평균 {SOURCE_FPS / args.every:.1f}fps)")
-    print("=" * 66)
-    for mode in DROP_MODES:
-        print(f"\n  [{mode}]")
-        for method in METHODS:
-            picked = [r for r in rows if r["mode"] == mode and r["method"] == method]
-            if not picked:
-                continue
-            confidences = [r["confidence"] for r in picked]
-            correct = [r["correct"] for r in picked if r["correct"] is not None]
-            accuracy = f"{sum(correct)}/{len(correct)}" if correct else "-"
-            print(f"    {method:<12} 정답 {accuracy}  "
-                  f"확신도 평균 {np.mean(confidences):.3f} "
-                  f"최저 {min(confidences):.3f}")
+    print("\n" + "=" * 74)
+    print("요약 - 프레임이 몇 장까지 버티는가")
+    print("=" * 74)
+    for every in args.every:
+        frames = [r["frames"] for r in rows if r["every"] == every]
+        if not frames:
+            continue
+        print(f"\n  every={every}  ({SOURCE_FPS / every:.1f}fps, "
+              f"구간당 {min(frames)}~{max(frames)}프레임)")
+        for mode in DROP_MODES:
+            line = f"    [{mode}]".ljust(14)
+            for method in METHODS:
+                picked = [
+                    r for r in rows
+                    if r["every"] == every
+                    and r["mode"] == mode
+                    and r["method"] == method
+                ]
+                if not picked:
+                    continue
+                confidences = [r["confidence"] for r in picked]
+                correct = [r["correct"] for r in picked if r["correct"] is not None]
+                accuracy = f"{sum(correct)}/{len(correct)}" if correct else "-"
+                line += f"  {method} {accuracy} {np.mean(confidences):.3f}"
+            print(line)
 
-    print("\n  uniform 에서는 세 방법이 거의 같아야 한다(간격이 이미 균일하다).")
-    print("  random / stall 에서 갈리는지가 이 비교의 핵심이다.")
+    print("\n  임계값은 확신도 0.5 / 2위와의 격차 0.15 다.")
+    print("  정답이라도 확신도가 0.5 아래면 서버는 인식 실패로 처리한다.")
+    print("  WORD_MIN_FRAMES 를 얼마로 둘지가 여기서 나온다.")
 
 
 if __name__ == "__main__":

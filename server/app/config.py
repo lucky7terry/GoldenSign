@@ -70,28 +70,17 @@ FRAME_QUEUE_MAX_SIZE = _env_int("FRAME_QUEUE_MAX_SIZE", 30)
 WORD_MAX_SECONDS = _env_float("WORD_MAX_SECONDS", 8.0)
 WORD_MIN_FRAMES = _env_int("WORD_MIN_FRAMES", 8)
 WORD_TARGET_FRAMES = _env_int("WORD_TARGET_FRAMES", 60)
-# WORD_SOURCE_FPS: 단어 구간을 되돌릴 프레임레이트.
-#   비워두면(기본) 그 구간이 실제로 도착한 평균 간격을 쓴다. 이러면 간격이
-#   이미 균일한 구간에서는 아무것도 하지 않고(항등), 불규칙한 구간에서만
-#   균일 격자로 편다.
+# WORD_SOURCE_FPS: 단어 구간을 되돌릴 격자의 프레임레이트. 원본 영상과
+#   같은 30 이 기본이다.
 #
-#   값을 주면 그 프레임레이트로 되돌린다. 30 을 주면 속도 특징이 학습과
-#   같은 "1/30초당 변위"가 되지만, 도착하지 않은 프레임을 지어내게 된다.
-#   영상 5개 실측에서 관측 간격 쪽이 평균 확신도가 더 높았다
-#   (random 0.782 대 0.776, stall 0.778 대 0.759, uniform 0.714 대 0.708).
-_WORD_SOURCE_FPS_RAW = os.getenv("WORD_SOURCE_FPS")
-WORD_SOURCE_FPS: float | None = (
-    None
-    if _WORD_SOURCE_FPS_RAW is None or _WORD_SOURCE_FPS_RAW.strip() == ""
-    else _env_float("WORD_SOURCE_FPS", 30.0)
-)
-PUBLIC_WS_BASE_URL = os.getenv("PUBLIC_WS_BASE_URL")
-WS_IDLE_TIMEOUT_SECONDS = _env_float("WS_IDLE_TIMEOUT_SECONDS", 60.0)
+#   이 격자가 촘촘해야 도착한 프레임이 제 시각 근처에 떨어진다. "구간이
+#   실제로 도착한 평균 간격"을 쓰면 프레임 수는 보존되지만, 간격이
+#   들쭉날쭉할 때 각 프레임이 원래 시각에서 크게 밀려난다. 실측에서
+#   8프레임 구간(간격 100~1567ms)의 확신도가 0.479 로 무너졌다 -
+#   임계값 0.5 아래다. 30 고정은 12가지 조건 전부에서 0.689~0.809 였다.
+WORD_SOURCE_FPS = _env_float("WORD_SOURCE_FPS", 30.0)
 
-# result 메시지에 좌표를 실을지. 좌표는 실수 959개로 메시지의 94% 를 차지하는데
-# (8,338 -> 479 바이트) 미니앱은 읽지 않는다. 기본은 빼고, 서버 좌표를 눈으로
-# 확인해야 할 때만 켠다. 켜면 초당 13개 결과 기준 110KB/s 가 나간다.
-INCLUDE_KEYPOINTS_IN_RESULT = _env_bool("INCLUDE_KEYPOINTS_IN_RESULT", False)
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 WHEP_MAX_RETRIES = _env_int("WHEP_MAX_RETRIES", 5)
 WHEP_RETRY_DELAY_SECONDS = _env_float("WHEP_RETRY_DELAY_SECONDS", 1.0)
