@@ -57,8 +57,23 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SESSION_TTL_SECONDS = _env_int("SESSION_TTL_SECONDS", 3600)
 MAX_CONCURRENT_RECOGNITIONS = _env_int("MAX_CONCURRENT_RECOGNITIONS", 2)
 FRAME_QUEUE_MAX_SIZE = _env_int("FRAME_QUEUE_MAX_SIZE", 30)
-SEQUENCE_WINDOW_SIZE = _env_int("SEQUENCE_WINDOW_SIZE", 60)
-SEQUENCE_STRIDE = _env_int("SEQUENCE_STRIDE", 1)
+
+# 단어 구간 모드. 사용자가 word_start / word_end 로 한 단어의 시작과 끝을
+# 표시하면 그 구간만 모아 한 번 추론한다.
+#
+# WORD_MAX_SECONDS: 이 시간이 지나면 서버가 알아서 구간을 닫고 결과를 낸다.
+#   사용자가 끝 표시를 잊어도 결과는 나온다.
+# WORD_MIN_FRAMES: 이보다 적으면 거절한다. 3장을 60장으로 늘려봐야
+#   같은 자세가 20번 반복될 뿐이다. MediaPipe 가 최악 5fps 이므로
+#   8장이면 대략 1.6초 - 가장 짧은 단어도 이보다는 길다.
+# WORD_TARGET_FRAMES: 모델 입력 길이. 학습이 60이다.
+WORD_MAX_SECONDS = _env_float("WORD_MAX_SECONDS", 8.0)
+WORD_MIN_FRAMES = _env_int("WORD_MIN_FRAMES", 8)
+WORD_TARGET_FRAMES = _env_int("WORD_TARGET_FRAMES", 60)
+# WORD_SOURCE_FPS: 학습 영상의 프레임레이트. 도착한 프레임을 이 간격으로
+#   되돌린 뒤 build_features 를 돌려야 속도 특징이 학습과 같은 "1/30초당
+#   변위"가 된다. 12.7fps 프레임을 그대로 넣으면 속도가 2.4배로 잡힌다.
+WORD_SOURCE_FPS = _env_float("WORD_SOURCE_FPS", 30.0)
 PUBLIC_WS_BASE_URL = os.getenv("PUBLIC_WS_BASE_URL")
 WS_IDLE_TIMEOUT_SECONDS = _env_float("WS_IDLE_TIMEOUT_SECONDS", 60.0)
 
