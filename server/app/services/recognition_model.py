@@ -204,8 +204,12 @@ def get_recognition_model():
 def preload_recognition_model() -> bool:
     """기동 시 모델을 미리 올린다. 실패해도 예외를 밖으로 내지 않는다.
 
-    아직 lifespan 에 연결하지 않았다. 추론을 실제로 돌리는 단계에서 붙인다 —
-    지금 붙이면 쓰지도 않는 모델 때문에 기동이 수 초 느려진다.
+    main.py 의 lifespan 에서 부른다. 3~8초가 걸리므로 첫 단어에서 올리면
+    그 사용자만 그 시간을 통째로 기다린다.
+
+    실패해도 기동은 계속한다 - 좌표 추출은 그대로 되고, /health 의 loaded 가
+    false 로 나가 상태를 구분할 수 있다. 실패 사유는 여기 로그에만 남긴다.
+    서버 절대경로가 들어 있어서 /health 로 내보내지 않는다.
     """
     try:
         get_recognition_model()

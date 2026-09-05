@@ -50,8 +50,11 @@ class ModelStatusTest(unittest.TestCase):
 
         self.assertFalse(status["loaded"])
         self.assertEqual(status["mode"], "keypoints_only")
-        self.assertIn("model_fold0", status["version"])
         self.assertEqual(set(status), {"loaded", "mode", "version"})
+        # /health 는 인증이 없다. 실패 사유에 서버 절대경로가 들어가므로
+        # 그대로 내보내면 안 된다.
+        self.assertNotIn("model_fold0", status["version"])
+        self.assertNotIn("/", status["version"])
 
     def test_status_keeps_the_three_fields_the_client_types(self):
         # miniapp/src/shared/channels.ts 가 {loaded, mode, version} 로 타입을 잡는다.

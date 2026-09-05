@@ -55,10 +55,12 @@ def get_model_health_status():
         }
 
     if not recognition_model_available():
+        # 실패 사유를 그대로 실으면 서버 절대경로가 /health 로 나간다.
+        # /health 는 인증이 없다. 사유는 기동 시점 로그에 이미 남는다.
         return {
             "loaded": False,
             "mode": "keypoints_only",
-            "version": recognition_model_error() or "recognition model not loaded",
+            "version": "recognition model not loaded",
         }
 
     return {
