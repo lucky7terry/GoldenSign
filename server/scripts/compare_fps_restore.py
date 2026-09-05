@@ -69,6 +69,17 @@ def extract_openpose_sequence(path: Path) -> np.ndarray:
     if not capture.isOpened():
         raise SystemExit(f"영상을 열 수 없다: {path}")
 
+    # 이 스크립트는 타임스탬프를 프레임 번호 / SOURCE_FPS 로 만든다.
+    # 원본이 30fps 가 아니면 그 시각이 전부 틀어져서, 비교 결과가
+    # 조용히 의미를 잃는다.
+    declared_fps = capture.get(cv2.CAP_PROP_FPS)
+    if not (SOURCE_FPS * 0.95 <= declared_fps <= SOURCE_FPS * 1.05):
+        capture.release()
+        raise SystemExit(
+            f"{path.name}: 원본이 {declared_fps:.2f}fps 다. 이 스크립트는 "
+            f"{SOURCE_FPS:.0f}fps 를 전제로 타임스탬프를 만든다."
+        )
+
     rows = []
     started = time.time()
     try:
@@ -194,6 +205,10 @@ def main() -> None:
                              "차례로 돈다 (기본 3 = 10fps)")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+
+    for every in args.every:
+        if every < 1:
+            parser.error(f"--every 는 1 이상이어야 한다: {every}")
 
     print("모델 읽는 중...")
     infer = make_predictor(load_recognition_model())

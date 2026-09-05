@@ -309,13 +309,22 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
     # 열린 단어 구간을 WORD_MAX_SECONDS 뒤에 서버가 알아서 닫는 타이머.
     # 사용자가 끝 표시를 잊어도 결과는 나온다.
     word_timer: asyncio.Task | None = None
+    # 자동 종료 타이머가 이미 결과를 만들어 보내는 중인지. 이 상태에서
+    # 취소하면 결과가 중간에 잘려서 사용자는 아무것도 못 받는다.
+    word_timer_finalizing = False
     # 자동 종료로 이미 닫힌 뒤에 word_end 가 도착했는지. 사용자는 잘못한
     # 것이 없으므로 오류가 아니라 ack 로 답한다.
     auto_closed_pending = False
 
     def cancel_word_timer():
+        """아직 대기 중인 자동 종료 타이머만 취소한다.
+
+        이미 결과를 만들어 보내는 중이면 건드리지 않는다. 그 시점의 취소는
+        구간을 닫아놓고 결과는 안 보낸 상태로 끝나서, 사용자가 단어를
+        통째로 잃는다. 끝난 뒤 정리는 바깥 finally 가 한다.
+        """
         nonlocal word_timer
-        if word_timer is not None:
+        if word_timer is not None and not word_timer_finalizing:
             word_timer.cancel()
             word_timer = None
 
@@ -371,7 +380,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         return "closed"
 
     async def auto_close_word(timer_client_message_id: str | None):
-        nonlocal auto_closed_pending, word_timer
+        nonlocal auto_closed_pending, word_timer, word_timer_finalizing
         try:
             await asyncio.sleep(WORD_MAX_SECONDS)
         except asyncio.CancelledError:
@@ -386,6 +395,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         # 있다. 그때 이 값이 아직 False 면 사용자는 잘못한 게 없는데
         # word_not_started 오류를 받는다.
         auto_closed_pending = True
+        word_timer_finalizing = True
         logger.info(
             "Word segment auto-closed",
             extra={

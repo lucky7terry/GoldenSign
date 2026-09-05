@@ -57,6 +57,8 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SESSION_TTL_SECONDS = _env_int("SESSION_TTL_SECONDS", 3600)
 MAX_CONCURRENT_RECOGNITIONS = _env_int("MAX_CONCURRENT_RECOGNITIONS", 2)
 FRAME_QUEUE_MAX_SIZE = _env_int("FRAME_QUEUE_MAX_SIZE", 30)
+PUBLIC_WS_BASE_URL = os.getenv("PUBLIC_WS_BASE_URL")
+WS_IDLE_TIMEOUT_SECONDS = _env_float("WS_IDLE_TIMEOUT_SECONDS", 60.0)
 
 # 단어 구간 모드. 사용자가 word_start / word_end 로 한 단어의 시작과 끝을
 # 표시하면 그 구간만 모아 한 번 추론한다.
@@ -80,7 +82,10 @@ WORD_TARGET_FRAMES = _env_int("WORD_TARGET_FRAMES", 60)
 #   임계값 0.5 아래다. 30 고정은 12가지 조건 전부에서 0.689~0.809 였다.
 WORD_SOURCE_FPS = _env_float("WORD_SOURCE_FPS", 30.0)
 
-
+# result 메시지에 좌표를 실을지. 좌표는 실수 959개로 메시지의 94% 를 차지하는데
+# (8,338 -> 479 바이트) 미니앱은 읽지 않는다. 기본은 빼고, 서버 좌표를 눈으로
+# 확인해야 할 때만 켠다.
+INCLUDE_KEYPOINTS_IN_RESULT = _env_bool("INCLUDE_KEYPOINTS_IN_RESULT", False)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 WHEP_MAX_RETRIES = _env_int("WHEP_MAX_RETRIES", 5)
 WHEP_RETRY_DELAY_SECONDS = _env_float("WHEP_RETRY_DELAY_SECONDS", 1.0)

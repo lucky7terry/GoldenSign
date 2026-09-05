@@ -325,6 +325,11 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 
 ### 8초 자동 종료와 word_end 가 겹칠 때
 
+자동 종료로 나가는 `result` 의 `client_message_id` 는 그 구간을 연
+**`word_start` 의 것**이다. 그 시점에는 `word_end` 요청이 없으므로
+`word-end-001` 같은 값이 올 수 없다. `word_start` 에 `client_message_id` 를
+안 보냈다면 `null` 이다.
+
 서버가 먼저 닫은 뒤에 `word_end` 가 도착하면, 사용자는 잘못한 것이 없으므로
 오류가 아니라 ack 로 답한다. 결과는 이미 나간 뒤다.
 
