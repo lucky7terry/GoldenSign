@@ -213,13 +213,70 @@ def preload_recognition_model() -> bool:
     """
     try:
         get_recognition_model()
+        _warm_up()
     except RecognitionModelUnavailableError as exc:
         logger.error(
             "Recognition model unavailable; word recognition is disabled",
             extra={"error": str(exc)},
         )
         return False
+    except Exception as exc:
+        # 라벨 파일 없음, 그래프 실행 실패, 설정 불일치. 여기서 못 잡으면
+        # 첫 word_end 에서 터지고 그 연결이 끊긴다.
+        logger.error(
+            "Recognition pipeline is not usable; word recognition is disabled",
+            extra={"error": str(exc)},
+            exc_info=True,
+        )
+        _remember_failure(exc)
+        return False
     return True
+
+
+def _warm_up() -> None:
+    """모델을 올린 뒤 실제로 한 번 돌려본다.
+
+    make_predictor 는 tf.function 객체만 만든다. 그래프 트레이싱은 첫 호출
+    때 일어나고 전이(transformer)라 0.5~3초가 걸린다. 여기서 하지 않으면
+    재시작 후 첫 단어를 말한 사용자가 그 시간을 통째로 기다린다.
+
+    라벨 파일도 같이 확인한다. 모델은 있는데 word_labels.json 이 없으면
+    /health 는 loaded: true 를 보고하고, 첫 word_end 에서 LabelError 가
+    나서 연결이 끊긴다. 기동 로그로 드러나는 편이 낫다.
+    """
+    import numpy as np
+
+    from app.config import WORD_TARGET_FRAMES
+    from app.services.label_service import all_words
+
+    if WORD_TARGET_FRAMES != SEQUENCE_LENGTH:
+        # 환경변수로 바꿀 수 있는 값이라 오타가 그대로 통과한다. 그러면
+        # 서버는 멀쩡히 뜨고 /health 도 loaded: true 인데, 모든 word_end 가
+        # shape 불일치로 실패한다.
+        raise RuntimeError(
+            f"WORD_TARGET_FRAMES={WORD_TARGET_FRAMES} but the model expects "
+            f"{SEQUENCE_LENGTH}."
+        )
+
+    words = all_words()
+    if len(words) != NUM_CLASSES:
+        raise RuntimeError(
+            f"Label file has {len(words)} words but the model has "
+            f"{NUM_CLASSES} classes."
+        )
+
+    predictor = get_recognition_predictor()
+    predictor(np.zeros((1, SEQUENCE_LENGTH, FEATURE_DIM), dtype=np.float32))
+    logger.info(
+        "Recognition model ready",
+        extra={"classes": NUM_CLASSES, "sequence_length": SEQUENCE_LENGTH},
+    )
+
+
+def _remember_failure(exc: Exception) -> None:
+    """이후 호출도 같은 이유로 실패하게 만든다. 매번 재시도하지 않는다."""
+    global _initialization_error
+    _initialization_error = RecognitionModelUnavailableError(str(exc))
 
 
 def get_recognition_predictor():

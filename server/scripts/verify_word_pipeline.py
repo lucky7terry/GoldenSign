@@ -54,14 +54,14 @@ SOURCE_FPS = 30.0
 
 
 def expected_word(path: Path) -> str | None:
-    from app.services.label_service import word_for_index
+    from app.services.label_service import LabelError, word_for_index
 
     name = path.stem
     if not name.startswith("WORD"):
         return None
     try:
         return word_for_index(int(name[4:8]) - 1)
-    except (ValueError, Exception):
+    except (ValueError, LabelError):
         return None
 
 

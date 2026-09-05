@@ -369,12 +369,16 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         """구간을 닫고 결과를 보낸다. "closed" | "too_short" | "not_open"."""
         loop = asyncio.get_running_loop()
         try:
-            segment, recognition = await loop.run_in_executor(
-                None,
-                _close_word_and_recognize,
-                session_id,
-                word_generation,
-            )
+            # 프레임 경로와 같은 한도를 쓴다. 구간 마감은 특징 변환과 추론이
+            # 붙어 있어 프레임 한 장보다 무겁고, 기본 executor 를 MediaPipe 와
+            # 나눠 쓴다. 여기만 무제한이면 그 한도가 의미를 잃는다.
+            async with _recognition_semaphore:
+                segment, recognition = await loop.run_in_executor(
+                    None,
+                    _close_word_and_recognize,
+                    session_id,
+                    word_generation,
+                )
         except (WordNotStarted, WordSessionClosed):
             return "not_open"
         except WordTooShort as exc:
@@ -392,9 +396,33 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                 activity,
             )
             return "too_short"
+        except Exception:
+            # 여기서 새면 예외가 수신 루프를 뚫고 나가 연결이 끊긴다.
+            # 클라이언트는 result 도 error 도 못 받고, 로그에는 session_id
+            # 없는 ASGI 트레이스백만 남는다. 라벨 파일 문제, 텐서플로 런타임
+            # 오류, 입력 shape 불일치가 전부 이 경로다.
+            logger.exception(
+                "Word finalization failed",
+                extra={"session_id": session_id},
+            )
+            await _send_json(
+                websocket,
+                send_lock,
+                error_message(
+                    WORD_SCHEMA_VERSION,
+                    session_id,
+                    "model_unavailable",
+                    "Word recognition failed.",
+                    finalize_client_message_id,
+                    retryable=True,
+                ),
+                activity,
+            )
+            return "closed"
 
         metadata = segment.metadata()
         metadata["close_reason"] = close_reason
+
 
         payload = {
             "type": "result",
