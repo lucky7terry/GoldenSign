@@ -38,6 +38,11 @@ from app.services.model_service import (
     public_result,
     recognize_frame_from_image_bytes,
 )
+from app.services.recognition_model import RecognitionModelUnavailableError
+from app.services.recognition_service import (
+    WordRecognition,
+    recognize_word_segment,
+)
 from app.services.word_segment_service import (
     WordAlreadyStarted,
     WordNotStarted,
@@ -88,6 +93,13 @@ class FrameRecognitionJob:
     message: FrameMessage
     image_bytes: bytes
     captured_at_ms: float | None
+
+
+def _word_result(recognition: WordRecognition | None) -> dict:
+    """클라이언트로 나갈 result. 모델이 없으면 단어를 주장하지 않는다."""
+    if recognition is None:
+        return {"text": None, "confidence": 0.0, "is_final": True}
+    return recognition.public()
 
 
 def _utc_now_iso():
@@ -248,6 +260,28 @@ async def _recognition_worker(
             frame_queue.task_done()
 
 
+def _close_word_and_recognize(session_id: str, word_generation: int):
+    """구간을 닫고 단어까지 판정한다. executor 에서 돈다.
+
+    end_word 안의 특징 변환(30fps 복원 -> build_features -> 60프레임)과
+    모델 추론을 합치면 단어당 20ms 쯤이다. 이벤트 루프에서 하면 그동안
+    다른 연결의 프레임 처리와 ping 응답이 전부 멈춘다.
+
+    인식 모델이 없으면 recognition 이 None 이다 - 구간은 정상적으로
+    닫히고 좌표 수집도 계속된다. 단어만 주장하지 않는다.
+    """
+    segment = word_store.end_word(session_id, word_generation)
+    try:
+        recognition = recognize_word_segment(segment.sequence)
+    except RecognitionModelUnavailableError as exc:
+        logger.warning(
+            "Recognition model unavailable; returning no word",
+            extra={"session_id": session_id, "error": str(exc)},
+        )
+        recognition = None
+    return segment, recognition
+
+
 def _decode_frame_image_data(image_data: str) -> bytes:
     return decode_base64_image_data(image_data)
 
@@ -333,8 +367,14 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         close_reason: str,
     ) -> str:
         """구간을 닫고 결과를 보낸다. "closed" | "too_short" | "not_open"."""
+        loop = asyncio.get_running_loop()
         try:
-            segment = word_store.end_word(session_id, word_generation)
+            segment, recognition = await loop.run_in_executor(
+                None,
+                _close_word_and_recognize,
+                session_id,
+                word_generation,
+            )
         except (WordNotStarted, WordSessionClosed):
             return "not_open"
         except WordTooShort as exc:
@@ -353,30 +393,34 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
             )
             return "too_short"
 
-        # segment.sequence 는 (WORD_TARGET_FRAMES, 411) 이다. 다음 PR 에서
-        # 이 배열이 build_features -> 모델 -> 단어로 이어진다. 지금은
-        # 구간을 올바르게 모으는 것까지가 범위라 text 는 null 로 둔다.
         metadata = segment.metadata()
         metadata["close_reason"] = close_reason
-        await _send_json(
-            websocket,
-            send_lock,
-            {
-                "type": "result",
-                "schema_version": WORD_SCHEMA_VERSION,
+
+        payload = {
+            "type": "result",
+            "schema_version": WORD_SCHEMA_VERSION,
+            "session_id": session_id,
+            "client_message_id": finalize_client_message_id,
+            "result": _word_result(recognition),
+            "word": metadata,
+            "model": get_model_health_status(),
+            "processed_at": _utc_now_iso(),
+        }
+        if recognition is not None:
+            # 거절당했을 때 무엇이 1위였는지 남긴다. 임계값을 조정할 때
+            # 이 값이 없으면 왜 안 나왔는지 알 수 없다.
+            payload["recognition"] = recognition.detail()
+
+        logger.info(
+            "Word recognized" if recognition is not None else "Word closed",
+            extra={
                 "session_id": session_id,
-                "client_message_id": finalize_client_message_id,
-                "result": {
-                    "text": None,
-                    "confidence": 0.0,
-                    "is_final": True,
-                },
-                "word": metadata,
-                "model": get_model_health_status(),
-                "processed_at": _utc_now_iso(),
+                "word_index": segment.word_index,
+                "close_reason": close_reason,
+                **(recognition.detail() if recognition is not None else {}),
             },
-            activity,
         )
+        await _send_json(websocket, send_lock, payload, activity)
         return "closed"
 
     async def auto_close_word(timer_client_message_id: str | None):

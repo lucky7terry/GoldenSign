@@ -168,6 +168,10 @@ _initialization_error: RecognitionModelUnavailableError | None = None
 _model_lock = threading.Lock()
 
 
+_predictor = None
+_predictor_lock = threading.Lock()
+
+
 def get_recognition_model():
     """모델을 한 번만 읽어 재사용한다. 실패했으면 같은 예외를 즉시 돌려준다.
 
@@ -212,6 +216,21 @@ def preload_recognition_model() -> bool:
         )
         return False
     return True
+
+
+def get_recognition_predictor():
+    """추론 함수. 모델과 마찬가지로 한 번만 만든다.
+
+    make_predictor 는 호출할 때마다 새 tf.function 과 그래프를 만든다.
+    단어마다 부르면 그래프가 쌓이고 첫 호출마다 트레이싱 비용을 다시 낸다.
+    """
+    global _predictor
+    if _predictor is not None:
+        return _predictor
+    with _predictor_lock:
+        if _predictor is None:
+            _predictor = make_predictor(get_recognition_model())
+    return _predictor
 
 
 def recognition_model_available() -> bool:

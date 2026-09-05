@@ -17,6 +17,9 @@ def _function(name, **injected):
     namespace = {
         "keypoint_extraction_available": lambda: True,
         "keypoint_extraction_error": lambda: None,
+        "recognition_model_available": lambda: True,
+        "recognition_model_error": lambda: None,
+        "model_path": lambda: Path("models/model_fold0.keras"),
     }
     namespace.update(injected)
     exec(compile(ast.Module([node], []), "<model_service>", "exec"), namespace)
@@ -24,14 +27,31 @@ def _function(name, **injected):
 
 
 class ModelStatusTest(unittest.TestCase):
-    """인식 모델이 없는 동안 서버가 인식을 주장하지 않는지 고정한다."""
+    """loaded 는 "수어 단어를 인식할 수 있는가" 여야 한다.
 
-    def test_status_reports_recognition_model_as_not_loaded(self):
+    좌표만 뽑는 상태에서 True 를 반환하면 /health 가 정상을 보고하고
+    미니앱이 인식되는 것처럼 표시한다.
+    """
+
+    def test_status_is_loaded_only_when_the_recognition_model_is_up(self):
         status = _function("get_model_health_status")()
 
+        self.assertTrue(status["loaded"])
+        self.assertEqual(status["mode"], "recognition")
+        self.assertIn("model_fold0", status["version"])
+
+    def test_status_is_not_loaded_while_only_keypoints_work(self):
+        """MediaPipe 는 되는데 인식 모델만 없는 상태."""
+        status = _function(
+            "get_model_health_status",
+            recognition_model_available=lambda: False,
+            recognition_model_error=lambda: "Recognition model not found: models/model_fold0.keras",
+        )()
+
         self.assertFalse(status["loaded"])
-        self.assertIn("mode", status)
-        self.assertIn("version", status)
+        self.assertEqual(status["mode"], "keypoints_only")
+        self.assertIn("model_fold0", status["version"])
+        self.assertEqual(set(status), {"loaded", "mode", "version"})
 
     def test_status_keeps_the_three_fields_the_client_types(self):
         # miniapp/src/shared/channels.ts 가 {loaded, mode, version} 로 타입을 잡는다.
@@ -41,6 +61,7 @@ class ModelStatusTest(unittest.TestCase):
         )
 
     def test_status_says_unavailable_when_landmarkers_failed_to_load(self):
+        """좌표 추출이 죽으면 인식 모델이 올라와 있어도 unavailable 이다."""
         status = _function(
             "get_model_health_status",
             keypoint_extraction_available=lambda: False,

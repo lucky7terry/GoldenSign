@@ -8,6 +8,7 @@ from app.api.sessions import router as session_router
 from app.config import LOG_LEVEL
 from app.logging_config import configure_logging
 from app.services.mediapipe_service import preload_mediapipe_service
+from app.services.recognition_model import preload_recognition_model
 
 configure_logging(LOG_LEVEL)
 
@@ -18,6 +19,10 @@ async def lifespan(_: FastAPI):
     # 않으면, 모델 파일이 없을 때 프레임마다 로딩을 재시도하며 조용히
     # 아무것도 인식하지 못하는 상태가 된다.
     preload_mediapipe_service()
+    # 인식 모델은 3~8초가 걸린다. 첫 단어에서 올리면 그 사용자만 그 시간을
+    # 통째로 기다린다. 실패해도 기동은 계속한다 - 좌표 추출은 되고,
+    # /health 의 loaded 가 false 로 나가 상태를 구분할 수 있다.
+    preload_recognition_model()
     yield
 
 

@@ -87,3 +87,17 @@ http://127.0.0.1:8000/docs
 - `POST /v1/sessions`
 - `POST /v1/sessions/{session_id}/stop`
 - `WS /v1/sessions/{session_id}/ws`
+
+## 인식 모델
+
+`server/models/model_fold0.keras` 가 있어야 단어를 판정한다. 이 파일은
+저장소에 없다(`.gitignore`) — 모델팀에게 받아 그 경로에 두면 된다.
+파일명은 `RECOGNITION_MODEL_FILENAME` 로 바꿀 수 있다.
+
+없어도 서버는 뜬다. 좌표 추출은 그대로 동작하고, `/health` 의 `loaded` 가
+`false` · `mode` 가 `keypoints_only` 로 나가며 `word_end` 결과의 `text` 는
+항상 `null` 이다.
+
+    python scripts/verify_word_pipeline.py ../data/videos/WORD0001_REAL01_F.mp4
+
+서버가 쓰는 경로 그대로 영상 하나를 단어까지 돌려본다.

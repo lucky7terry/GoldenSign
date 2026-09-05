@@ -6,6 +6,11 @@ from app.services.mediapipe_service import (
     keypoint_extraction_error,
 )
 from app.services.openpose_converter import convert_to_openpose
+from app.services.recognition_model import (
+    model_path,
+    recognition_model_available,
+    recognition_model_error,
+)
 from app.services.word_segment_service import (
     build_openpose_feature_vector,
     word_store,
@@ -35,14 +40,12 @@ def _raise_frame_validation_error_if_client_error(
 def get_model_health_status():
     """모델 상태.
 
-    loaded 는 "수어 단어를 인식할 수 있는가"를 뜻한다. MediaPipe 좌표 추출은
-    동작하지만 단어를 판정하는 인식 모델은 아직 연결 전이므로 False 다.
+    loaded 는 "수어 단어를 인식할 수 있는가"를 뜻한다. 좌표만 뽑고 있는
+    상태에서 True 를 반환하면 /health 가 정상을 보고하고 미니앱이 인식이
+    되는 것처럼 표시하므로, 인식 모델이 실제로 올라왔을 때만 True 다.
 
-    여기서 True 를 반환하면 /health 가 항상 정상을 보고하고, 미니앱은
-    인식이 되는 것처럼 표시한다. 실제로는 좌표만 뽑고 있다.
-
-    인식 모델을 붙일 때 이 함수가 실제 로딩 상태를 읽도록 바꿔야 한다.
-    (단어 구간 파이프라인 다음 PR에서 한다.)
+    좌표 추출과 인식 모델은 따로 실패할 수 있다. MediaPipe 가 없으면
+    아무것도 못 하지만, 인식 모델만 없으면 좌표는 계속 뽑힌다.
     """
     if not keypoint_extraction_available():
         return {
@@ -51,10 +54,17 @@ def get_model_health_status():
             "version": keypoint_extraction_error() or "landmarkers not loaded",
         }
 
+    if not recognition_model_available():
+        return {
+            "loaded": False,
+            "mode": "keypoints_only",
+            "version": recognition_model_error() or "recognition model not loaded",
+        }
+
     return {
-        "loaded": False,
-        "mode": "keypoints_only",
-        "version": "mediapipe tasks-0.10.35",
+        "loaded": True,
+        "mode": "recognition",
+        "version": f"mediapipe tasks-0.10.35 + {model_path().name}",
     }
 
 

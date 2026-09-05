@@ -324,9 +324,18 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
   "session_id": "abc-123",
   "client_message_id": "word-end-001",
   "result": {
-    "text": null,
-    "confidence": 0.0,
+    "text": "배",
+    "confidence": 0.748,
     "is_final": true
+  },
+  "recognition": {
+    "candidate": "배",
+    "class_index": 0,
+    "confidence": 0.748,
+    "margin": 0.592,
+    "accepted": true,
+    "confidence_threshold": 0.5,
+    "margin_threshold": 0.15
   },
   "word": {
     "word_index": 1,
@@ -354,8 +363,33 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
   믿을 수 없어 도착 순서로 떨어졌으면 `false`. **`false` 가 계속 나오면
   입력 경로에 타임스탬프가 안 붙고 있다는 뜻이니 알려달라.**
 - `close_reason`: `"client"`(word_end) 또는 `"timeout"`(8초 자동 종료).
-- `text: null`: **인식 모델 연결 전까지 서버는 항상 `null` 을 보낸다.**
-  다음 PR 에서 실제 단어가 들어온다. `model.loaded` 로 구분할 수 있다.
+- `text`: 임계값을 넘었을 때만 채운다. 못 넘으면 `null` 이다 — 서버가 확신하지
+  못한 것이므로 앱은 아무것도 표시하지 않아야 한다. 인식 모델이 아직 안 올라온
+  서버도 `null` 을 보내며, 그 경우는 `model.loaded` 가 `false` 다.
+- `recognition`: 판정 근거. **거절당했을 때도 무엇이 1위였는지 남는다.**
+  임계값을 조정하거나 왜 안 나왔는지 볼 때 쓴다. 모델이 없으면 이 블록이
+  통째로 빠진다.
+
+### 임계값
+
+확신도만 보면 안 된다. softmax 는 합이 1 이라 모르는 동작을 넣어도 어딘가에
+확률이 몰린다. 실제로 전부 0 인 입력을 넣으면 `"허리" 0.323` 이 나온다.
+그래서 **2위와의 격차**를 같이 본다 — 그 경우 격차가 0.081 이라 거절된다.
+
+    확신도 >= 0.5  그리고  2위와의 격차 >= 0.15
+
+근거는 영상 5개(WORD0001, 5시점)를 서버 코드 그대로 통과시킨 결과다.
+
+| 시점 | 확신도 | 격차 | 결과 |
+|---|---|---|---|
+| R | 0.842 | 0.792 | 말함 |
+| F | 0.748 | 0.592 | 말함 |
+| D | 0.713 | 0.544 | 말함 |
+| U | 0.627 | 0.352 | 말함 |
+| L | 0.610 | 0.378 | 말함 |
+
+5시점 전부 1위가 정답이었고 전부 임계값을 통과했다. 반대로 슬라이딩 윈도우
+방식의 애매한 판정(확신도 0.366, 격차 0.083)은 걸러진다.
 
 ### Server -> Client: 오류
 
@@ -402,6 +436,9 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 | `WORD_MIN_FRAMES` | `8` | 이보다 적으면 `word_too_short` |
 | `WORD_TARGET_FRAMES` | `60` | 모델 입력 길이. 학습이 60이다 |
 | `WORD_SOURCE_FPS` | `30.0` | 되돌릴 격자의 프레임레이트. 원본 영상과 같게 둔다 |
+| `RECOGNITION_CONFIDENCE_THRESHOLD` | `0.5` | 이 아래면 단어를 주장하지 않는다 |
+| `RECOGNITION_MARGIN_THRESHOLD` | `0.15` | 2위와의 격차가 이 아래면 주장하지 않는다 |
+| `RECOGNITION_MODEL_FILENAME` | `model_fold0.keras` | `server/models/` 안의 파일명 |
 
 ---
 
