@@ -70,10 +70,21 @@ FRAME_QUEUE_MAX_SIZE = _env_int("FRAME_QUEUE_MAX_SIZE", 30)
 WORD_MAX_SECONDS = _env_float("WORD_MAX_SECONDS", 8.0)
 WORD_MIN_FRAMES = _env_int("WORD_MIN_FRAMES", 8)
 WORD_TARGET_FRAMES = _env_int("WORD_TARGET_FRAMES", 60)
-# WORD_SOURCE_FPS: 학습 영상의 프레임레이트. 도착한 프레임을 이 간격으로
-#   되돌린 뒤 build_features 를 돌려야 속도 특징이 학습과 같은 "1/30초당
-#   변위"가 된다. 12.7fps 프레임을 그대로 넣으면 속도가 2.4배로 잡힌다.
-WORD_SOURCE_FPS = _env_float("WORD_SOURCE_FPS", 30.0)
+# WORD_SOURCE_FPS: 단어 구간을 되돌릴 프레임레이트.
+#   비워두면(기본) 그 구간이 실제로 도착한 평균 간격을 쓴다. 이러면 간격이
+#   이미 균일한 구간에서는 아무것도 하지 않고(항등), 불규칙한 구간에서만
+#   균일 격자로 편다.
+#
+#   값을 주면 그 프레임레이트로 되돌린다. 30 을 주면 속도 특징이 학습과
+#   같은 "1/30초당 변위"가 되지만, 도착하지 않은 프레임을 지어내게 된다.
+#   영상 5개 실측에서 관측 간격 쪽이 평균 확신도가 더 높았다
+#   (random 0.782 대 0.776, stall 0.778 대 0.759, uniform 0.714 대 0.708).
+_WORD_SOURCE_FPS_RAW = os.getenv("WORD_SOURCE_FPS")
+WORD_SOURCE_FPS: float | None = (
+    None
+    if _WORD_SOURCE_FPS_RAW is None or _WORD_SOURCE_FPS_RAW.strip() == ""
+    else _env_float("WORD_SOURCE_FPS", 30.0)
+)
 PUBLIC_WS_BASE_URL = os.getenv("PUBLIC_WS_BASE_URL")
 WS_IDLE_TIMEOUT_SECONDS = _env_float("WS_IDLE_TIMEOUT_SECONDS", 60.0)
 

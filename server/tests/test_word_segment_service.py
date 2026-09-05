@@ -152,27 +152,72 @@ class PipelineOrderTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(out)))
 
 
-class VelocityScaleTest(unittest.TestCase):
-    """속도 208개가 학습과 같은 "1/30초당 변위" 여야 한다."""
+class IrregularSpacingTest(unittest.TestCase):
+    """[1] 단계가 실제로 하는 일 - 불규칙한 간격을 펴는 것.
 
-    def test_low_fps_capture_recovers_the_training_velocity_scale(self):
-        duration = 2.0
-        dense = [_motion_frame(t) for t in np.arange(0.0, duration, 1 / 30)]
-        sparse_times = np.arange(0.0, duration, 1 / 12.7)
-        sparse = [_motion_frame(t) for t in sparse_times]
+    프레임이 불규칙하게 버려지면 궤적이 시간축으로 일그러진다. 촘촘하게
+    살아남은 구간은 느리게, 성기게 살아남은 구간은 빠르게 움직인 것처럼
+    보인다. 영상 5개 실측에서 이것이 확신도를 0.782 -> 0.637 로 떨어뜨렸고
+    한 번은 오답을 냈다.
+    """
 
-        reference = resample_index_half_pixel(
-            build_features(np.asarray(dense, dtype=np.float64)), 60
+    @staticmethod
+    def _reference(times: list[float]) -> np.ndarray:
+        frames = np.asarray(
+            [_motion_frame(t / 1000.0) for t in times], dtype=np.float64
         )
-        actual, _, _ = build_model_input(
-            sparse, [t * 1000.0 for t in sparse_times]
+        return resample_index_half_pixel(build_features(frames), 60)
+
+    def test_restoring_the_grid_recovers_the_uniform_trajectory(self):
+        duration_ms = 2000.0
+        uniform_times = [i * 1000.0 / 30.0 for i in range(60)]
+
+        # 불규칙하게 살아남은 프레임: 앞은 촘촘, 뒤는 성기게.
+        kept = [i * 1000.0 / 30.0 for i in range(0, 24, 1)]
+        kept += [800.0 + i * 200.0 for i in range(7)]
+        kept = [t for t in kept if t <= duration_ms]
+        frames = [_motion_frame(t / 1000.0) for t in kept]
+
+        truth = self._reference(uniform_times)
+        restored, on_time, _ = build_model_input(frames, kept)
+        raw_only = resample_index_half_pixel(
+            build_features(np.asarray(frames, dtype=np.float64)), 60
         )
 
-        reference_rms = float(np.sqrt((reference[:, 208:416] ** 2).mean()))
-        actual_rms = float(np.sqrt((actual[:, 208:416] ** 2).mean()))
+        self.assertTrue(on_time)
+        restored_error = float(np.abs(restored - truth).mean())
+        raw_error = float(np.abs(raw_only - truth).mean())
+        self.assertLess(restored_error, raw_error)
 
-        # 30fps 복원을 빼먹으면 여기가 약 2.4배로 벌어진다.
-        self.assertAlmostEqual(actual_rms / reference_rms, 1.0, delta=0.05)
+    def test_observed_rate_is_identity_on_uniform_input(self):
+        """간격이 이미 균일하면 [1] 은 아무것도 하지 않아야 한다.
+
+        도착하지 않은 프레임을 지어내면 실측에서 오히려 손해였다
+        (uniform 확신도 0.708 대 0.714).
+        """
+        count = 40
+        frames = [_motion_frame(i / 12.7) for i in range(count)]
+        times = [i * 1000.0 / 12.7 for i in range(count)]
+
+        out, on_time = resample_to_uniform_fps(frames, times, fps=None)
+
+        self.assertTrue(on_time)
+        self.assertEqual(out.shape[0], count)
+        np.testing.assert_allclose(
+            out, np.asarray(frames, dtype=np.float64), atol=1e-9
+        )
+
+    def test_explicit_fps_still_rescales(self):
+        """WORD_SOURCE_FPS 를 주면 그 간격으로 되돌린다(선택 기능)."""
+        count = 26
+        frames = [_motion_frame(i / 12.7) for i in range(count)]
+        times = [i * 1000.0 / 12.7 for i in range(count)]
+
+        out, on_time = resample_to_uniform_fps(frames, times, fps=30.0)
+
+        self.assertTrue(on_time)
+        # 2초 구간을 30fps 로 채우면 60프레임 근처가 된다.
+        self.assertGreater(out.shape[0], count)
 
 
 class ConfidenceResampleTest(unittest.TestCase):
@@ -312,8 +357,8 @@ class WordSegmentStoreTest(unittest.TestCase):
         self.assertEqual(segment.word_index, 1)
         self.assertTrue(segment.resampled_on_time)
         self.assertTrue(np.all(np.isfinite(segment.sequence)))
-        # 12.7fps 로 받은 25프레임은 30fps 로 되돌리면 늘어난다.
-        self.assertGreater(segment.uniform_frame_count, 25)
+        # 일정한 간격으로 도착했으므로 [1] 은 항등 - 프레임 수가 그대로다.
+        self.assertEqual(segment.uniform_frame_count, 25)
 
     def test_metadata_reports_the_model_input_shape(self):
         self.store.start_word("s1", self.generation)

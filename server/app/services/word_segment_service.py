@@ -15,26 +15,37 @@
 `robust_scale` 이 영상 전체 중앙값을 쓰고 `interp_missing` 도 시간축 전체를
 보간하므로, build_features 가 먼저 전체 길이에 도는 것이 확정이다.
 
-서버는 두 가지가 학습과 다르다.
+서버가 다른 점은 하나다. **프레임이 불규칙한 간격으로 도착한다.** MediaPipe 가
+12.7fps 로 도는데 스트림은 30fps 라 처리하지 못한 프레임은 버려지고, 얼마나
+버려지는지가 순간마다 다르다. 그대로 build_features 에 넣으면 궤적이 시간축으로
+일그러진다 - 촘촘하게 살아남은 구간은 느리게, 성기게 살아남은 구간은 빠르게
+움직인 것처럼 보인다.
 
-1. 프레임 간격이 불규칙하다. MediaPipe 가 12.7fps 로 도는데 스트림은
-   30fps 라 처리하지 못한 프레임은 버려지고, 그 비율이 부하에 따라 변한다.
-2. 그래서 실효 프레임레이트가 30 이 아니다.
-
-2번이 특히 조용히 아프다. 속도 특징 208개는 `np.diff(pos)` 로 만드는데
-이것은 **한 프레임 간격당 변위**다. 학습은 그 간격이 1/30초였다. 서버가
-12.7fps 프레임을 그대로 build_features 에 넣으면 간격이 1/12.7초라
-같은 동작인데도 속도가 2.4배로 잡힌다.
-
-그래서 이 모듈은 세 단계로 학습 조건을 복원한다.
+그래서 앞에 한 단계를 둔다.
 
     도착한 프레임 (T, 411) + 촬영 시각
-      -> [1] 시간축 30fps 등간격 리샘플     (T30, 411)
-      -> [2] build_features                (T30, 420)
-      -> [3] 인덱스 half-pixel 리샘플 -> 60 (60, 420)
+      -> [1] 시간축 등간격 리샘플            (T', 411)
+      -> [2] build_features                  (T', 420)
+      -> [3] 인덱스 half-pixel 리샘플 -> 60  (60, 420)
 
-[1] 이 간격을 학습과 같은 1/30초로 만들고, [3] 이 학습의 crop_resample 과
-같은 좌표 규칙을 쓴다. [2] 는 그 사이에서 학습과 똑같이 전체 길이에 돈다.
+[1] 의 목표 간격은 기본적으로 **그 구간이 실제로 도착한 평균 간격**이다
+(WORD_SOURCE_FPS 를 비워둔 경우). 그래서 간격이 이미 균일한 구간에서는
+항등이 되고, 불규칙한 구간에서만 편다. 도착하지 않은 프레임을 지어내지
+않는다.
+
+영상 5개(WORD0001, 5시점)를 10fps 로 떨어뜨려 실측한 결과다.
+
+    드롭 방식        옛 방식(=[1] 없음)   [1] 관측 간격   [1] 30fps 고정
+    uniform          5/5  0.714           5/5  0.714      5/5  0.708
+    random           4/5  0.637           5/5  0.782      5/5  0.776
+    stall            5/5  0.752           5/5  0.778       5/5  0.759
+
+불규칙하게 버려질 때 [1] 이 없으면 확신도가 무너지고 한 번은 틀렸다
+(R 시점, "허리" 0.298, 2위와의 격차 0.019). 균일할 때는 세 방법이 같다.
+
+30fps 로 고정하면 속도 특징이 학습과 같은 "1/30초당 변위"가 되는데,
+실측에서는 그것이 이득이 아니었다. 10fps 로 받은 프레임을 30fps 로 늘리면
+없던 프레임을 보간으로 지어내는 대가가 더 컸다.
 
 ## [1] 에서 신뢰도를 선형 보간하면 안 된다
 
@@ -210,11 +221,13 @@ def _interpolate(
 def resample_to_uniform_fps(
     frames: list[list[float]],
     timestamps_ms: list[float | None],
-    fps: float = WORD_SOURCE_FPS,
+    fps: float | None = WORD_SOURCE_FPS,
 ) -> tuple[np.ndarray, bool]:
-    """[1단계] 불규칙하게 도착한 411 프레임을 fps 등간격으로 되돌린다.
+    """[1단계] 불규칙하게 도착한 411 프레임을 등간격으로 되돌린다.
 
-    학습이 30fps 였으므로 build_features 의 속도가 1/30초당 변위가 된다.
+    fps 가 None 이면 이 구간이 실제로 도착한 평균 간격을 목표로 삼는다.
+    그러면 간격이 이미 균일한 구간에서는 항등이 되고, 프레임 수도 그대로다.
+
     시각을 못 믿으면 원본을 그대로 돌려주고 False 를 반환한다.
     """
     if not frames:
@@ -255,7 +268,10 @@ def resample_to_uniform_fps(
         )
         return np.asarray(frames, dtype=np.float64), False
 
-    target_count = max(2, int(round(span_seconds * fps)) + 1)
+    # fps 를 안 주면 관측 간격을 그대로 목표로 삼는다. 이 경우 프레임 수가
+    # 유지되므로, 간격이 균일했다면 결과가 입력과 같아진다.
+    target_fps = implied_fps if fps is None else fps
+    target_count = max(2, int(round(span_seconds * target_fps)) + 1)
     target_times = np.linspace(times[0], times[-1], target_count)
     return _interpolate(times, values, target_times), True
 
@@ -296,7 +312,7 @@ def build_model_input(
 ) -> tuple[np.ndarray, bool, int]:
     """도착한 411 프레임 -> 모델 입력 (60, 420).
 
-    돌려주는 값: (특징, 시간축을 실제로 썼는지, 30fps 로 복원한 프레임 수)
+    돌려주는 값: (특징, 시간축을 실제로 썼는지, 등간격으로 편 뒤의 프레임 수)
     """
     uniform, on_time = resample_to_uniform_fps(frames, timestamps_ms)
     features = build_features(uniform)
