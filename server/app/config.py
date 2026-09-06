@@ -66,8 +66,12 @@ WS_IDLE_TIMEOUT_SECONDS = _env_float("WS_IDLE_TIMEOUT_SECONDS", 60.0)
 # WORD_MAX_SECONDS: 이 시간이 지나면 서버가 알아서 구간을 닫고 결과를 낸다.
 #   사용자가 끝 표시를 잊어도 결과는 나온다.
 # WORD_MIN_FRAMES: 이보다 적으면 거절한다. 3장을 60장으로 늘려봐야
-#   같은 자세가 20번 반복될 뿐이다. MediaPipe 가 최악 5fps 이므로
-#   8장이면 대략 1.6초 - 가장 짧은 단어도 이보다는 길다.
+#   같은 자세가 20번 반복될 뿐이다.
+#
+#   이슈 #42 에는 10 으로 적었는데 실측 후 8 로 낮췄다. 영상 5개를
+#   8~12프레임까지 떨어뜨려도 5/5 정답이었고 확신도 0.765~0.809 였다.
+#   낮출수록 짧은 단어를 덜 거절하므로, 정확도가 버티는 선까지 내린다.
+#   MediaPipe 가 5.8fps 까지 떨어지는 것을 감안하면 8장은 약 1.4초다.
 # WORD_TARGET_FRAMES: 모델 입력 길이. 학습이 60이다.
 WORD_MAX_SECONDS = _env_float("WORD_MAX_SECONDS", 8.0)
 WORD_MIN_FRAMES = _env_int("WORD_MIN_FRAMES", 8)

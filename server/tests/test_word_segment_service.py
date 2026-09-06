@@ -220,6 +220,40 @@ class IrregularSpacingTest(unittest.TestCase):
                 fine[index, 0], row[0], atol=1.0
             )
 
+    def test_every_grid_interval_is_exactly_one_over_fps(self):
+        """격자 간격이 정확히 1/fps 여야 한다.
+
+        np.linspace 로 양 끝을 맞추면 span/(count-1) 이 되어 구간 길이에
+        따라 어긋난다 - 550ms 구간에서 34.4ms(29.1fps)로 3% 벗어났다.
+        속도 특징이 프레임 간격당 변위라 그 오차가 그대로 배율이 된다.
+        """
+        step_ms = 1000.0 / 30.0
+        for span_ms in (300.0, 550.0, 1000.0, 4600.0):
+            with self.subTest(span_ms=span_ms):
+                count = 20
+                times = [i * span_ms / (count - 1) for i in range(count)]
+                frames = [_motion_frame(t / 1000.0) for t in times]
+
+                out, on_time = resample_to_uniform_fps(frames, times, fps=30.0)
+
+                self.assertTrue(on_time)
+                # 출력 프레임 수로 간격을 역산한다. 구간 끝을 덮으려고
+                # 올림하므로 마지막 격자점은 구간 끝을 조금 넘을 수 있다.
+                intervals = out.shape[0] - 1
+                self.assertAlmostEqual(intervals * step_ms, span_ms, delta=step_ms)
+
+    def test_the_grid_covers_the_whole_span(self):
+        """내림하면 최대 한 프레임의 꼬리가 사라진다. 수어에서 구간 끝은
+        동작이 마무리되는 지점이라 잘라내면 안 된다."""
+        span_ms = 550.0
+        count = 20
+        times = [i * span_ms / (count - 1) for i in range(count)]
+        frames = [_motion_frame(t / 1000.0) for t in times]
+
+        out, _ = resample_to_uniform_fps(frames, times, fps=30.0)
+
+        self.assertGreaterEqual((out.shape[0] - 1) * (1000.0 / 30.0), span_ms)
+
     def test_uniform_low_fps_input_is_upsampled_to_the_grid(self):
         count = 26
         frames = [_motion_frame(i / 12.7) for i in range(count)]

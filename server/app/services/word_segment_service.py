@@ -275,8 +275,18 @@ def resample_to_uniform_fps(
         )
         return np.asarray(frames, dtype=np.float64), False
 
-    target_count = max(2, int(round(span_seconds * fps)) + 1)
-    target_times = np.linspace(times[0], times[-1], target_count)
+    # 격자 간격은 정확히 1/fps 여야 한다. np.linspace 로 양 끝을 맞추면
+    # span/(count-1) 이 되어 구간 길이에 따라 어긋난다 - 550ms 구간에서
+    # 34.4ms(29.1fps)로 3% 벗어난다. 속도 특징이 프레임 간격당 변위라
+    # 그 오차가 그대로 배율이 된다.
+    step_ms = 1000.0 / fps
+    span_ms = times[-1] - times[0]
+    # 구간 끝을 덮을 만큼 올림한다. 마지막 격자점이 구간 끝을 조금 넘을 수
+    # 있는데, np.interp 가 범위 밖을 마지막 표본으로 채우므로 끝 자세가
+    # 잠깐 유지될 뿐 잘리지 않는다. 내림하면 최대 한 프레임의 꼬리가
+    # 사라지는데, 수어에서 구간 끝은 동작이 마무리되는 지점이다.
+    target_count = max(2, math.ceil(span_ms / step_ms) + 1)
+    target_times = times[0] + np.arange(target_count) * step_ms
     return _interpolate(times, values, target_times), True
 
 
