@@ -407,7 +407,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
             await finalize_word(timer_client_message_id, "timeout")
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 - 아래에서 남기고 삼킨다
             # 소켓이 이미 죽었을 때 올라오는 예외는 ASGI 서버 구현마다
             # 다르다(RuntimeError / ConnectionClosed / ...). 좁게 잡으면
             # "Task exception was never retrieved" 로 세션 정보 없이
@@ -417,7 +417,12 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                 extra={"session_id": session_id},
                 exc_info=True,
             )
-            return
+        finally:
+            # 반드시 내려야 한다. 이 값이 True 로 남으면 cancel_word_timer 가
+            # 영구히 무력화되고, 그 뒤 모든 word_start 가 이전 타이머를
+            # 살려둔 채 새 타이머를 만든다. 살아남은 타이머는 8초 뒤에
+            # "그때 열려 있던 다른 단어"를 잘라버린다.
+            word_timer_finalizing = False
 
     try:
         while True:

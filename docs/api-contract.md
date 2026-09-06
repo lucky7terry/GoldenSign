@@ -257,14 +257,20 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
   "type": "word_progress",
   "schema_version": "dev-0.4",
   "session_id": "abc-123",
+  "client_message_id": "stream-start-001",
   "stream_id": "cf-stream-123",
   "frame_count": 27,
   "processed_frame_count": 412,
   "processed_fps": 11.8,
+  "model": { "loaded": false, "mode": "keypoints_only", "version": "..." },
   "processed_at": "2026-09-05T01:00:02Z"
 }
 ```
 
+- `client_message_id`: 이 스트림을 연 **`stream_start` 의 값**이다.
+  `word_start` 의 것이 아니다 — 이 메시지는 WHEP 스트림이 보내는 것이라
+  구간과 수명이 다르다. `stream_start` 에 값을 안 보냈다면 `null`
+- `model`: `result` 에 실리는 것과 같은 모델 상태
 - `frame_count`: **이 구간에** 모인 프레임 수. 단어마다 0부터 다시 센다
 - `processed_frame_count`: 스트림 시작 이후 처리한 총 프레임 수. 단조 증가하며
   구간 경계에서 초기화되지 않는다
