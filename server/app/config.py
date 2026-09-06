@@ -16,7 +16,11 @@ def _env_int(name: str, default: int) -> int:
     return value
 
 
-def _env_float(name: str, default: float) -> float:
+def _env_float(
+    name: str,
+    default: float,
+    allow_disable: bool = False,
+) -> float:
     raw_value = os.getenv(name)
     if raw_value is None or raw_value == "":
         return default
@@ -25,7 +29,10 @@ def _env_float(name: str, default: float) -> float:
         value = float(raw_value)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number.") from exc
-    if not math.isfinite(value) or value <= 0:
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number.")
+    # allow_disable=True면 0 이하는 "끔"을 뜻하므로 그대로 통과시킨다.
+    if not allow_disable and value <= 0:
         raise ValueError(f"{name} must be greater than 0.")
     return value
 
@@ -67,6 +74,13 @@ WS_IDLE_TIMEOUT_SECONDS = _env_float("WS_IDLE_TIMEOUT_SECONDS", 60.0)
 # 확인해야 할 때만 켠다. 켜면 초당 13개 결과 기준 110KB/s 가 나간다.
 INCLUDE_KEYPOINTS_IN_RESULT = _env_bool("INCLUDE_KEYPOINTS_IN_RESULT", False)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# 키포인트 추출 지연 요약 로그 주기. 0 이하면 요약 로그를 끈다.
+KEYPOINT_TIMING_INTERVAL_SECONDS = _env_float(
+    "KEYPOINT_TIMING_INTERVAL_SECONDS",
+    5.0,
+    allow_disable=True,
+)
 WHEP_MAX_RETRIES = _env_int("WHEP_MAX_RETRIES", 5)
 WHEP_RETRY_DELAY_SECONDS = _env_float("WHEP_RETRY_DELAY_SECONDS", 1.0)
 WHEP_CONNECT_TIMEOUT_SECONDS = _env_float("WHEP_CONNECT_TIMEOUT_SECONDS", 10.0)
