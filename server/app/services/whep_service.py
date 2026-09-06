@@ -491,6 +491,7 @@ class WhepPullService:
         last_processed_frame_count = 0
         last_error_sent_at = 0.0
         last_progress_sent_at = 0.0
+        last_progress_frame_count = 0
 
         while not handle.stop_event.is_set():
             try:
@@ -568,7 +569,21 @@ class WhepPullService:
                 word_state.get("buffered")
                 and now - last_progress_sent_at >= _WORD_PROGRESS_INTERVAL_SECONDS
             ):
+                # 프레임마다 나가던 result 를 없애면서 sequence_index 도
+                # 사라졌다. 미니앱이 그 값의 차이로 처리 속도를 표시하고
+                # 있었으므로(background/index.ts trackProcessedFps), 대신
+                # 쓸 값을 여기 싣는다. processed_frame_count 는 스트림
+                # 전체에 걸쳐 단조 증가한다 - 구간마다 0으로 돌아가는
+                # frame_count 와 다르다.
+                elapsed_since_progress = max(now - last_progress_sent_at, 1e-6)
+                processed_fps = (
+                    (processed_frame_count - last_progress_frame_count)
+                    / elapsed_since_progress
+                    if last_progress_sent_at > 0.0
+                    else None
+                )
                 last_progress_sent_at = now
+                last_progress_frame_count = processed_frame_count
                 await handle.send_json(
                     {
                         "type": "word_progress",
@@ -577,6 +592,11 @@ class WhepPullService:
                         "client_message_id": handle.client_message_id,
                         "stream_id": handle.stream_id,
                         "frame_count": word_state.get("frame_count", 0),
+                        "processed_frame_count": processed_frame_count,
+                        "processed_fps": (
+                            None if processed_fps is None
+                            else round(processed_fps, 2)
+                        ),
                         "model": model_status,
                         "processed_at": _utc_now_iso(),
                     }

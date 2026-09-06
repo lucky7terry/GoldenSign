@@ -259,14 +259,31 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
   "session_id": "abc-123",
   "stream_id": "cf-stream-123",
   "frame_count": 27,
+  "processed_frame_count": 412,
+  "processed_fps": 11.8,
   "processed_at": "2026-09-05T01:00:02Z"
 }
 ```
+
+- `frame_count`: **이 구간에** 모인 프레임 수. 단어마다 0부터 다시 센다
+- `processed_frame_count`: 스트림 시작 이후 처리한 총 프레임 수. 단조 증가하며
+  구간 경계에서 초기화되지 않는다
+- `processed_fps`: 서버가 잰 최근 1초의 처리 속도. 첫 메시지에서는 `null`
 
 > **dev-0.3 에서 바뀐 점**: WHEP 경로는 더 이상 프레임마다 `result` 를
 > 보내지 않는다. 판정이 `word_end` 한 번뿐이라 그 전에 나가는 `result` 는
 > `text` 가 항상 `null` 이어서 앱이 쓸 것이 없었다. 초당 약 10건이던 것이
 > 초당 1건의 진행 상황으로 줄어든다.
+>
+> 그 `result` 에 있던 `sequence_index` 도 함께 사라졌다. 미니앱이 그 값의
+> 차이로 처리 속도를 표시했으므로(`background/index.ts` 의
+> `trackProcessedFps`), 대신 `processed_frame_count` 를 쓰면 된다 — 같은
+> 의미의 단조 증가 카운터다. 계산이 필요 없으면 `processed_fps` 를 그대로
+> 써도 된다.
+>
+> 다만 `word_progress` 는 **구간이 열려 있는 동안에만** 나간다. 단어와 단어
+> 사이에는 아무것도 오지 않으므로, 표시를 0 으로 떨어뜨리지 말고 마지막 값을
+> 유지하거나 "대기"로 두는 편이 낫다.
 
 ### Server -> Client: word result
 
