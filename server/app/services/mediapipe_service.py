@@ -2,6 +2,7 @@ import base64
 import binascii
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -9,10 +10,16 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
+from app.config import KEYPOINT_TIMING_INTERVAL_SECONDS
 from app.constants import MAX_FRAME_BYTES
 from app.services.hand_assignment import assign_hands
+from app.services.timing_stats import TimingReporter, TimingStats
 
 logger = logging.getLogger(__name__)
+
+
+def _round_ms(value: float | None) -> float | None:
+    return None if value is None else round(value, 1)
 
 
 class MediaPipeProcessingError(Exception):
@@ -93,6 +100,19 @@ class MediaPipeService:
         # 여러 WebSocket 프레임이 동시에 처리될 때
         # MediaPipe 객체가 동시에 실행되지 않도록 보호한다.
         self._lock = threading.Lock()
+
+        # 프레임당 지연을 나눠 보기 위한 계측 버퍼 (수집만; 출력은 별도).
+        self.lock_wait_stats = TimingStats()
+        self.hand_detect_stats = TimingStats()
+        self.pose_detect_stats = TimingStats()
+        self.face_detect_stats = TimingStats()
+
+        # 주기가 0 이하면 요약 로그를 끈다.
+        self._timing_reporter = (
+            TimingReporter(KEYPOINT_TIMING_INTERVAL_SECONDS)
+            if KEYPOINT_TIMING_INTERVAL_SECONDS > 0
+            else None
+        )
 
         hand_options = mp.tasks.vision.HandLandmarkerOptions(
             base_options=mp.tasks.BaseOptions(
@@ -253,6 +273,43 @@ class MediaPipeService:
             getattr(category, "score", None),
         )
 
+    def _report_timing_if_due(self) -> None:
+        """주기가 되면 모아둔 계측을 한 줄로 남기고 버퍼를 비운다."""
+        if self._timing_reporter is None:
+            return
+
+        if not self._timing_reporter.should_report():
+            return
+
+        lock_wait = self.lock_wait_stats.snapshot()
+        hand = self.hand_detect_stats.snapshot()
+        pose = self.pose_detect_stats.snapshot()
+        face = self.face_detect_stats.snapshot()
+
+        # 다음 구간은 새로 센다.
+        self.lock_wait_stats.reset()
+        self.hand_detect_stats.reset()
+        self.pose_detect_stats.reset()
+        self.face_detect_stats.reset()
+
+        if lock_wait["count"] == 0:
+            return
+
+        logger.info(
+            "MediaPipe timing",
+            extra={
+                "frames": lock_wait["count"],
+                "lock_wait_avg_ms": _round_ms(lock_wait["avg_ms"]),
+                "lock_wait_p95_ms": _round_ms(lock_wait["p95_ms"]),
+                "hand_avg_ms": _round_ms(hand["avg_ms"]),
+                "hand_p95_ms": _round_ms(hand["p95_ms"]),
+                "pose_avg_ms": _round_ms(pose["avg_ms"]),
+                "pose_p95_ms": _round_ms(pose["p95_ms"]),
+                "face_avg_ms": _round_ms(face["avg_ms"]),
+                "face_p95_ms": _round_ms(face["p95_ms"]),
+            },
+        )
+
     def extract_keypoints_from_image(
         self,
         image: np.ndarray,
@@ -276,17 +333,38 @@ class MediaPipeService:
                 data=rgb_image,
             )
 
+            # 락을 기다린 시간과 실제 추론 시간을 분리해서 본다.
+            lock_requested_at = time.perf_counter()
+
             with self._lock:
+                lock_acquired_at = time.perf_counter()
+                self.lock_wait_stats.record(
+                    (lock_acquired_at - lock_requested_at) * 1000.0
+                )
+
+                # 세 검출기 각각의 소요 시간 — 어느 쪽이 지배적인지 보려고 나눈다.
+                hand_started_at = time.perf_counter()
                 hand_result = self._hand_landmarker.detect(
                     mediapipe_image
+                )
+                pose_started_at = time.perf_counter()
+                self.hand_detect_stats.record(
+                    (pose_started_at - hand_started_at) * 1000.0
                 )
 
                 pose_result = self._pose_landmarker.detect(
                     mediapipe_image
                 )
+                face_started_at = time.perf_counter()
+                self.pose_detect_stats.record(
+                    (face_started_at - pose_started_at) * 1000.0
+                )
 
                 face_result = self._face_landmarker.detect(
                     mediapipe_image
+                )
+                self.face_detect_stats.record(
+                    (time.perf_counter() - face_started_at) * 1000.0
                 )
 
         except Exception as exc:
@@ -347,6 +425,8 @@ class MediaPipeService:
             face = self._serialize_face_landmarks(
                 face_result.face_landmarks[0]
             )
+
+        self._report_timing_if_due()
 
         return {
             "face": face,
