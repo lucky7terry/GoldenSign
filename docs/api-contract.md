@@ -411,16 +411,21 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 | `word_already_started` | 이미 열린 구간에 `word_start` 가 또 왔다 | false |
 | `word_not_started` | 열린 구간이 없는데 `word_end` 가 왔다 | false |
 | `word_too_short` | 구간 프레임이 `WORD_MIN_FRAMES`(기본 8) 미만 | true |
-| `model_unavailable` | 구간을 닫는 중 추론이 실패했다 (라벨 파일 문제, 텐서플로 런타임 오류, 입력 shape 불일치) | true |
+| `word_recognition_failed` | 구간을 닫는 중 추론이 실패했다 (라벨 파일 문제, 텐서플로 런타임 오류, 입력 shape 불일치) | true |
 
-`word_too_short` 와 `model_unavailable` 로 거절해도 **구간은 닫힌다.** 앱은
-다시 `word_start` 부터 보내면 된다.
+`word_too_short` 와 `word_recognition_failed` 로 거절해도 **구간은 닫힌다.**
+앱은 다시 `word_start` 부터 보내면 된다.
 
-`model_unavailable` 은 `result` 대신 나간다. `client_message_id` 는 구간을
-닫은 쪽(`word_end`, 자동 종료면 `word_start`)의 것이다. 모델이 아예 안
-올라온 서버(`/health` 의 `model.loaded: false`)는 이 오류를 내지 않고
-`keypoints_only` 결과를 낸다. 이 오류는 모델이 올라온 뒤 그 구간에서만
-실패한 경우다.
+`word_recognition_failed` 는 `result` 대신 나간다. `client_message_id` 는
+구간을 닫은 쪽(`word_end`, 자동 종료면 `word_start`)의 것이다.
+
+프레임 경로(dev-0.2 `frame`, dev-0.3 WHEP)의 `model_unavailable` 과는
+다른 code 다. 그쪽은 프레임 한 장이 실패한 것이라 계속 보내면 되고, 이쪽은
+구간 판정이 실패한 것이라 `word_start` 부터 다시 해야 한다.
+
+모델이 아예 안 올라온 서버(`/health` 의 `model.loaded: false`)는 이 오류를
+내지 않고 `keypoints_only` 결과를 낸다. 이 오류는 모델이 올라온 뒤 그
+구간에서만 실패한 경우다.
 
 ### 8초 자동 종료와 word_end 가 겹칠 때
 

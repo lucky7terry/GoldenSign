@@ -430,6 +430,11 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
             # 클라이언트는 result 도 error 도 못 받고, 로그에는 session_id
             # 없는 ASGI 트레이스백만 남는다. 라벨 파일 문제, 텐서플로 런타임
             # 오류, 입력 shape 불일치가 전부 이 경로다.
+            #
+            # code 는 프레임 경로의 model_unavailable 과 다르게 둔다. 앱은
+            # 프레임 한 장이 실패한 것(계속 보내면 됨)과 구간 판정이 실패한
+            # 것(word_start 부터 다시)을 구분해야 하는데, 같은 code 면
+            # message 문자열을 비교하는 수밖에 없다.
             logger.exception(
                 "Word finalization failed",
                 extra={"session_id": session_id},
@@ -440,7 +445,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                 error_message(
                     WORD_SCHEMA_VERSION,
                     session_id,
-                    "model_unavailable",
+                    "word_recognition_failed",
                     "Word recognition failed.",
                     finalize_client_message_id,
                     retryable=True,
