@@ -834,6 +834,12 @@ registerMiniapp((session) => {
    * 안전망 타이머를 건다 — 한도(max_seconds)를 아는 것이 서버뿐이라서다.
    */
   function handleAck(ack: AiAck): void {
+    if (ack.status === "word_already_closed") {
+      // 서버가 한도로 먼저 닫은 뒤 word_end 가 도착했다. 오류가 아니라 경합이다.
+      console.log("[Word] 서버가 이미 닫은 구간이다 — 상태만 정리")
+      clearWordSegment()
+      return
+    }
     if (ack.status !== "word_start_accepted") return
     if (wordSegment === undefined) {
       console.warn("[Word] word_start_accepted 인데 열린 구간이 없다 — 무시")
@@ -845,7 +851,12 @@ registerMiniapp((session) => {
       maxSeconds = WORD_MAX_SECONDS_FALLBACK
       console.warn(`[Word] ack 에 max_seconds 가 없다 — ${WORD_MAX_SECONDS_FALLBACK}초로 폴백`)
     }
+    armWordTimer(maxSeconds)
+  }
 
+  /** 열린 구간에 안전망 타이머를 (다시) 건다. 이미 걸려 있으면 갈아 끼운다. */
+  function armWordTimer(maxSeconds: number): void {
+    if (wordSegment === undefined) return
     if (wordSegment.timer !== undefined) clearTimeout(wordSegment.timer)
     wordSegment.timer = setTimeout(() => {
       // 서버가 자동 종료했으면 result 가 왔어야 한다. 안 왔으면 우리 쪽 상태만
@@ -857,10 +868,50 @@ registerMiniapp((session) => {
   }
 
   /**
-   * AiClient 가 서버 `error` 를 받을 때마다 부르는 곳. 지금은 방송만 한다 —
-   * LED 매핑은 단어 단위 입력 설계가 확정된 뒤에 붙인다.
+   * AiClient 가 서버 `error` 를 받을 때마다 부르는 곳. 구간 오류 넷은 앱 상태를
+   * 서버에 맞춘 뒤, 나머지 code 와 똑같이 방송한다.
    */
   function handleAiError(err: AiServerError): void {
+    // 구간 오류는 스트림을 죽이지 않는다 — 넷 다 setState("error") 를 부르지
+    // 않는 이유다. 실패한 것은 구간 하나뿐이다.
+    //
+    // clearWordSegment() 는 open 이든 closing 이든 지운다. word_end 를 보낸 뒤
+    // result 대신 오류가 오는 경우가 있는데, closing 이 남으면 안전망 타이머가
+    // 터질 때까지 버튼이 안 먹는다.
+    switch (err.code) {
+      case "word_too_short":
+        // 8프레임 미만. 서버는 이미 닫았으므로 앱도 닫는다.
+        console.warn("[Word] 구간이 너무 짧습니다.")
+        clearWordSegment()
+        break
+
+      case "word_not_started":
+        // 앱은 열린 줄 알았는데 서버엔 없다. 앱을 닫아 서버에 맞춘다.
+        console.warn("[Word] 서버에 열린 구간이 없습니다 — 앱 상태를 닫습니다")
+        clearWordSegment()
+        break
+
+      case "word_already_started": {
+        // 반대 방향의 어긋남. 서버엔 열려 있으니 앱을 열림으로 맞춘다. 연 시각은
+        // 알 수 없어 기존 값이 있으면 그대로 쓰고, 오류에는 max_seconds 가 실려
+        // 오지 않아 안전망은 폴백으로 건다.
+        console.warn("[Word] 서버에 구간이 이미 열려 있습니다 — 앱 상태를 열림으로 맞춥니다")
+        const startedAt = wordSegment?.startedAt ?? Date.now()
+        clearWordSegment()
+        wordSegment = {phase: "open", startedAt, timer: undefined}
+        armWordTimer(WORD_MAX_SECONDS_FALLBACK)
+        break
+      }
+
+      case "model_unavailable":
+        // 서버는 구간을 닫았는데 판정에 실패했다. result 가 오지 않는 유일한
+        // 경로라 여기서 닫지 않으면 다음 짧게 누르기가 word_end 로 나간다.
+        // retryable 은 무시한다 — 다시 눌러도 대개 똑같이 실패한다.
+        console.warn("[Word] 서버 판정에 실패했습니다. — 구간을 닫습니다.")
+        clearWordSegment()
+        break
+    }
+
     patch("error", {code: err.code, message: err.message, retryable: err.retryable})
   }
 
