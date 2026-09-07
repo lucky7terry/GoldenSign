@@ -68,6 +68,16 @@ function fmtWindowIndex(value: number | undefined): string {
 }
 
 /**
+ * 화면에 띄울 문구. 판정은 서버가 끝냈고 text 가 그 결과라 앱은 confidence 를
+ * 다시 보지 않는다. 비어 있을 때만 왜 비었는지를 대신 보여 준다.
+ */
+function resultLabel(r: Channels["recognition:result"] | undefined): string {
+  if (r === undefined) return "—"
+  if (r.text !== null && r.text !== "") return r.text
+  return r.modelLoaded === true ? "확신 부족" : "모델 미연결"
+}
+
+/**
  * 스냅샷의 히스토리를 이미 도착한 live 결과 *아래* 로 접어 넣는다.
  *
  * 히스토리가 먼저이고 live 가 뒤인 이유는 히스토리가 구조적으로 더 오래됐기
@@ -228,7 +238,9 @@ function VisualFeedback({tone, animated}: {tone: Tone; animated: boolean}) {
  */
 function ResultPanel({results}: {results: Channels["recognition:result"][]}) {
   const finals = results.filter((r) => r.isFinal)
-  const sentence = finals.length > 0 ? finals[finals.length - 1].text : null
+  const sentence = finals.length > 0 ? resultLabel(finals[finals.length - 1]) : null
+  // 마지막 단어 구간 요약.
+  const lastWord = results.filter((r) => r.closeReason !== undefined).pop()
 
   return (
     <section className="gs-card">
@@ -245,7 +257,7 @@ function ResultPanel({results}: {results: Channels["recognition:result"][]}) {
               key={`${i}-${r.windowIndex}`}
               className={`gs-chip ${r.isFinal ? "gs-chip-final" : "gs-chip-interim"}`}
             >
-              {r.text}
+              {resultLabel(r)}
               {r.isFinal ? "" : "…"}
             </span>
           ))}
@@ -255,6 +267,13 @@ function ResultPanel({results}: {results: Channels["recognition:result"][]}) {
       <p className="gs-sentence" aria-live="polite">
         {sentence ?? "—"}
       </p>
+
+      {lastWord === undefined ? null : (
+        <p className="gs-empty">
+          마지막 구간: {fmt(lastWord.wordFrameCount)}프레임 · {fmt(lastWord.spanMs)}ms ·{" "}
+          {fmt(lastWord.closeReason)}
+        </p>
+      )}
     </section>
   )
 }
@@ -301,10 +320,13 @@ function DiagnosticsPanel({snap}: {snap: Snapshot}) {
           <dt>window index</dt>
           <dd className="gs-mono">{fmtWindowIndex(latest?.windowIndex)}</dd>
         </div>
-        <div className="gs-diag-row">
-          <dt>confidence</dt>
-          <dd className="gs-mono">{fmt(latest?.confidence)}</dd>
-        </div>
+        {/* 모델 미연결이면 서버가 0.0 을 보낸다. 그리면 "확신도 0%" 로 읽힌다. */}
+        {latest?.modelLoaded === false ? null : (
+          <div className="gs-diag-row">
+            <dt>confidence</dt>
+            <dd className="gs-mono">{fmt(latest?.confidence)}</dd>
+          </div>
+        )}
         <div className="gs-diag-row">
           <dt>stream.state</dt>
           <dd className="gs-mono">{snap.stream.state}</dd>

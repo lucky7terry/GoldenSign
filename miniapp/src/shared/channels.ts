@@ -94,16 +94,27 @@ export interface Channels {
    * 그 경우 background 가 -1 센티널을 넣는다.
    *
    * `sequenceIndex` 는 `result` 안이 아니라 서버 메시지 **최상위** 의
-   * `sequence_index` 에서 온다. 서버가 실제로 처리한 누적 프레임 수이고,
-   * background 는 이 값으로 처리 fps 를 계산해 stream:diagnostics 에 싣는다.
+   * `sequence_index` 에서 온다. #46 이후 서버가 이 필드를 보내지 않아 대개
+   * null 이고, 처리 fps 는 background 가 `word_progress` 의 frame_count
+   * 차분으로 따로 계산한다.
    */
   "recognition:result": {
-    text: string
+    /** 모델이 판정한 단어. 판정이 없으면 null 이다. */
+    text: string | null
     confidence: number
     isFinal: boolean
     windowIndex: number
     /** 서버 누적 처리 프레임 수. 서버가 숫자로 주지 않으면 null. */
     sequenceIndex: number | null
+    // 아래는 단어 구간 결과에만 실려 온다. 프레임 스트림 결과에는 없다.
+    /** "client" | "timeout" — 구간이 왜 닫혔는지. */
+    closeReason?: string
+    /** 구간이 모은 원본 프레임 수(리샘플 전). */
+    wordFrameCount?: number
+    /** 구간의 실제 길이(ms). */
+    spanMs?: number
+    /** 결과 생성 시점의 모델 로드 여부. false 면 confidence 는 의미가 없다. */
+    modelLoaded?: boolean
   }
 
   "glasses:state": {

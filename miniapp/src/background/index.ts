@@ -912,9 +912,9 @@ registerMiniapp((session) => {
       const hasText = next.text !== null && next.text !== ""
       flashLed(hasText ? RESULT_HIGH_LED : RESULT_LOW_LED, FLASH_MS)
     }
-    // 모델 연결 전에는 text 가 null 이다. 채널 타입은 아직 string 이라 여기서만
-    // 막아 둔다 — null 을 UI 까지 올릴지는 부르는 쪽을 만드는 커밋에서 정한다.
-    publishResult({...next, text: next.text ?? ""})
+    // 채널 타입이 null 을 받으므로 그대로 올린다. UI 가 null 과 빈 문자열을
+    // 구분해 문구를 고른다.
+    publishResult(next)
   }
 
   // --- 단어 구간 --------------------------------------------------------------
