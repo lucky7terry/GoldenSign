@@ -763,16 +763,30 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     )
                     continue
 
-                await whep_pull_service.stop_stream(
+                stopped = await whep_pull_service.stop_stream(
                     session_id,
                     stream_message.stream_id,
                 )
-                # 영상이 끊겼으므로 모으던 구간은 의미가 없다. 결과를
-                # 내지 않고 버린다.
-                cancel_word_timer()
-                if word_store.abort_word(session_id, word_generation):
+                if stopped:
+                    # 영상이 끊겼으므로 모으던 구간은 의미가 없다. 결과를
+                    # 내지 않고 버린다.
+                    cancel_word_timer()
+                    if word_store.abort_word(session_id, word_generation):
+                        logger.info(
+                            "Discarded open word segment on stream_stop",
+                            extra={
+                                "session_id": session_id,
+                                "stream_id": stream_message.stream_id,
+                            },
+                        )
+                else:
+                    # 지금 도는 스트림이 아니다. stop_stream 이 소유권 검사에
+                    # 걸러낸 경우(늦게 도착한 이전 스트림의 stop)이거나 애초에
+                    # 스트림이 없는 경우다. 여기서 구간을 버리면, 같은 연결에서
+                    # stream_start(A) -> stream_start(B) -> 늦은 stop(A) 순서일
+                    # 때 멀쩡히 도는 B 의 단어가 사라진다.
                     logger.info(
-                        "Discarded open word segment on stream_stop",
+                        "Ignored stream_stop for a stream that is not running",
                         extra={
                             "session_id": session_id,
                             "stream_id": stream_message.stream_id,
