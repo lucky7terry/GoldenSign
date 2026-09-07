@@ -558,6 +558,9 @@ registerMiniapp((session) => {
    *  호출마다 다시 거는 것을 막는다. */
   let lastAppliedLedState: AppState | undefined
 
+  /** 진행 중인 flash 의 복귀 타이머. 하나뿐이라 겹쳐 부르면 앞의 것을 덮는다. */
+  let ledFlashTimer: ReturnType<typeof setTimeout> | undefined
+
   /** 명령에 해당하는 LED Promise 를 만들기만 한다(await 하지 않는다). */
   function sendLed(command: LedCommand) {
     switch (command.kind) {
@@ -599,6 +602,37 @@ registerMiniapp((session) => {
     }
   }
 
+  function clearLedFlashTimer(): void {
+    if (ledFlashTimer !== undefined) {
+      clearTimeout(ledFlashTimer)
+      ledFlashTimer = undefined
+    }
+  }
+
+  /**
+   * 상태 LED 위에 잠깐 다른 색을 얹고 durationMs 뒤 현재 appState 의 불로
+   * 돌아온다. applyLed 와 달리 가드가 없어 같은 명령이어도 매번 다시 켠다.
+   */
+  function flashLed(command: LedCommand, durationMs: number): void {
+    if (!deviceHasLight(session.capabilities)) return
+    // 겹쳐 부르면 앞의 복귀 타이머는 버린다. 복귀는 마지막 flash 기준이다.
+    clearLedFlashTimer()
+    console.log("[LED] flash", JSON.stringify(command), `${durationMs}ms`)
+
+    try {
+      void sendLed(command).catch((err) => logLedError("flash", err))
+    } catch (err) {
+      logLedError("flash 동기 예외", err)
+    }
+
+    ledFlashTimer = setTimeout(() => {
+      ledFlashTimer = undefined
+      // 가드를 지우고 부른다. 그대로 두면 상태가 안 바뀐 경우 복귀가 씹힌다.
+      lastAppliedLedState = undefined
+      applyLed(appState)
+    }, durationMs)
+  }
+
   /**
    * 상태 맵을 우회하는 무조건 소등. 종료 경로 전용이다.
    *
@@ -606,6 +640,9 @@ registerMiniapp((session) => {
    * 중복으로 건너뛰지 않고 다시 점등한다.
    */
   function turnOffLed(reason: string): void {
+    // hasLight 판정보다 먼저 지운다. 세션 도중 capabilities 가 바뀌어도 예약된
+    // 복귀가 소등 뒤에 불을 되살리면 안 된다.
+    clearLedFlashTimer()
     if (!deviceHasLight(session.capabilities)) return
     lastAppliedLedState = undefined
     console.log("[LED] turnOff:", reason)
@@ -939,6 +976,9 @@ registerMiniapp((session) => {
   function setState(next: AppState): void {
     if (appState === next) return
     console.log(`[State] ${appState} -> ${next}`)
+    // 상태가 바뀌면 flash 는 버린다. 아래 publishStreamState 가 새 상태의 불을
+    // 켜므로, 남겨 두면 옛 상태로 되돌리는 복귀가 뒤늦게 덮어쓴다.
+    clearLedFlashTimer()
     // streaming 을 벗어나면 열린 구간은 갈 곳이 없다. 서버도 열린 구간을 결과
     // 없이 버리므로 word_end 는 보내지 않는다.
     if (appState === "streaming" && wordSegment !== undefined) {
