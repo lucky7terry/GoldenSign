@@ -54,7 +54,13 @@ import {
   type WifiData,
 } from "@mentra/miniapp/background"
 import type {Channels, Snapshot} from "../shared/channels"
-import {AiClient, probeRuntime, type AiClientState, type AiServerError} from "./ai-client"
+import {
+  AiClient,
+  probeRuntime,
+  type AiClientState,
+  type AiRecognitionResult,
+  type AiServerError,
+} from "./ai-client"
 
 /**
  * background 엔트리는 `StreamModule` 은 re-export 하지만 옵션/결과 인터페이스는
@@ -740,9 +746,11 @@ registerMiniapp((session) => {
   }
 
   /** AiClient 가 result 를 받을 때마다 부르는 곳. fps 를 먼저 세고 방송한다. */
-  function handleResult(next: Channels["recognition:result"]): void {
+  function handleResult(next: AiRecognitionResult): void {
     trackProcessedFps(next.sequenceIndex)
-    publishResult(next)
+    // 모델 연결 전에는 text 가 null 이다. 채널 타입은 아직 string 이라 여기서만
+    // 막아 둔다 — null 을 UI 까지 올릴지는 부르는 쪽을 만드는 커밋에서 정한다.
+    publishResult({...next, text: next.text ?? ""})
   }
 
   /**
