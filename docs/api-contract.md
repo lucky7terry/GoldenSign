@@ -199,6 +199,28 @@ Actual aiortc/WHEP frame pulling is implemented in a follow-up issue.
 
 입력 경로(dev-0.3 WHEP)는 그대로다. 바뀌는 것은 **언제 판정하는가**뿐이다.
 
+### 버전 정책
+
+`schema_version` 은 메시지마다 붙는 값이고, 서버는 **세 버전을 동시에
+받는다**. `SUPPORTED_SCHEMA_VERSIONS = {dev-0.2, dev-0.3, dev-0.4}` 이고
+`hello` 에서 이 집합에 없는 값이면 `unsupported_schema_version` 으로
+거절한다.
+
+| 버전 | 담당 | 상태 |
+|---|---|---|
+| `dev-0.2` | `hello` / `frame` / `ping` / `stop` | 유지 |
+| `dev-0.3` | `stream_start` / `stream_stop` / WHEP result | 유지 |
+| `dev-0.4` | `word_start` / `word_end` / `word_progress` | 이번에 추가 |
+
+dev-0.4 는 **더한 것이지 바꾼 것이 아니다.** 기존 메시지의 필드는 하나도
+건드리지 않았으므로 dev-0.3 만 아는 미니앱은 고칠 것 없이 그대로 돈다.
+단어 모드를 쓰려는 클라이언트만 `word_*` 메시지에 `dev-0.4` 를 실으면
+된다. 한 연결 안에서 메시지마다 버전이 섞여도 된다 - 실제로 미니앱은
+`stream_start` 를 dev-0.3 으로, `word_start` 를 dev-0.4 로 보낸다.
+
+서버가 내보내는 응답은 그 요청의 버전을 따라간다. `word_progress` 와
+단어 구간 `result` 는 `dev-0.4`, WHEP 스트림 관련 응답은 `dev-0.3` 이다.
+
 ### Flow
 
 ```text

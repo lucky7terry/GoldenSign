@@ -374,6 +374,7 @@ class WordSegment:
     dropped_after_cap: int
 
     def metadata(self) -> dict:
+        """word_progress / result 에 실을 구간 요약."""
         return {
             "word_index": self.word_index,
             "frame_count": self.frame_count,
@@ -396,6 +397,7 @@ class WordSegmentStore:
         min_frames: int = WORD_MIN_FRAMES,
         max_seconds: float = WORD_MAX_SECONDS,
     ) -> None:
+        """구간 저장소를 만든다. 기본값은 app.config 를 따른다."""
         if target_frames <= 1:
             raise ValueError("target_frames must be greater than 1.")
         if min_frames <= 1:
@@ -419,6 +421,12 @@ class WordSegmentStore:
     # 세션 수명 -------------------------------------------------------
 
     def start_session(self, session_id: str) -> int:
+        """세션을 열고 새 generation 을 돌려준다.
+
+        같은 session_id 로 다시 연결하면 generation 이 1 올라간다. 호출자는
+        이 값을 붙들고 있다가 이후 모든 호출에 넘겨야 한다. 그래야 죽어가는
+        예전 연결의 뒤늦은 호출이 새 연결의 구간을 건드리지 못한다.
+        """
         with self._lock:
             previous = self._states.get(session_id)
             generation = (previous.generation if previous else 0) + 1
@@ -426,6 +434,7 @@ class WordSegmentStore:
             return generation
 
     def current_generation(self, session_id: str) -> int | None:
+        """지금 유효한 generation. 세션이 없으면 None."""
         with self._lock:
             state = self._states.get(session_id)
             return None if state is None else state.generation
@@ -452,11 +461,17 @@ class WordSegmentStore:
     # 단어 구간 -------------------------------------------------------
 
     def is_word_open(self, session_id: str) -> bool:
+        """모으는 중인 단어 구간이 있는지."""
         with self._lock:
             state = self._states.get(session_id)
             return state is not None and state.word is not None
 
     def start_word(self, session_id: str, generation: int | None = None) -> None:
+        """새 단어 구간을 연다.
+
+        이미 열려 있으면 그 구간을 버리고 새로 연다. 사용자가 끝 표시 없이
+        다시 시작을 누른 경우이므로, 앞 구간은 결과를 낼 가치가 없다.
+        """
         with self._lock:
             state = self._require_state(session_id, generation)
             if state.word is not None:
@@ -485,6 +500,14 @@ class WordSegmentStore:
         captured_at_ms: float | None = None,
         generation: int | None = None,
     ) -> WordAppendResult:
+        """열린 구간에 프레임 한 장을 넣는다.
+
+        captured_at_ms 는 촬영 시각이다. 이 값이 있어야 나중에 시간축을
+        30fps 격자로 되돌릴 수 있다. 없으면 도착 순서만 남으므로 프레임이
+        불규칙하게 빠졌을 때 속도 특징이 망가진다.
+
+        구간이 열려 있지 않거나 generation 이 어긋나면 조용히 버린다.
+        """
         if len(feature_vector) != OPENPOSE_FEATURE_DIM:
             raise ValueError(
                 f"OpenPose feature vector must have {OPENPOSE_FEATURE_DIM} values."
@@ -599,6 +622,7 @@ class WordSegmentStore:
 
 
 def _span_ms(timestamps_ms: list[float | None]) -> float | None:
+    """구간의 실제 길이(ms). 시각을 아는 프레임이 2장 미만이면 None."""
     known = [t for t in timestamps_ms if t is not None and math.isfinite(t)]
     if len(known) < 2:
         return None
