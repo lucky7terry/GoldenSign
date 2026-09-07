@@ -12,6 +12,7 @@ from app.config import (
     MAX_CONCURRENT_RECOGNITIONS,
     WORD_DRAIN_TIMEOUT_SECONDS,
     WORD_MAX_SECONDS,
+    WORD_RESULT_DEADLINE_SECONDS,
     WS_IDLE_TIMEOUT_SECONDS,
 )
 from app.constants import (
@@ -348,7 +349,9 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
     # 취소하면 결과가 중간에 잘려서 사용자는 아무것도 못 받는다.
     word_timer_finalizing = False
     # 자동 종료로 이미 닫힌 뒤에 word_end 가 도착했는지. 사용자는 잘못한
-    # 것이 없으므로 오류가 아니라 ack 로 답한다.
+    # 것이 없으므로 오류를 내지 않는다. ack 도 보내지 않는다 - 결과는 이미
+    # 나갔고, 앱은 그 result 로 구간을 닫는다. 여기서 ack 를 보내면 앱이 그
+    # 사이에 연 다음 구간을 그 ack 로 지우는 경합이 생긴다.
     auto_closed_pending = False
 
     def cancel_word_timer():
@@ -968,7 +971,9 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                         "session_id": session_id,
                         "client_message_id": client_message_id,
                         "status": "word_start_accepted",
-                        "max_seconds": WORD_MAX_SECONDS,
+                        # 자동 종료 시각이 아니라 "이 안에는 답이 온다"는
+                        # 상한이다. 앱이 안전망 타이머를 거는 데 쓴다.
+                        "max_seconds": WORD_RESULT_DEADLINE_SECONDS,
                         "received_at": _utc_now_iso(),
                     }
                 )
@@ -992,19 +997,18 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                 if outcome == "not_open":
                     if auto_closed_pending:
                         # 8초가 먼저 지나서 서버가 이미 닫았다. 결과는
-                        # 이미 나갔으므로 오류가 아니다.
+                        # 이미 나갔으므로 오류가 아니고, ack 도 보내지
+                        # 않는다. 앱은 result 로 구간을 닫았고, 사용자가
+                        # 그 사이에 새 구간을 열었을 수 있다. 여기서 ack 를
+                        # 보내면 앱이 그 ack 를 새 구간에 대한 것으로 읽어
+                        # 서버에는 열려 있는 구간을 앱만 닫는다.
                         auto_closed_pending = False
-                        await _send_json(
-                            websocket,
-                            send_lock,
-                            {
-                                "type": "ack",
-                                "schema_version": WORD_SCHEMA_VERSION,
+                        logger.info(
+                            "word_end arrived after auto-close; ignored",
+                            extra={
                                 "session_id": session_id,
                                 "client_message_id": client_message_id,
-                                "status": "word_already_closed",
-                                "received_at": _utc_now_iso(),
-                            }
+                            },
                         )
                     else:
                         await _send_json(

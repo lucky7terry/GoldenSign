@@ -252,12 +252,15 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
   "session_id": "abc-123",
   "client_message_id": "word-start-001",
   "status": "word_start_accepted",
-  "max_seconds": 8.0,
+  "max_seconds": 10.0,
   "received_at": "2026-09-05T01:00:00Z"
 }
 ```
 
-`max_seconds`는 서버 설정값이다. 앱이 자체 타이머를 둘 거라면 이 값을 쓴다.
+`max_seconds` 는 **이 안에는 반드시 `result` 나 오류가 온다**는 상한이다.
+자동 종료 시각(`WORD_MAX_SECONDS`, 8초)이 아니다 - 자동 종료 뒤에도 큐 소진
+대기(`WORD_DRAIN_TIMEOUT_SECONDS`, 2초)와 추론이 남아 있어 그만큼 더한 값이다.
+앱이 안전망 타이머를 둘 거라면 이 값에 네트워크 여유만 더해서 쓴다.
 
 ### Client -> Server: word_end
 
@@ -435,18 +438,14 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 안 보냈다면 `null` 이다.
 
 서버가 먼저 닫은 뒤에 `word_end` 가 도착하면, 사용자는 잘못한 것이 없으므로
-오류가 아니라 ack 로 답한다. 결과는 이미 나간 뒤다.
+오류를 내지 않는다. **ack 도 보내지 않는다.** 결과는 이미 나갔고 앱은 그
+`result` 로 구간을 닫는다. 늦은 `word_end` 는 서버 로그에만 남는다.
 
-```json
-{
-  "type": "ack",
-  "schema_version": "dev-0.4",
-  "session_id": "abc-123",
-  "client_message_id": "word-end-001",
-  "status": "word_already_closed",
-  "received_at": "2026-09-05T01:00:10Z"
-}
-```
+ack 를 보내지 않는 이유: 앱은 `result` 를 받는 순간 구간을 닫고, 사용자는
+곧바로 다음 단어를 시작할 수 있다. 그 뒤에 이전 `word_end` 에 대한 ack 가
+도착하면 앱은 그것을 새 구간에 대한 답으로 읽어, 서버에는 열려 있는 구간을
+앱만 닫게 된다. 앱은 `word_end` 에 대한 응답으로 `result` 또는 오류만
+기다리면 된다.
 
 ### 구간이 버려지는 경우
 
@@ -458,6 +457,7 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 | 환경변수 | 기본값 | 의미 |
 |---|---|---|
 | `WORD_MAX_SECONDS` | `8.0` | 이 시간이 지나면 서버가 구간을 닫는다 |
+| `WORD_DRAIN_TIMEOUT_SECONDS` | `2.0` | 구간을 닫기 전에 큐에 남은 프레임을 기다리는 최대 시간. `0` 이면 기다리지 않는다 |
 | `WORD_MIN_FRAMES` | `8` | 이보다 적으면 `word_too_short` |
 | `WORD_TARGET_FRAMES` | `60` | 모델 입력 길이. 학습이 60이다 |
 | `WORD_SOURCE_FPS` | `30.0` | 되돌릴 격자의 프레임레이트. 원본 영상과 같게 둔다 |
