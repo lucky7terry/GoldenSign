@@ -93,6 +93,39 @@ WORD_TARGET_FRAMES = _env_int("WORD_TARGET_FRAMES", 60)
 #   임계값 0.5 아래다. 30 고정은 12가지 조건 전부에서 0.689~0.809 였다.
 WORD_SOURCE_FPS = _env_float("WORD_SOURCE_FPS", 30.0)
 
+# 단어 판정 임계값. 이 아래면 단어를 주장하지 않고 text 를 null 로 보낸다.
+#
+# 근거는 영상 5개(WORD0001, 5시점) 검증이다. 단어 단위 결과가 최저 확신도
+# 0.615, 2위와의 격차 최저 0.377 이었으므로 전 시점이 통과한다. 반대로
+# 슬라이딩 윈도우의 애매한 판정(0.366, 격차 0.083)은 걸러진다.
+#
+# 확신도만 보면 안 된다. 50개 클래스가 고르게 나뉜 경우와 두 개가 팽팽한
+# 경우를 구분하지 못한다. 2위와의 격차를 같이 본다.
+#
+# 두 값 모두 확률이므로 (0, 1] 을 벗어날 수 없다. 1 을 넘게 적으면 모든
+# 구간이 조용히 거절되고, 서버는 아무 불평 없이 단어를 하나도 못 낸다.
+# 오타 하나로 그렇게 되는 것보다 기동 때 세우는 편이 낫다.
+def _env_probability(name: str, default: float) -> float:
+    """확률 임계값. (0, 1] 을 벗어나면 기동 때 세운다."""
+    value = _env_float(name, default)
+    if not 0.0 < value <= 1.0:
+        raise ValueError(f"{name} must be in (0, 1]; got {value}.")
+    return value
+
+
+RECOGNITION_CONFIDENCE_THRESHOLD = _env_probability(
+    "RECOGNITION_CONFIDENCE_THRESHOLD",
+    0.5,
+)
+RECOGNITION_MARGIN_THRESHOLD = _env_probability(
+    "RECOGNITION_MARGIN_THRESHOLD",
+    0.15,
+)
+
+# 단어 구간을 닫기 전에 큐에 남은 프레임을 기다리는 최대 시간. 0 이면
+# 기다리지 않는다.
+WORD_DRAIN_TIMEOUT_SECONDS = _env_float("WORD_DRAIN_TIMEOUT_SECONDS", 2.0)
+
 # result 메시지에 좌표를 실을지. 좌표는 실수 959개로 메시지의 94% 를 차지하는데
 # (8,338 -> 479 바이트) 미니앱은 읽지 않는다. 기본은 빼고, 서버 좌표를 눈으로
 # 확인해야 할 때만 켠다.

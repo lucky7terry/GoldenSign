@@ -324,9 +324,18 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
   "session_id": "abc-123",
   "client_message_id": "word-end-001",
   "result": {
-    "text": null,
-    "confidence": 0.0,
+    "text": "배",
+    "confidence": 0.748,
     "is_final": true
+  },
+  "recognition": {
+    "candidate": "배",
+    "class_index": 0,
+    "confidence": 0.748,
+    "margin": 0.592,
+    "accepted": true,
+    "confidence_threshold": 0.5,
+    "margin_threshold": 0.15
   },
   "word": {
     "word_index": 1,
@@ -339,7 +348,7 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
     "dropped_after_cap": 0,
     "close_reason": "client"
   },
-  "model": { "loaded": false, "mode": "keypoints_only" },
+  "model": { "loaded": true, "mode": "recognition" },
   "processed_at": "2026-09-05T01:00:02Z"
 }
 ```
@@ -354,8 +363,46 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
   믿을 수 없어 도착 순서로 떨어졌으면 `false`. **`false` 가 계속 나오면
   입력 경로에 타임스탬프가 안 붙고 있다는 뜻이니 알려달라.**
 - `close_reason`: `"client"`(word_end) 또는 `"timeout"`(8초 자동 종료).
-- `text: null`: **인식 모델 연결 전까지 서버는 항상 `null` 을 보낸다.**
-  다음 PR 에서 실제 단어가 들어온다. `model.loaded` 로 구분할 수 있다.
+- `text`: 임계값을 넘었을 때만 채운다. 못 넘으면 `null` 이다 — 서버가 확신하지
+  못한 것이므로 앱은 아무것도 표시하지 않아야 한다. 인식 모델이 아직 안 올라온
+  서버도 `null` 을 보내며, 그 경우는 `model.loaded` 가 `false` 다.
+- `recognition`: 판정 근거. **거절당했을 때도 무엇이 1위였는지 남는다.**
+  임계값을 조정하거나 왜 안 나왔는지 볼 때 쓴다. 모델이 없으면 이 블록이
+  통째로 빠진다.
+
+### 임계값
+
+확신도만 보면 안 된다. softmax 는 합이 1 이라 모르는 동작을 넣어도 어딘가에
+확률이 몰린다. 실제로 전부 0 인 입력을 넣으면 `"허리" 0.323` 이 나온다.
+그래서 **2위와의 격차**를 같이 본다 — 그 경우 격차가 0.081 이라 거절된다.
+
+    확신도 >= 0.5  그리고  2위와의 격차 >= 0.15
+
+근거는 영상 5개(WORD0001, 5시점)를 **서버 코드 그대로** 통과시킨 결과다
+(`scripts/verify_word_pipeline.py`). 프레임을 버리는 방식을 세 가지로 나눠
+잰다 — MediaPipe 가 30fps 를 못 따라가서 버리는 간격이 실제로는 균일하지
+않기 때문이다.
+
+| 드롭 방식 | 간격 | 1위가 정답 | 임계값 통과 | 확신도 평균 | 최저 |
+|---|---|---|---|---|---|
+| uniform | 100ms 고정 | 5/5 | 5/5 | 0.708 | **0.610** |
+| random | 33~633ms | 5/5 | 5/5 | 0.776 | 0.730 |
+| stall | 100~600ms | 5/5 | 5/5 | 0.759 | 0.691 |
+
+15가지 경우 전부 1위가 정답이었고 전부 임계값을 통과했다. 최저 확신도
+0.610 은 기준 0.5 보다 22% 높다.
+
+불규칙한 쪽(random, stall)이 균일한 쪽보다 오히려 높다. `[1]` 단계의 30fps
+복원이 불규칙을 제대로 펴준다는 뜻이다 — 복원 없이 재면 random 에서
+4/5 로 떨어진다(아래 "왜 세 단계인가" 참고).
+
+격차는 15가지 중 최저가 0.352 로 기준 0.15 의 두 배가 넘는다. 위에서 계산한
+대로 **격차 기준은 이 데이터에서 한 번도 작동하지 않았다.**
+
+시점별로는 이렇다(uniform 기준).
+
+반대로 슬라이딩 윈도우 방식의 애매한 판정(확신도 0.366, 격차 0.083)은
+확신도 기준에서 걸러진다.
 
 ### Server -> Client: 오류
 
@@ -364,9 +411,21 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 | `word_already_started` | 이미 열린 구간에 `word_start` 가 또 왔다 | false |
 | `word_not_started` | 열린 구간이 없는데 `word_end` 가 왔다 | false |
 | `word_too_short` | 구간 프레임이 `WORD_MIN_FRAMES`(기본 8) 미만 | true |
+| `word_recognition_failed` | 구간을 닫는 중 추론이 실패했다 (라벨 파일 문제, 텐서플로 런타임 오류, 입력 shape 불일치) | true |
 
-`word_too_short` 로 거절해도 **구간은 닫힌다.** 앱은 다시 `word_start` 부터
-보내면 된다.
+`word_too_short` 와 `word_recognition_failed` 로 거절해도 **구간은 닫힌다.**
+앱은 다시 `word_start` 부터 보내면 된다.
+
+`word_recognition_failed` 는 `result` 대신 나간다. `client_message_id` 는
+구간을 닫은 쪽(`word_end`, 자동 종료면 `word_start`)의 것이다.
+
+프레임 경로(dev-0.2 `frame`, dev-0.3 WHEP)의 `model_unavailable` 과는
+다른 code 다. 그쪽은 프레임 한 장이 실패한 것이라 계속 보내면 되고, 이쪽은
+구간 판정이 실패한 것이라 `word_start` 부터 다시 해야 한다.
+
+모델이 아예 안 올라온 서버(`/health` 의 `model.loaded: false`)는 이 오류를
+내지 않고 `keypoints_only` 결과를 낸다. 이 오류는 모델이 올라온 뒤 그
+구간에서만 실패한 경우다.
 
 ### 8초 자동 종료와 word_end 가 겹칠 때
 
@@ -402,6 +461,9 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 | `WORD_MIN_FRAMES` | `8` | 이보다 적으면 `word_too_short`. 이슈 [#42](https://github.com/mentraconsulting/golden-sign/issues/42)에서 10을 제안했으나, 실측(영상 5개, 8~12프레임, 5/5 정답, 확신도 0.765~0.809)으로 8이 정확도를 유지하면서 짧은 단어를 덜 거절함을 확인하여 8로 결정 |
 | `WORD_TARGET_FRAMES` | `60` | 모델 입력 길이. 학습이 60이다 |
 | `WORD_SOURCE_FPS` | `30.0` | 되돌릴 격자의 프레임레이트. 원본 영상과 같게 둔다 |
+| `RECOGNITION_CONFIDENCE_THRESHOLD` | `0.5` | 이 아래면 단어를 주장하지 않는다 |
+| `RECOGNITION_MARGIN_THRESHOLD` | `0.15` | 2위와의 격차가 이 아래면 주장하지 않는다 |
+| `RECOGNITION_MODEL_FILENAME` | `model_fold0.keras` | `server/models/` 안의 파일명 |
 
 ---
 
