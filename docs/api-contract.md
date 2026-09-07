@@ -190,7 +190,7 @@ Actual aiortc/WHEP frame pulling is implemented in a follow-up issue.
 ## 6. Word Segment Contract (dev-0.4)
 
 **Purpose**: 사용자가 한 단어의 시작과 끝을 직접 표시하고, 서버는 그 구간만
-모아 한 번 판정한다.
+모아 한 번 판정한다. 이슈 [#42](https://github.com/mentraconsulting/golden-sign/issues/42)의 요구사항을 구현한 것으로, 학습 데이터 구조(한 단어 = 한 구간)와 일치하도록 사용자 제어 기반 단어 단위 인식을 도입했다.
 
 지금까지는 프레임이 60장 쌓일 때마다 판정했다(sliding window). 학습은
 "한 단어 = 한 구간"을 전제로 했고 증강도 가변 길이 구간을 60프레임으로
@@ -210,7 +210,7 @@ Actual aiortc/WHEP frame pulling is implemented in a follow-up issue.
 |---|---|---|
 | `dev-0.2` | `hello` / `frame` / `ping` / `stop` | 유지 |
 | `dev-0.3` | `stream_start` / `stream_stop` / WHEP result | 유지 |
-| `dev-0.4` | `word_start` / `word_end` / `word_progress` | 이번에 추가 |
+| `dev-0.4` | `word_start` / `word_end` / `word_progress` | 이번에 추가 (이슈 [#42](https://github.com/mentraconsulting/golden-sign/issues/42)) |
 
 dev-0.4 는 **더한 것이지 바꾼 것이 아니다.** 기존 메시지의 필드는 하나도
 건드리지 않았으므로 dev-0.3 만 아는 미니앱은 고칠 것 없이 그대로 돈다.
@@ -399,7 +399,7 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 | 환경변수 | 기본값 | 의미 |
 |---|---|---|
 | `WORD_MAX_SECONDS` | `8.0` | 이 시간이 지나면 서버가 구간을 닫는다 |
-| `WORD_MIN_FRAMES` | `8` | 이보다 적으면 `word_too_short` |
+| `WORD_MIN_FRAMES` | `8` | 이보다 적으면 `word_too_short`. 이슈 [#42](https://github.com/mentraconsulting/golden-sign/issues/42)에서 10을 제안했으나, 실측(영상 5개, 8~12프레임, 5/5 정답, 확신도 0.765~0.809)으로 8이 정확도를 유지하면서 짧은 단어를 덜 거절함을 확인하여 8로 결정 |
 | `WORD_TARGET_FRAMES` | `60` | 모델 입력 길이. 학습이 60이다 |
 | `WORD_SOURCE_FPS` | `30.0` | 되돌릴 격자의 프레임레이트. 원본 영상과 같게 둔다 |
 
