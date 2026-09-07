@@ -641,12 +641,28 @@ registerMiniapp((session) => {
   }
 
   /**
+   * 지금 보여야 할 지속 상태로 되돌린다. 얹은 불(flash / 구간)이 끝나는 자리는
+   * 전부 여기를 지난다 — 열린 구간이 상태 색보다 우선이라는 규칙이 한 곳에만 있다.
+   */
+  function restoreLed(): void {
+    // closing 도 아직 서버가 처리 중이라 주황을 유지한다.
+    if (wordSegment !== undefined) {
+      setWordLed(true)
+      return
+    }
+    lastAppliedLedState = undefined
+    applyLed(appState)
+  }
+
+  /**
    * 구간 열림은 잠깐이 아니라 열려 있는 내내 유지돼야 해서 flash 가 아니다.
-   * 닫을 때는 가드를 풀고 현재 상태의 불로 되돌린다.
+   * 닫을 때는 restoreLed 가 그 시점에 맞는 불을 고른다.
    */
   function setWordLed(open: boolean): void {
     if (!deviceHasLight(session.capabilities)) return
     if (open) {
+      // 예약된 복귀가 방금 켠 주황을 덮지 않게 먼저 버린다.
+      clearLedFlashTimer()
       console.log("[LED] word open ->", JSON.stringify(WORD_OPEN_LED))
       try {
         void sendLed(WORD_OPEN_LED).catch((err) => logLedError("word open", err))
@@ -655,8 +671,7 @@ registerMiniapp((session) => {
       }
       return
     }
-    lastAppliedLedState = undefined
-    applyLed(appState)
+    restoreLed()
   }
 
   function clearLedFlashTimer(): void {
@@ -691,9 +706,8 @@ registerMiniapp((session) => {
 
     ledFlashTimer = setTimeout(() => {
       ledFlashTimer = undefined
-      // 가드를 지우고 부른다. 그대로 두면 상태가 안 바뀐 경우 복귀가 씹힌다.
-      lastAppliedLedState = undefined
-      applyLed(appState)
+      // 상태 색이 아니라 restoreLed 로 돌아간다. 거절 깜빡임 직후 새 구간을 연 경우 상태 색이 주황을 덮으면 안 된다.
+      restoreLed()
     }, durationMs)
   }
 
@@ -899,10 +913,15 @@ registerMiniapp((session) => {
 
   // --- 단어 구간 --------------------------------------------------------------
 
-  /** 구간 상태와 안전망 타이머를 함께 비운다. 닫는 경로가 셋이라 한 곳에 모았다. */
+  /**
+   * 구간 상태와 안전망 타이머를 함께 비운다. 닫는 경로 넷(result / 안전망 /
+   * 오류 / 스트림 종료)이 전부 여기를 지나므로 불도 여기서 되돌린다.
+   */
   function clearWordSegment(): void {
-    if (wordSegment?.timer !== undefined) clearTimeout(wordSegment.timer)
+    if (wordSegment === undefined) return
+    if (wordSegment.timer !== undefined) clearTimeout(wordSegment.timer)
     wordSegment = undefined
+    setWordLed(false)
   }
 
   /**
@@ -927,6 +946,7 @@ registerMiniapp((session) => {
         return
       }
       wordSegment = {phase: "open", startedAt: Date.now(), timer: undefined}
+      setWordLed(true)
       console.log("[Word] 구간 시작")
       return
     }
@@ -1016,6 +1036,8 @@ registerMiniapp((session) => {
         const startedAt = wordSegment?.startedAt ?? Date.now()
         clearWordSegment()
         wordSegment = {phase: "open", startedAt, timer: undefined}
+        // 서버 기준으로는 열린 구간이라 불도 열림으로 되돌린다.
+        setWordLed(true)
         armWordTimer(WORD_MAX_SECONDS_FALLBACK)
         break
       }
@@ -1045,11 +1067,14 @@ registerMiniapp((session) => {
     clearLedFlashTimer()
     // streaming 을 벗어나면 열린 구간은 갈 곳이 없다. 서버도 열린 구간을 결과
     // 없이 버리므로 word_end 는 보내지 않는다.
-    if (appState === "streaming" && wordSegment !== undefined) {
+    const leavingStreaming = appState === "streaming" && wordSegment !== undefined
+    appState = next
+    // 정리를 appState 를 옮긴 뒤로 미룬다. 먼저 하면 clearWordSegment 안의
+    // restoreLed 가 옛 상태의 불을 한 번 켰다가 곧바로 새 상태로 덮인다.
+    if (leavingStreaming) {
       console.log("[Word] streaming 종료 — 구간 정리")
       clearWordSegment()
     }
-    appState = next
     publishStreamState()
   }
 
