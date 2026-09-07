@@ -168,6 +168,10 @@ _initialization_error: RecognitionModelUnavailableError | None = None
 _model_lock = threading.Lock()
 
 
+_predictor = None
+_predictor_lock = threading.Lock()
+
+
 def get_recognition_model():
     """모델을 한 번만 읽어 재사용한다. 실패했으면 같은 예외를 즉시 돌려준다.
 
@@ -177,14 +181,20 @@ def get_recognition_model():
     """
     global _model, _initialization_error
 
+    # 실패를 캐시보다 먼저 본다. 모델은 올라왔지만 워밍업 검사(라벨 수,
+    # 시퀀스 길이)에서 걸린 경우가 있는데, _model 만 보면 그 모델을 그대로
+    # 쓰게 된다. 검사에 걸렸다는 것은 이 모델의 출력을 라벨로 옮기면
+    # 틀린 단어가 나온다는 뜻이므로, 조용히 쓰는 것이 가장 나쁘다.
+    if _initialization_error is not None:
+        raise _initialization_error
     if _model is not None:
         return _model
 
     with _model_lock:
-        if _model is not None:
-            return _model
         if _initialization_error is not None:
             raise _initialization_error
+        if _model is not None:
+            return _model
         try:
             _model = load_recognition_model()
         except RecognitionModelUnavailableError as exc:
@@ -200,22 +210,108 @@ def get_recognition_model():
 def preload_recognition_model() -> bool:
     """기동 시 모델을 미리 올린다. 실패해도 예외를 밖으로 내지 않는다.
 
-    아직 lifespan 에 연결하지 않았다. 추론을 실제로 돌리는 단계에서 붙인다 —
-    지금 붙이면 쓰지도 않는 모델 때문에 기동이 수 초 느려진다.
+    main.py 의 lifespan 에서 부른다. 3~8초가 걸리므로 첫 단어에서 올리면
+    그 사용자만 그 시간을 통째로 기다린다.
+
+    실패해도 기동은 계속한다 - 좌표 추출은 그대로 되고, /health 의 loaded 가
+    false 로 나가 상태를 구분할 수 있다. 실패 사유는 여기 로그에만 남긴다.
+    서버 절대경로가 들어 있어서 /health 로 내보내지 않는다.
     """
     try:
         get_recognition_model()
+        _warm_up()
     except RecognitionModelUnavailableError as exc:
         logger.error(
             "Recognition model unavailable; word recognition is disabled",
             extra={"error": str(exc)},
         )
         return False
+    except Exception as exc:
+        # 라벨 파일 없음, 그래프 실행 실패, 설정 불일치. 여기서 못 잡으면
+        # 첫 word_end 에서 터지고 그 연결이 끊긴다.
+        logger.error(
+            "Recognition pipeline is not usable; word recognition is disabled",
+            extra={"error": str(exc)},
+            exc_info=True,
+        )
+        _remember_failure(exc)
+        return False
     return True
 
 
+def _warm_up() -> None:
+    """모델을 올린 뒤 실제로 한 번 돌려본다.
+
+    make_predictor 는 tf.function 객체만 만든다. 그래프 트레이싱은 첫 호출
+    때 일어나고 전이(transformer)라 0.5~3초가 걸린다. 여기서 하지 않으면
+    재시작 후 첫 단어를 말한 사용자가 그 시간을 통째로 기다린다.
+
+    라벨 파일도 같이 확인한다. 모델은 있는데 word_labels.json 이 없으면
+    /health 는 loaded: true 를 보고하고, 첫 word_end 에서 LabelError 가
+    나서 연결이 끊긴다. 기동 로그로 드러나는 편이 낫다.
+    """
+    import numpy as np
+
+    from app.config import WORD_TARGET_FRAMES
+    from app.services.label_service import all_words
+
+    if WORD_TARGET_FRAMES != SEQUENCE_LENGTH:
+        # 환경변수로 바꿀 수 있는 값이라 오타가 그대로 통과한다. 그러면
+        # 서버는 멀쩡히 뜨고 /health 도 loaded: true 인데, 모든 word_end 가
+        # shape 불일치로 실패한다.
+        raise RuntimeError(
+            f"WORD_TARGET_FRAMES={WORD_TARGET_FRAMES} but the model expects "
+            f"{SEQUENCE_LENGTH}."
+        )
+
+    words = all_words()
+    if len(words) != NUM_CLASSES:
+        raise RuntimeError(
+            f"Label file has {len(words)} words but the model has "
+            f"{NUM_CLASSES} classes."
+        )
+
+    predictor = get_recognition_predictor()
+    predictor(np.zeros((1, SEQUENCE_LENGTH, FEATURE_DIM), dtype=np.float32))
+    logger.info(
+        "Recognition model ready",
+        extra={"classes": NUM_CLASSES, "sequence_length": SEQUENCE_LENGTH},
+    )
+
+
+def _remember_failure(exc: Exception) -> None:
+    """이후 호출도 같은 이유로 실패하게 만든다. 매번 재시도하지 않는다."""
+    global _initialization_error
+    _initialization_error = RecognitionModelUnavailableError(str(exc))
+
+
+def get_recognition_predictor():
+    """추론 함수. 모델과 마찬가지로 한 번만 만든다.
+
+    make_predictor 는 호출할 때마다 새 tf.function 과 그래프를 만든다.
+    단어마다 부르면 그래프가 쌓이고 첫 호출마다 트레이싱 비용을 다시 낸다.
+    """
+    global _predictor
+    # get_recognition_model 과 같은 이유로 실패를 먼저 본다.
+    if _initialization_error is not None:
+        raise _initialization_error
+    if _predictor is not None:
+        return _predictor
+    with _predictor_lock:
+        if _initialization_error is not None:
+            raise _initialization_error
+        if _predictor is None:
+            _predictor = make_predictor(get_recognition_model())
+    return _predictor
+
+
 def recognition_model_available() -> bool:
-    return _model is not None
+    """단어를 인식할 수 있는 상태인가.
+
+    모델 객체가 있는 것만으로는 부족하다. 워밍업 검사에 걸렸으면 그
+    모델로 낸 단어는 믿을 수 없으므로 /health 도 loaded: false 여야 한다.
+    """
+    return _model is not None and _initialization_error is None
 
 
 def recognition_model_error() -> str | None:

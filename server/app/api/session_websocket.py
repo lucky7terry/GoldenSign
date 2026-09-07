@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from app.config import (
     FRAME_QUEUE_MAX_SIZE,
     MAX_CONCURRENT_RECOGNITIONS,
+    WORD_DRAIN_TIMEOUT_SECONDS,
     WORD_MAX_SECONDS,
     WS_IDLE_TIMEOUT_SECONDS,
 )
@@ -37,6 +38,11 @@ from app.services.model_service import (
     get_model_health_status,
     public_result,
     recognize_frame_from_image_bytes,
+)
+from app.services.recognition_model import RecognitionModelUnavailableError
+from app.services.recognition_service import (
+    WordRecognition,
+    recognize_word_segment,
 )
 from app.services.word_segment_service import (
     WordAlreadyStarted,
@@ -99,6 +105,13 @@ class FrameRecognitionJob:
     message: FrameMessage
     image_bytes: bytes
     captured_at_ms: float | None
+
+
+def _word_result(recognition: WordRecognition | None) -> dict:
+    """클라이언트로 나갈 result. 모델이 없으면 단어를 주장하지 않는다."""
+    if recognition is None:
+        return {"text": None, "confidence": 0.0, "is_final": True}
+    return recognition.public()
 
 
 def _utc_now_iso():
@@ -259,6 +272,28 @@ async def _recognition_worker(
             frame_queue.task_done()
 
 
+def _close_word_and_recognize(session_id: str, word_generation: int):
+    """구간을 닫고 단어까지 판정한다. executor 에서 돈다.
+
+    end_word 안의 특징 변환(30fps 복원 -> build_features -> 60프레임)과
+    모델 추론을 합치면 단어당 20ms 쯤이다. 이벤트 루프에서 하면 그동안
+    다른 연결의 프레임 처리와 ping 응답이 전부 멈춘다.
+
+    인식 모델이 없으면 recognition 이 None 이다 - 구간은 정상적으로
+    닫히고 좌표 수집도 계속된다. 단어만 주장하지 않는다.
+    """
+    segment = word_store.end_word(session_id, word_generation)
+    try:
+        recognition = recognize_word_segment(segment.sequence)
+    except RecognitionModelUnavailableError as exc:
+        logger.warning(
+            "Recognition model unavailable; returning no word",
+            extra={"session_id": session_id, "error": str(exc)},
+        )
+        recognition = None
+    return segment, recognition
+
+
 def _decode_frame_image_data(image_data: str) -> bytes:
     return decode_base64_image_data(image_data)
 
@@ -368,8 +403,46 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         close_reason: str,
     ) -> str:
         """구간을 닫고 결과를 보낸다. "closed" | "too_short" | "not_open"."""
+        loop = asyncio.get_running_loop()
+
+        # 큐에 남은 프레임을 먼저 소진한다. dev-0.2 frame 경로는 ACK 를
+        # 먼저 보내고 인식은 워커가 나중에 하므로, 여기서 바로 닫으면
+        # "받았다"고 답해 놓은 프레임이 구간에서 빠진다. 사용자가 동작을
+        # 마치고 곧바로 버튼을 누를 때가 정확히 그 순간이라, 빠지는 것은
+        # 하필 단어의 끝부분이다.
+        #
+        # 무한정 기다리지는 않는다. MediaPipe 가 5.8fps 까지 떨어지면 큐가
+        # 30장일 때 5초가 걸린다. 그동안 결과를 못 받느니 몇 장 빠진 채로
+        # 답을 주는 편이 낫다. 세마포어를 잡기 전에 기다려야 워커가
+        # 세마포어를 못 얻어 서로 막히는 일이 없다.
+        if WORD_DRAIN_TIMEOUT_SECONDS > 0 and not frame_queue.empty():
+            pending = frame_queue.qsize()
+            try:
+                await asyncio.wait_for(
+                    frame_queue.join(),
+                    timeout=WORD_DRAIN_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Word segment closed with frames still in the queue",
+                    extra={
+                        "session_id": session_id,
+                        "pending_at_start": pending,
+                        "pending_now": frame_queue.qsize(),
+                    },
+                )
+
         try:
-            segment = word_store.end_word(session_id, word_generation)
+            # 프레임 경로와 같은 한도를 쓴다. 구간 마감은 특징 변환과 추론이
+            # 붙어 있어 프레임 한 장보다 무겁고, 기본 executor 를 MediaPipe 와
+            # 나눠 쓴다. 여기만 무제한이면 그 한도가 의미를 잃는다.
+            async with _recognition_semaphore:
+                segment, recognition = await loop.run_in_executor(
+                    None,
+                    _close_word_and_recognize,
+                    session_id,
+                    word_generation,
+                )
         except (WordNotStarted, WordSessionClosed):
             return "not_open"
         except WordTooShort as exc:
@@ -387,31 +460,64 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                 activity,
             )
             return "too_short"
+        except Exception:
+            # 여기서 새면 예외가 수신 루프를 뚫고 나가 연결이 끊긴다.
+            # 클라이언트는 result 도 error 도 못 받고, 로그에는 session_id
+            # 없는 ASGI 트레이스백만 남는다. 라벨 파일 문제, 텐서플로 런타임
+            # 오류, 입력 shape 불일치가 전부 이 경로다.
+            #
+            # code 는 프레임 경로의 model_unavailable 과 다르게 둔다. 앱은
+            # 프레임 한 장이 실패한 것(계속 보내면 됨)과 구간 판정이 실패한
+            # 것(word_start 부터 다시)을 구분해야 하는데, 같은 code 면
+            # message 문자열을 비교하는 수밖에 없다.
+            logger.exception(
+                "Word finalization failed",
+                extra={"session_id": session_id},
+            )
+            await _send_json(
+                websocket,
+                send_lock,
+                error_message(
+                    WORD_SCHEMA_VERSION,
+                    session_id,
+                    "word_recognition_failed",
+                    "Word recognition failed.",
+                    finalize_client_message_id,
+                    retryable=True,
+                ),
+                activity,
+            )
+            return "closed"
 
-        # segment.sequence 는 (WORD_TARGET_FRAMES, 411) 이다. 다음 PR 에서
-        # 이 배열이 build_features -> 모델 -> 단어로 이어진다. 지금은
-        # 구간을 올바르게 모으는 것까지가 범위라 text 는 null 로 둔다.
         metadata = segment.metadata()
         metadata["close_reason"] = close_reason
-        await _send_json(
-            websocket,
-            send_lock,
-            {
-                "type": "result",
-                "schema_version": WORD_SCHEMA_VERSION,
+
+
+        payload = {
+            "type": "result",
+            "schema_version": WORD_SCHEMA_VERSION,
+            "session_id": session_id,
+            "client_message_id": finalize_client_message_id,
+            "result": _word_result(recognition),
+            "word": metadata,
+            "model": get_model_health_status(),
+            "processed_at": _utc_now_iso(),
+        }
+        if recognition is not None:
+            # 거절당했을 때 무엇이 1위였는지 남긴다. 임계값을 조정할 때
+            # 이 값이 없으면 왜 안 나왔는지 알 수 없다.
+            payload["recognition"] = recognition.detail()
+
+        logger.info(
+            "Word recognized" if recognition is not None else "Word closed",
+            extra={
                 "session_id": session_id,
-                "client_message_id": finalize_client_message_id,
-                "result": {
-                    "text": None,
-                    "confidence": 0.0,
-                    "is_final": True,
-                },
-                "word": metadata,
-                "model": get_model_health_status(),
-                "processed_at": _utc_now_iso(),
+                "word_index": segment.word_index,
+                "close_reason": close_reason,
+                **(recognition.detail() if recognition is not None else {}),
             },
-            activity,
         )
+        await _send_json(websocket, send_lock, payload, activity)
         return "closed"
 
     async def auto_close_word(timer_client_message_id: str | None):
