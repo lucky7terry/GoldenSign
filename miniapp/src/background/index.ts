@@ -422,6 +422,35 @@ function ledCommandFor(state: AppState): LedCommand {
 }
 
 /**
+ * 단어 구간 LED. 상태 매핑(ledCommandFor)과 별개의 축이라 8개 상태 어디에도
+ * 넣지 않는다. 열림만 유지형이고 나머지 셋은 FLASH_MS 동안만 얹는다.
+ */
+const WORD_OPEN_LED: LedCommand = {kind: "solid", color: "orange"}
+/** 결과 있음. */
+const RESULT_HIGH_LED: LedCommand = {kind: "solid", color: "white"}
+/** 결과 없음. */
+const RESULT_LOW_LED: LedCommand = {kind: "blink", color: "orange"}
+/** 거절/오류. */
+const REJECT_LED: LedCommand = {kind: "blink", color: "red"}
+
+/** 얹는 불의 지속 시간. */
+const FLASH_MS = 600
+
+/**
+ * flash 전용 깜빡임 주기. 기존 400/400 은 FLASH_MS 안에 한 번밖에 안 보인다.
+ */
+const FLASH_BLINK_ON_MS = 120
+const FLASH_BLINK_OFF_MS = 120
+
+/**
+ * durationMs 안에 끝나는 깜빡임 횟수. LED_BLINK_COUNT(30초 기준 37회)를 그대로
+ * 쓰면 복귀 명령 뒤에도 깜빡임이 한참 살아 있을 수 있어 따로 센다.
+ */
+function flashBlinkCount(durationMs: number): number {
+  return Math.max(1, Math.floor(durationMs / (FLASH_BLINK_ON_MS + FLASH_BLINK_OFF_MS)))
+}
+
+/**
  * `hasLight` 는 GlassesCapabilities 의 선언된 표면에 없다. summarizeCapabilities
  * 가 읽는 다른 필드들과 마찬가지로 `[key: string]: unknown` 인덱스 시그니처를
  * 타고 들어온다. 캐시하지 않고 매번 읽는 이유는 세션 도중 기기가 바뀌는 경우
@@ -561,15 +590,24 @@ registerMiniapp((session) => {
   /** 진행 중인 flash 의 복귀 타이머. 하나뿐이라 겹쳐 부르면 앞의 것을 덮는다. */
   let ledFlashTimer: ReturnType<typeof setTimeout> | undefined
 
-  /** 명령에 해당하는 LED Promise 를 만들기만 한다(await 하지 않는다). */
-  function sendLed(command: LedCommand) {
+  /**
+   * 명령에 해당하는 LED Promise 를 만들기만 한다(await 하지 않는다).
+   * blink 인자는 기본값이 기존 값이라 상태 LED 의 동작은 그대로다 — 짧게 얹는
+   * flash 만 다른 주기/횟수를 넘긴다.
+   */
+  function sendLed(
+    command: LedCommand,
+    blinkOnMs: number = LED_BLINK_ON_MS,
+    blinkOffMs: number = LED_BLINK_OFF_MS,
+    blinkCount: number = LED_BLINK_COUNT,
+  ) {
     switch (command.kind) {
       case "off":
         return session.led.turnOff()
       case "solid":
         return session.led.solid(command.color, LED_HOLD_MS)
       case "blink":
-        return session.led.blink(command.color, LED_BLINK_ON_MS, LED_BLINK_OFF_MS, LED_BLINK_COUNT)
+        return session.led.blink(command.color, blinkOnMs, blinkOffMs, blinkCount)
     }
   }
 
@@ -602,6 +640,25 @@ registerMiniapp((session) => {
     }
   }
 
+  /**
+   * 구간 열림은 잠깐이 아니라 열려 있는 내내 유지돼야 해서 flash 가 아니다.
+   * 닫을 때는 가드를 풀고 현재 상태의 불로 되돌린다.
+   */
+  function setWordLed(open: boolean): void {
+    if (!deviceHasLight(session.capabilities)) return
+    if (open) {
+      console.log("[LED] word open ->", JSON.stringify(WORD_OPEN_LED))
+      try {
+        void sendLed(WORD_OPEN_LED).catch((err) => logLedError("word open", err))
+      } catch (err) {
+        logLedError("word open 동기 예외", err)
+      }
+      return
+    }
+    lastAppliedLedState = undefined
+    applyLed(appState)
+  }
+
   function clearLedFlashTimer(): void {
     if (ledFlashTimer !== undefined) {
       clearTimeout(ledFlashTimer)
@@ -619,8 +676,15 @@ registerMiniapp((session) => {
     clearLedFlashTimer()
     console.log("[LED] flash", JSON.stringify(command), `${durationMs}ms`)
 
+    // blink 는 durationMs 안에 끝나는 짧은 주기로 쏜다. 복귀 뒤에도 깜빡임이
+    // 남는 것을 SDK 가 멈춰 준다는 보장이 없다.
     try {
-      void sendLed(command).catch((err) => logLedError("flash", err))
+      void sendLed(
+        command,
+        FLASH_BLINK_ON_MS,
+        FLASH_BLINK_OFF_MS,
+        flashBlinkCount(durationMs),
+      ).catch((err) => logLedError("flash", err))
     } catch (err) {
       logLedError("flash 동기 예외", err)
     }
