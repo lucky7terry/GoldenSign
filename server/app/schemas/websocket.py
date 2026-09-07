@@ -47,3 +47,15 @@ class StreamStartMessage(WebSocketMessage):
 class StreamStopMessage(WebSocketMessage):
     type: Literal["stream_stop"]
     stream_id: str = Field(min_length=1)
+
+
+class WordStartMessage(WebSocketMessage):
+    """한 단어의 시작 표시. 이 시점부터 word_end 까지의 프레임만 모은다."""
+
+    type: Literal["word_start"]
+
+
+class WordEndMessage(WebSocketMessage):
+    """한 단어의 끝 표시. 서버는 모은 구간으로 결과를 낸다."""
+
+    type: Literal["word_end"]

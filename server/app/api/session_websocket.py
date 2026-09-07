@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from app.config import (
     FRAME_QUEUE_MAX_SIZE,
     MAX_CONCURRENT_RECOGNITIONS,
+    WORD_MAX_SECONDS,
     WS_IDLE_TIMEOUT_SECONDS,
 )
 from app.constants import (
@@ -17,6 +18,7 @@ from app.constants import (
     SCHEMA_VERSION,
     SUPPORTED_SCHEMA_VERSIONS,
     WEBRTC_SCHEMA_VERSION,
+    WORD_SCHEMA_VERSION,
 )
 from app.error import error_message
 from app.schemas.websocket import (
@@ -36,7 +38,13 @@ from app.services.model_service import (
     public_result,
     recognize_frame_from_image_bytes,
 )
-from app.services.sequence_service import SequenceSessionClosed, sequence_store
+from app.services.word_segment_service import (
+    WordAlreadyStarted,
+    WordNotStarted,
+    WordSessionClosed,
+    WordTooShort,
+    word_store,
+)
 from app.services.session_service import (
     activate_recognition_session,
     validate_recognition_session,
@@ -79,10 +87,32 @@ class ConnectionActivity:
 class FrameRecognitionJob:
     message: FrameMessage
     image_bytes: bytes
+    captured_at_ms: float | None
 
 
 def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_captured_at_ms(captured_at: str | None) -> float | None:
+    """클라이언트가 준 촬영 시각을 ms 로. 못 읽으면 None.
+
+    단어 구간 안의 상대 간격만 쓰므로 클라이언트 시계가 서버와 어긋나
+    있어도 상관없다. 한 구간 안에서 같은 시계면 된다.
+    """
+    # WebSocketMessage 가 extra="allow" 라 스키마를 통과한 값이 항상
+    # 문자열이라는 보장이 없다. 파서에서 AttributeError 가 나면 그 프레임
+    # 전체가 model_unavailable 로 떨어진다.
+    if not isinstance(captured_at, str) or not captured_at:
+        return None
+    try:
+        parsed = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    try:
+        return parsed.timestamp() * 1000.0
+    except (OSError, OverflowError, ValueError):
+        return None
 
 
 def _validate_common_message(message: WebSocketMessage, session_id: str):
@@ -121,7 +151,7 @@ async def _run_frame_recognition(
     websocket: WebSocket,
     send_lock: asyncio.Lock,
     session_id: str,
-    sequence_generation: int,
+    word_generation: int,
     job: FrameRecognitionJob,
 ):
     frame_message = job.message
@@ -134,7 +164,8 @@ async def _run_frame_recognition(
                 recognize_frame_from_image_bytes,
                 job.image_bytes,
                 session_id,
-                sequence_generation,
+                word_generation,
+                job.captured_at_ms,
             )
         payload = {
             "type": "result",
@@ -157,7 +188,7 @@ async def _run_frame_recognition(
             client_message_id,
             retryable=False,
         )
-    except SequenceSessionClosed:
+    except WordSessionClosed:
         return
     except MediaPipeUnavailableError as exc:
         # 모델 파일이 없는 상태다. 다시 보내도 결과가 같으므로 재시도시키지 않는다.
@@ -200,7 +231,7 @@ async def _recognition_worker(
     websocket: WebSocket,
     send_lock: asyncio.Lock,
     session_id: str,
-    sequence_generation: int,
+    word_generation: int,
     frame_queue: asyncio.Queue[FrameRecognitionJob],
 ):
     while True:
@@ -210,7 +241,7 @@ async def _recognition_worker(
                 websocket,
                 send_lock,
                 session_id,
-                sequence_generation,
+                word_generation,
                 job,
             )
         finally:
@@ -245,7 +276,10 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         },
     )
     send_lock = asyncio.Lock()
-    sequence_generation = sequence_store.start_session(session_id)
+    word_generation = word_store.start_session(session_id)
+    # 이 연결이 연 스트림. 종료할 때 이것만 닫는다 - session_id 만으로
+    # 닫으면 재접속한 다른 연결의 스트림을 끊는다.
+    started_stream_id: str | None = None
     frame_queue: asyncio.Queue[FrameRecognitionJob] = asyncio.Queue(
         maxsize=FRAME_QUEUE_MAX_SIZE,
     )
@@ -254,13 +288,141 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
             websocket,
             send_lock,
             session_id,
-            sequence_generation,
+            word_generation,
             frame_queue,
         )
     )
 
     async def send_stream_payload(payload: dict):
         await _send_json(websocket, send_lock, payload, activity)
+
+    def touch_activity() -> None:
+        """WHEP 프레임을 하나 처리했다.
+
+        단어 모드로 바뀌면서 프레임마다 나가던 result 가 없어졌다. 그래서
+        스트리밍 중에도 서버 송신이 거의 없고, 유휴 판정이 클라이언트 ping
+        에만 의존하게 됐다. 프레임을 처리하고 있다는 사실 자체를 활동으로
+        쳐서 서버가 스스로 판단할 수 있게 한다.
+        """
+        activity.touch()
+
+    # 열린 단어 구간을 WORD_MAX_SECONDS 뒤에 서버가 알아서 닫는 타이머.
+    # 사용자가 끝 표시를 잊어도 결과는 나온다.
+    word_timer: asyncio.Task | None = None
+    # 자동 종료 타이머가 이미 결과를 만들어 보내는 중인지. 이 상태에서
+    # 취소하면 결과가 중간에 잘려서 사용자는 아무것도 못 받는다.
+    word_timer_finalizing = False
+    # 자동 종료로 이미 닫힌 뒤에 word_end 가 도착했는지. 사용자는 잘못한
+    # 것이 없으므로 오류가 아니라 ack 로 답한다.
+    auto_closed_pending = False
+
+    def cancel_word_timer():
+        """아직 대기 중인 자동 종료 타이머만 취소한다.
+
+        이미 결과를 만들어 보내는 중이면 건드리지 않는다. 그 시점의 취소는
+        구간을 닫아놓고 결과는 안 보낸 상태로 끝나서, 사용자가 단어를
+        통째로 잃는다. 끝난 뒤 정리는 바깥 finally 가 한다.
+        """
+        nonlocal word_timer
+        if word_timer is not None and not word_timer_finalizing:
+            word_timer.cancel()
+            word_timer = None
+
+    async def finalize_word(
+        finalize_client_message_id: str | None,
+        close_reason: str,
+    ) -> str:
+        """구간을 닫고 결과를 보낸다. "closed" | "too_short" | "not_open"."""
+        try:
+            segment = word_store.end_word(session_id, word_generation)
+        except (WordNotStarted, WordSessionClosed):
+            return "not_open"
+        except WordTooShort as exc:
+            await _send_json(
+                websocket,
+                send_lock,
+                error_message(
+                    WORD_SCHEMA_VERSION,
+                    session_id,
+                    "word_too_short",
+                    str(exc),
+                    finalize_client_message_id,
+                    retryable=True,
+                ),
+                activity,
+            )
+            return "too_short"
+
+        # segment.sequence 는 (WORD_TARGET_FRAMES, 411) 이다. 다음 PR 에서
+        # 이 배열이 build_features -> 모델 -> 단어로 이어진다. 지금은
+        # 구간을 올바르게 모으는 것까지가 범위라 text 는 null 로 둔다.
+        metadata = segment.metadata()
+        metadata["close_reason"] = close_reason
+        await _send_json(
+            websocket,
+            send_lock,
+            {
+                "type": "result",
+                "schema_version": WORD_SCHEMA_VERSION,
+                "session_id": session_id,
+                "client_message_id": finalize_client_message_id,
+                "result": {
+                    "text": None,
+                    "confidence": 0.0,
+                    "is_final": True,
+                },
+                "word": metadata,
+                "model": get_model_health_status(),
+                "processed_at": _utc_now_iso(),
+            },
+            activity,
+        )
+        return "closed"
+
+    async def auto_close_word(timer_client_message_id: str | None):
+        nonlocal auto_closed_pending, word_timer, word_timer_finalizing
+        try:
+            await asyncio.sleep(WORD_MAX_SECONDS)
+        except asyncio.CancelledError:
+            # 삼키지 않는다. 바깥 gather 가 취소로 인지해야 한다.
+            raise
+        # word_timer 를 여기서 None 으로 만들면 안 된다. 아래 send 가
+        # await 라서, 그 사이에 연결이 끊기면 finally 가 이 태스크를
+        # 놓치고 고아로 남는다(websocket 과 send_lock 을 붙잡은 채로).
+        # 끝난 태스크를 cancel 하는 것은 무해하므로 참조를 그대로 둔다.
+        # 결과를 보내기 "전에" 세운다. 여기서부터 finalize_word 안의 send 는
+        # await 라서, 바로 뒤에 도착한 word_end 의 cancel 이 중간을 자를 수
+        # 있다. 그때 이 값이 아직 False 면 사용자는 잘못한 게 없는데
+        # word_not_started 오류를 받는다.
+        auto_closed_pending = True
+        word_timer_finalizing = True
+        logger.info(
+            "Word segment auto-closed",
+            extra={
+                "session_id": session_id,
+                "max_seconds": WORD_MAX_SECONDS,
+            },
+        )
+        try:
+            await finalize_word(timer_client_message_id, "timeout")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - 아래에서 남기고 삼킨다
+            # 소켓이 이미 죽었을 때 올라오는 예외는 ASGI 서버 구현마다
+            # 다르다(RuntimeError / ConnectionClosed / ...). 좁게 잡으면
+            # "Task exception was never retrieved" 로 세션 정보 없이
+            # 튀어나온다. 넓게 잡고 여기서 남긴다.
+            logger.info(
+                "Could not deliver auto-closed word result",
+                extra={"session_id": session_id},
+                exc_info=True,
+            )
+        finally:
+            # 반드시 내려야 한다. 이 값이 True 로 남으면 cancel_word_timer 가
+            # 영구히 무력화되고, 그 뒤 모든 word_start 가 이전 타이머를
+            # 살려둔 채 새 타이머를 만든다. 살아남은 타이머는 8초 뒤에
+            # "그때 열려 있던 다른 단어"를 잘라버린다.
+            word_timer_finalizing = False
 
     try:
         while True:
@@ -435,6 +597,9 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                         FrameRecognitionJob(
                             message=frame_message,
                             image_bytes=decoded_image,
+                            captured_at_ms=_parse_captured_at_ms(
+                                frame_message.captured_at
+                            ),
                         )
                     )
                 except asyncio.QueueFull:
@@ -518,6 +683,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                         webrtc_url=stream_message.webrtc_url,
                         client_message_id=client_message_id,
                         send_json=send_stream_payload,
+                        on_frame=touch_activity,
                     )
                 except ValueError as exc:
                     await _send_json(
@@ -553,6 +719,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                         )
                     )
                     continue
+                started_stream_id = stream_message.stream_id
                 await _send_json(
                     websocket,
                     send_lock,
@@ -596,10 +763,35 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     )
                     continue
 
-                await whep_pull_service.stop_stream(
+                stopped = await whep_pull_service.stop_stream(
                     session_id,
                     stream_message.stream_id,
                 )
+                if stopped:
+                    # 영상이 끊겼으므로 모으던 구간은 의미가 없다. 결과를
+                    # 내지 않고 버린다.
+                    cancel_word_timer()
+                    if word_store.abort_word(session_id, word_generation):
+                        logger.info(
+                            "Discarded open word segment on stream_stop",
+                            extra={
+                                "session_id": session_id,
+                                "stream_id": stream_message.stream_id,
+                            },
+                        )
+                else:
+                    # 지금 도는 스트림이 아니다. stop_stream 이 소유권 검사에
+                    # 걸러낸 경우(늦게 도착한 이전 스트림의 stop)이거나 애초에
+                    # 스트림이 없는 경우다. 여기서 구간을 버리면, 같은 연결에서
+                    # stream_start(A) -> stream_start(B) -> 늦은 stop(A) 순서일
+                    # 때 멀쩡히 도는 B 의 단어가 사라진다.
+                    logger.info(
+                        "Ignored stream_stop for a stream that is not running",
+                        extra={
+                            "session_id": session_id,
+                            "stream_id": stream_message.stream_id,
+                        },
+                    )
                 await _send_json(
                     websocket,
                     send_lock,
@@ -613,8 +805,118 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                         "received_at": _utc_now_iso(),
                     }
                 )
+            elif message_type == "word_start":
+                if message.schema_version != WORD_SCHEMA_VERSION:
+                    await _send_json(
+                        websocket,
+                        send_lock,
+                        error_message(
+                            WORD_SCHEMA_VERSION,
+                            session_id,
+                            "unsupported_schema_version",
+                            f"word_start requires {WORD_SCHEMA_VERSION}.",
+                            client_message_id,
+                        )
+                    )
+                    continue
+                session = validate_recognition_session(session_id)
+                if session is None:
+                    close_reason = "session_invalid"
+                    await websocket.close(code=1008)
+                    return
+
+                try:
+                    word_store.start_word(session_id, word_generation)
+                except WordAlreadyStarted:
+                    # 이미 열린 구간을 말없이 버리면 앞부분 프레임이
+                    # 사라진다. 앱이 상태를 정리하도록 알린다.
+                    await _send_json(
+                        websocket,
+                        send_lock,
+                        error_message(
+                            WORD_SCHEMA_VERSION,
+                            session_id,
+                            "word_already_started",
+                            "A word segment is already open. Send word_end first.",
+                            client_message_id,
+                            retryable=False,
+                        )
+                    )
+                    continue
+                except WordSessionClosed:
+                    close_reason = "session_invalid"
+                    await websocket.close(code=1008)
+                    return
+
+                auto_closed_pending = False
+                cancel_word_timer()
+                word_timer = asyncio.create_task(
+                    auto_close_word(client_message_id)
+                )
+                await _send_json(
+                    websocket,
+                    send_lock,
+                    {
+                        "type": "ack",
+                        "schema_version": WORD_SCHEMA_VERSION,
+                        "session_id": session_id,
+                        "client_message_id": client_message_id,
+                        "status": "word_start_accepted",
+                        "max_seconds": WORD_MAX_SECONDS,
+                        "received_at": _utc_now_iso(),
+                    }
+                )
+            elif message_type == "word_end":
+                if message.schema_version != WORD_SCHEMA_VERSION:
+                    await _send_json(
+                        websocket,
+                        send_lock,
+                        error_message(
+                            WORD_SCHEMA_VERSION,
+                            session_id,
+                            "unsupported_schema_version",
+                            f"word_end requires {WORD_SCHEMA_VERSION}.",
+                            client_message_id,
+                        )
+                    )
+                    continue
+
+                cancel_word_timer()
+                outcome = await finalize_word(client_message_id, "client")
+                if outcome == "not_open":
+                    if auto_closed_pending:
+                        # 8초가 먼저 지나서 서버가 이미 닫았다. 결과는
+                        # 이미 나갔으므로 오류가 아니다.
+                        auto_closed_pending = False
+                        await _send_json(
+                            websocket,
+                            send_lock,
+                            {
+                                "type": "ack",
+                                "schema_version": WORD_SCHEMA_VERSION,
+                                "session_id": session_id,
+                                "client_message_id": client_message_id,
+                                "status": "word_already_closed",
+                                "received_at": _utc_now_iso(),
+                            }
+                        )
+                    else:
+                        await _send_json(
+                            websocket,
+                            send_lock,
+                            error_message(
+                                WORD_SCHEMA_VERSION,
+                                session_id,
+                                "word_not_started",
+                                "No word segment is open. Send word_start first.",
+                                client_message_id,
+                                retryable=False,
+                            )
+                        )
             elif message_type == "stop":
                 close_reason = "client_stop"
+                cancel_word_timer()
+                word_store.abort_word(session_id, word_generation)
                 stop_session(session_id)
                 await websocket.close(code=1000)
                 return
@@ -634,10 +936,20 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         close_reason = "client_disconnect"
         return
     finally:
-        await whep_pull_service.stop_session(session_id)
+        # 취소될 수 없는 정리를 먼저 한다. 아래 await 에서 CancelledError 를
+        # 맞으면(서버 종료 등) 그 뒤 줄이 안 돌기 때문이다.
         recognition_worker.cancel()
+        pending_word_timer = word_timer
+        cancel_word_timer()
+        # 같은 session_id 로 이미 다른 연결이 이어받았다면 그쪽 상태를
+        # 건드리면 안 된다. 늦게 죽는 연결이 살아있는 연결을 지우는 것이
+        # 재접속 직후 세션이 원인 없이 죽는 흔한 경로다.
+        word_store.clear_session(session_id, word_generation)
+        if started_stream_id is not None:
+            await whep_pull_service.stop_stream(session_id, started_stream_id)
         await asyncio.gather(recognition_worker, return_exceptions=True)
-        sequence_store.clear_session(session_id)
+        if pending_word_timer is not None:
+            await asyncio.gather(pending_word_timer, return_exceptions=True)
         logger.info(
             "WebSocket closed",
             extra={

@@ -18,46 +18,73 @@ from app.config import (
     WHEP_RETRY_DELAY_SECONDS,
     WHEP_STUN_SERVER_URLS,
 )
-from app.constants import WEBRTC_SCHEMA_VERSION
+from app.constants import WEBRTC_SCHEMA_VERSION, WORD_SCHEMA_VERSION
 from app.error import error_message
 
 logger = logging.getLogger(__name__)
 
 SendJson = Callable[[dict], Awaitable[None]]
 
+# 단어 구간이 열려 있는 동안 진행 상황을 보내는 간격.
+_WORD_PROGRESS_INTERVAL_SECONDS = 1.0
+
 
 def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _public_result(result: dict) -> dict:
-    from app.services.model_service import public_result
-
-    return public_result(result)
-
-
-def _recognize_whep_frame(session_id: str, sequence_generation: int, image):
+def _recognize_whep_frame(
+    session_id: str,
+    word_generation: int,
+    image,
+    captured_at_ms: float | None,
+):
     from app.services.model_service import (
         get_model_health_status,
         recognize_frame_from_image,
     )
 
     return (
-        recognize_frame_from_image(image, session_id, sequence_generation),
+        recognize_frame_from_image(
+            image,
+            session_id,
+            word_generation,
+            captured_at_ms,
+        ),
         get_model_health_status(),
     )
 
 
-def _current_sequence_generation(session_id: str) -> int | None:
-    from app.services.sequence_service import sequence_store
+def _current_word_generation(session_id: str) -> int | None:
+    from app.services.word_segment_service import word_store
 
-    return sequence_store.current_generation(session_id)
+    return word_store.current_generation(session_id)
 
 
-def _is_sequence_session_closed(error: Exception) -> bool:
-    from app.services.sequence_service import SequenceSessionClosed
+def _is_word_session_closed(error: Exception) -> bool:
+    from app.services.word_segment_service import WordSessionClosed
 
-    return isinstance(error, SequenceSessionClosed)
+    return isinstance(error, WordSessionClosed)
+
+
+def _frame_timestamp_ms(video_frame) -> float | None:
+    """프레임의 촬영 시각(ms).
+
+    MediaPipe 가 30fps 입력을 다 따라가지 못해 프레임이 불규칙하게
+    버려지므로, 살아남은 프레임이 "언제" 찍혔는지가 있어야 단어 구간을
+    60프레임으로 줄일 때 시간축을 맞출 수 있다. pts 는 인코더가 붙인
+    값이라 서버의 처리 지연이 섞이지 않는다.
+
+    구간 안에서의 상대 간격만 쓰므로 기준점이 어디든 상관없다.
+    """
+    pts = getattr(video_frame, "pts", None)
+    time_base = getattr(video_frame, "time_base", None)
+    if pts is None or time_base is None:
+        return None
+    try:
+        return float(pts) * float(time_base) * 1000.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
 
 
 class WhepFrameProcessingStopped(Exception):
@@ -90,6 +117,8 @@ class WhepStreamHandle:
     client_message_id: str | None
     send_json: SendJson
     stop_event: asyncio.Event
+    # 프레임을 하나 처리할 때마다 부른다. WebSocket 유휴 판정용.
+    on_frame: Callable[[], None] | None = None
     task: asyncio.Task | None = None
 
 
@@ -106,6 +135,7 @@ class WhepPullService:
         webrtc_url: str,
         client_message_id: str | None,
         send_json: SendJson,
+        on_frame: Callable[[], None] | None = None,
     ) -> None:
         self._validate_whep_url(webrtc_url)
 
@@ -117,6 +147,7 @@ class WhepPullService:
             client_message_id=client_message_id,
             send_json=send_json,
             stop_event=stop_event,
+            on_frame=on_frame,
         )
 
         async with self._lock:
@@ -459,6 +490,8 @@ class WhepPullService:
         last_processed_log_at = monotonic()
         last_processed_frame_count = 0
         last_error_sent_at = 0.0
+        last_progress_sent_at = 0.0
+        last_progress_frame_count = 0
 
         while not handle.stop_event.is_set():
             try:
@@ -471,16 +504,18 @@ class WhepPullService:
 
             try:
                 image = video_frame.to_ndarray(format="bgr24")
-                sequence_generation = _current_sequence_generation(handle.session_id)
-                if sequence_generation is None:
+                captured_at_ms = _frame_timestamp_ms(video_frame)
+                word_generation = _current_word_generation(handle.session_id)
+                if word_generation is None:
                     continue
                 loop = asyncio.get_running_loop()
                 result, model_status = await loop.run_in_executor(
                     None,
                     _recognize_whep_frame,
                     handle.session_id,
-                    sequence_generation,
+                    word_generation,
                     image,
+                    captured_at_ms,
                 )
             except ValueError:
                 logger.exception(
@@ -493,7 +528,7 @@ class WhepPullService:
                 )
                 continue
             except Exception as exc:
-                if _is_sequence_session_closed(exc):
+                if _is_word_session_closed(exc):
                     raise WhepFrameProcessingStopped(
                         "Recognition session closed."
                     ) from exc
@@ -521,22 +556,52 @@ class WhepPullService:
                 continue
 
             processed_frame_count += 1
-            await handle.send_json(
-                {
-                    "type": "result",
-                    "schema_version": WEBRTC_SCHEMA_VERSION,
-                    "session_id": handle.session_id,
-                    "client_message_id": handle.client_message_id,
-                    "stream_id": handle.stream_id,
-                    "sequence_index": processed_frame_count,
-                    # 로그의 검출률 요약은 아래에서 원본 result 를 그대로 쓴다.
-                    "result": _public_result(result),
-                    "model": model_status,
-                    "processed_at": _utc_now_iso(),
-                }
-            )
-
             now = monotonic()
+            if handle.on_frame is not None:
+                handle.on_frame()
+
+            # 단어 모드에서는 프레임마다 result 를 보내지 않는다. 판정은
+            # word_end 한 번뿐이고, 그 전에 나가는 result 는 text 가 항상
+            # null 이라 앱이 쓸 것이 없다. 초당 10개씩 나가던 것을 구간이
+            # 열려 있는 동안 초당 1개의 진행 상황으로 줄인다.
+            word_state = result.get("word") or {}
+            if (
+                word_state.get("buffered")
+                and now - last_progress_sent_at >= _WORD_PROGRESS_INTERVAL_SECONDS
+            ):
+                # 프레임마다 나가던 result 를 없애면서 sequence_index 도
+                # 사라졌다. 미니앱이 그 값의 차이로 처리 속도를 표시하고
+                # 있었으므로(background/index.ts trackProcessedFps), 대신
+                # 쓸 값을 여기 싣는다. processed_frame_count 는 스트림
+                # 전체에 걸쳐 단조 증가한다 - 구간마다 0으로 돌아가는
+                # frame_count 와 다르다.
+                elapsed_since_progress = max(now - last_progress_sent_at, 1e-6)
+                processed_fps = (
+                    (processed_frame_count - last_progress_frame_count)
+                    / elapsed_since_progress
+                    if last_progress_sent_at > 0.0
+                    else None
+                )
+                last_progress_sent_at = now
+                last_progress_frame_count = processed_frame_count
+                await handle.send_json(
+                    {
+                        "type": "word_progress",
+                        "schema_version": WORD_SCHEMA_VERSION,
+                        "session_id": handle.session_id,
+                        "client_message_id": handle.client_message_id,
+                        "stream_id": handle.stream_id,
+                        "frame_count": word_state.get("frame_count", 0),
+                        "processed_frame_count": processed_frame_count,
+                        "processed_fps": (
+                            None if processed_fps is None
+                            else round(processed_fps, 2)
+                        ),
+                        "model": model_status,
+                        "processed_at": _utc_now_iso(),
+                    }
+                )
+
             if processed_frame_count == 1 or now - last_processed_log_at >= 5.0:
                 elapsed = max(now - last_processed_log_at, 0.001)
                 interval_processed_frames = (
