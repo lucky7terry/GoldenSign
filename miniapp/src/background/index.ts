@@ -904,7 +904,17 @@ registerMiniapp((session) => {
           ` span=${String(next.spanMs)}ms text=${JSON.stringify(next.text)}` +
           ` conf=${String(next.confidence)}`,
       )
+      if (next.resampledOnTime === false) {
+        console.warn("[Word] resampled_on_time=false — 입력에 촬영 시각이 안 붙었다")
+      }
       clearWordSegment()
+      // 구간을 닫은 뒤에 얹는다. 순서가 반대면 flash 복귀가 아직 살아 있는
+      // 구간을 보고 주황으로 돌아가 결과 색이 묻힌다.
+      //
+      // 판정은 서버가 끝냈고 text 가 그 결과다. 앱은 confidence 를 다시 보지
+      // 않는다 — 원본 text 유무만 본다.
+      const hasText = next.text !== null && next.text !== ""
+      flashLed(hasText ? RESULT_HIGH_LED : RESULT_LOW_LED, FLASH_MS)
     }
     // 모델 연결 전에는 text 가 null 이다. 채널 타입은 아직 string 이라 여기서만
     // 막아 둔다 — null 을 UI 까지 올릴지는 부르는 쪽을 만드는 커밋에서 정한다.
@@ -1015,17 +1025,22 @@ registerMiniapp((session) => {
     // clearWordSegment() 는 open 이든 closing 이든 지운다. word_end 를 보낸 뒤
     // result 대신 오류가 오는 경우가 있는데, closing 이 남으면 안전망 타이머가
     // 터질 때까지 버튼이 안 먹는다.
+    //
+    // 거절 깜빡임은 switch 뒤에서 한 번만 얹는다. 구간 정리·복원이 끝난 뒤 flash 복귀가 그 시점에 맞는 불을 고른다.
+    let rejected = false
     switch (err.code) {
       case "word_too_short":
         // 8프레임 미만. 서버는 이미 닫았으므로 앱도 닫는다.
         console.warn("[Word] 구간이 너무 짧습니다.")
         clearWordSegment()
+        rejected = true
         break
 
       case "word_not_started":
         // 앱은 열린 줄 알았는데 서버엔 없다. 앱을 닫아 서버에 맞춘다.
         console.warn("[Word] 서버에 열린 구간이 없습니다 — 앱 상태를 닫습니다")
         clearWordSegment()
+        rejected = true
         break
 
       case "word_already_started": {
@@ -1039,17 +1054,28 @@ registerMiniapp((session) => {
         // 서버 기준으로는 열린 구간이라 불도 열림으로 되돌린다.
         setWordLed(true)
         armWordTimer(WORD_MAX_SECONDS_FALLBACK)
+        rejected = true
         break
       }
 
-      case "model_unavailable":
+      case "word_recognition_failed":
         // 서버는 구간을 닫았는데 판정에 실패했다. result 가 오지 않는 유일한
         // 경로라 여기서 닫지 않으면 다음 짧게 누르기가 word_end 로 나간다.
-        // retryable 은 무시한다 — 다시 눌러도 대개 똑같이 실패한다.
+        // retryable=true 로 오지만 읽지 않는다 — 다시 누르는 것은 같은 구간의
+        // 재시도가 아니라 word_start 부터의 새 구간이다.
         console.warn("[Word] 서버 판정에 실패했습니다. — 구간을 닫습니다.")
         clearWordSegment()
+        rejected = true
+        break
+
+      case "model_unavailable":
+        // 프레임 한 장이 실패한 것이다(session_websocket.py:202,218). 수어하는
+        // 도중에도 오므로 구간을 닫지 않는다 — 닫으면 단어가 통째로 날아간다.
+        console.warn("[AI] 프레임 인식 실패 — 구간은 그대로 둔다")
         break
     }
+
+    if (rejected) flashLed(REJECT_LED, FLASH_MS)
 
     patch("error", {code: err.code, message: err.message, retryable: err.retryable})
   }
