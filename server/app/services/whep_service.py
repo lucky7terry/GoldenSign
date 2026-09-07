@@ -111,6 +111,23 @@ def _keypoint_summary(keypoints: dict) -> str:
 
 @dataclass
 class WhepStreamHandle:
+    """WHEP 스트림 연결 하나의 상태와 제어 핸들.
+
+    서버가 Cloudflare Stream WebRTC/WHEP 엔드포인트에서 영상을 당겨와
+    MediaPipe로 처리하고 인식 결과를 WebSocket으로 보내는 전체 파이프라인의
+    수명을 추적한다. 한 세션에 하나의 스트림이 대응되며, 재접속 시 이전
+    스트림은 닫힌다.
+
+    Attributes:
+        session_id: 인식 세션 ID
+        stream_id: 클라이언트가 보낸 Cloudflare 스트림 ID
+        webrtc_url: WHEP POST 엔드포인트 URL (https만 허용)
+        client_message_id: stream_start 메시지의 client_message_id (응답 추적용)
+        send_json: 이 스트림의 결과를 보낼 WebSocket send 함수
+        stop_event: 스트림 중지 신호 (set되면 프레임 수신/처리 즉시 종료)
+        on_frame: 프레임 처리 시마다 호출할 콜백 (WebSocket 유휴 판정 갱신용)
+        task: 프레임 수신/재시도를 담당하는 asyncio 태스크
+    """
     session_id: str
     stream_id: str
     webrtc_url: str
@@ -123,6 +140,29 @@ class WhepStreamHandle:
 
 
 class WhepPullService:
+    """WHEP 스트림 풀(pull) 서비스: WebRTC 영상을 서버가 직접 당겨와 처리.
+
+    스마트 안경 영상이 Cloudflare Stream을 거쳐 WHEP 엔드포인트로 제공되면,
+    서버가 aiortc로 WebRTC 연결을 맺어 프레임을 받아온다. 클라이언트는
+    Base64로 프레임을 전송할 필요 없이 WHEP URL만 보내면 된다. 각 세션당
+    하나의 스트림이 활성화되며, 재접속 시 이전 스트림은 자동으로 닫힌다.
+
+    주요 기능:
+        - WHEP POST/DELETE로 WebRTC 연결 생성/해제
+        - 프레임 수신 실패 시 제한된 횟수만큼 자동 재시도
+        - MediaPipe 키포인트 추출 후 단어 구간 버퍼에 적재
+        - 단어 구간이 열려 있는 동안 초당 1회 word_progress 전송
+
+    보안:
+        - HTTPS만 허용, 인증 정보 포함 URL 거부
+        - 허용 도메인 화이트리스트 (WHEP_ALLOWED_HOST_SUFFIXES)
+        - IP 주소 직접 접근 금지
+
+    타임아웃:
+        - WHEP_FIRST_FRAME_TIMEOUT_SECONDS: 첫 프레임 대기
+        - WHEP_FRAME_IDLE_TIMEOUT_SECONDS: 프레임 간 유휴 대기
+        - WHEP_MAX_RETRIES: 최대 재시도 횟수
+    """
     def __init__(self):
         self._streams: dict[str, WhepStreamHandle] = {}
         self._lock = asyncio.Lock()
@@ -137,6 +177,23 @@ class WhepPullService:
         send_json: SendJson,
         on_frame: Callable[[], None] | None = None,
     ) -> None:
+        """WHEP 스트림을 시작한다. 기존 스트림이 있으면 먼저 닫는다.
+
+        WebRTC 연결을 맺고 프레임을 받아와 MediaPipe로 처리하는 백그라운드
+        태스크를 시작한다. 연결 실패 시 제한된 횟수만큼 자동 재시도하며,
+        재시도 소진 시 stream_unavailable 오류를 클라이언트에 보낸다.
+
+        Args:
+            session_id: 인식 세션 ID (세션당 하나의 스트림만 활성화)
+            stream_id: 클라이언트가 보낸 Cloudflare 스트림 ID
+            webrtc_url: WHEP POST 엔드포인트 URL (보안 검증 필수)
+            client_message_id: stream_start 메시지의 ID (응답 추적용)
+            send_json: 결과를 보낼 WebSocket send 함수
+            on_frame: 프레임 처리 시마다 호출할 콜백 (선택)
+
+        Raises:
+            ValueError: webrtc_url이 보안 정책을 위반할 때
+        """
         self._validate_whep_url(webrtc_url)
 
         stop_event = asyncio.Event()
@@ -161,6 +218,20 @@ class WhepPullService:
             await self._cancel_stream(existing)
 
     async def stop_stream(self, session_id: str, stream_id: str | None = None) -> bool:
+        """지정한 세션의 WHEP 스트림을 중지한다.
+
+        프레임 수신 태스크를 취소하고 WebRTC 연결을 정리한다. stream_id를
+        지정하면 해당 스트림이 현재 활성화된 스트림과 일치할 때만 중지하며,
+        이는 늦게 도착한 이전 스트림의 stop 요청이 새 스트림을 끊지 못하게
+        막는다.
+
+        Args:
+            session_id: 인식 세션 ID
+            stream_id: 중지할 스트림 ID (None이면 소유권 검사 생략)
+
+        Returns:
+            실제로 스트림을 중지했으면 True, 스트림이 없거나 ID 불일치면 False
+        """
         async with self._lock:
             handle = self._streams.get(session_id)
             if handle is None:
@@ -185,6 +256,13 @@ class WhepPullService:
         return True
 
     async def stop_session(self, session_id: str) -> None:
+        """세션 종료 시 해당 세션의 WHEP 스트림을 정리한다.
+
+        stop_stream의 래퍼로, 세션 정리 흐름에서 호출된다.
+
+        Args:
+            session_id: 정리할 세션 ID
+        """
         await self.stop_stream(session_id)
 
     async def _get_stream(self, session_id: str) -> WhepStreamHandle | None:

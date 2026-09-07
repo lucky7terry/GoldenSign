@@ -85,6 +85,17 @@ class ConnectionActivity:
 
 @dataclass
 class FrameRecognitionJob:
+    """프레임 인식 작업 하나를 나타내는 데이터 컨테이너.
+
+    WebSocket으로 받은 Base64 프레임을 디코딩한 뒤 인식 워커 큐에 넣을 때
+    사용한다. 메시지 메타데이터(request_id, frame_index)와 이미지 바이트,
+    촬영 시각을 함께 묶어 워커 스레드가 비동기로 처리할 수 있게 한다.
+
+    Attributes:
+        message: 클라이언트가 보낸 원본 FrameMessage (메타데이터 보존용)
+        image_bytes: 디코딩된 이미지 바이트 (MediaPipe 입력)
+        captured_at_ms: 프레임 촬영 시각 (ms, 단어 구간 시간축 정렬용, 없으면 None)
+    """
     message: FrameMessage
     image_bytes: bytes
     captured_at_ms: float | None
@@ -254,6 +265,30 @@ def _decode_frame_image_data(image_data: str) -> bytes:
 
 @router.websocket("/v1/sessions/{session_id}/ws")
 async def stream_recognition_frames(websocket: WebSocket, session_id: str):
+    """WebSocket 엔드포인트: 실시간 수어 인식 프레임 스트리밍.
+
+    클라이언트는 세션을 생성한 뒤 이 엔드포인트에 연결하여 프레임 전송
+    또는 WHEP 스트림 시작을 요청하고, 서버로부터 인식 결과를 받는다.
+    단어 구간 모드(word_start/word_end)와 슬라이딩 윈도우 모드(frame)를
+    모두 지원하며, 한 연결에서 메시지 타입을 섞어 쓸 수 있다.
+
+    Args:
+        websocket: FastAPI WebSocket 연결 객체
+        session_id: POST /v1/sessions 로 생성한 세션 ID
+
+    주요 메시지 타입:
+        - hello: 연결 활성화
+        - frame: Base64 프레임 전송 (dev-0.2)
+        - stream_start/stream_stop: WHEP 스트림 제어 (dev-0.3)
+        - word_start/word_end: 단어 구간 표시 (dev-0.4)
+        - ping: 연결 유지
+        - stop: 세션 종료
+
+    연결 수명:
+        - WS_IDLE_TIMEOUT_SECONDS 동안 활동 없으면 자동 종료
+        - 단어 구간은 WORD_MAX_SECONDS 후 자동 닫힘
+        - 세션이 유효하지 않거나 스키마 오류 시 즉시 종료
+    """
     session = validate_recognition_session(session_id)
     if session is None:
         logger.info(
