@@ -57,6 +57,7 @@ import type {Channels, Snapshot} from "../shared/channels"
 import {
   AiClient,
   probeRuntime,
+  type AiAck,
   type AiClientState,
   type AiRecognitionResult,
   type AiServerError,
@@ -317,6 +318,15 @@ const MAX_RESULTS = 20
 const RESULT_THROTTLE_MS = 200
 
 /**
+ * word_start ack 에 `max_seconds` 가 없을 때만 쓰는 폴백(초). 서버의
+ * WORD_MAX_SECONDS 와 같은 값이지만, ack 가 준 값이 늘 우선이다.
+ */
+const WORD_MAX_SECONDS_FALLBACK = 8
+
+/** 안전망 타이머가 서버의 한도보다 더 기다리는 여유분. result 가 건너올 시간이다. */
+const WORD_TIMER_GRACE_MS = 1000
+
+/**
  * AiClient 의 7개짜리 상태를 UI 가 신경 쓰는 4개로 접는다. `AiClientState` 자체는
  * 일부러 두었다 — 이건 투영일 뿐 그 상태머신에 새 상태를 만드는 게 아니다.
  */
@@ -466,6 +476,13 @@ registerMiniapp((session) => {
    * 번째 롱프레스가 병렬 실행을 시작해서는 안 되기 때문이다.
    */
   let startInFlight = false
+  /**
+   * 열려 있는 단어 구간. 닫혀 있으면 undefined 다. `phase` 가 "closing" 인 구간은
+   * word_end 를 보내고 result 를 기다리는 중이다 — 진짜 닫힘은 result 도착이다.
+   */
+  let wordSegment:
+    | {phase: "open" | "closing"; startedAt: number; timer: ReturnType<typeof setTimeout> | undefined}
+    | undefined
 
   // "ready" 안에서 만든다. session.userId 는 CONNECT_ACK 이후에야 채워지기
   // 때문이다. 런타임 확인에 실패하면 undefined 로 남는다.
@@ -748,9 +765,95 @@ registerMiniapp((session) => {
   /** AiClient 가 result 를 받을 때마다 부르는 곳. fps 를 먼저 세고 방송한다. */
   function handleResult(next: AiRecognitionResult): void {
     trackProcessedFps(next.sequenceIndex)
+    // closeReason 은 단어 구간 result 에만 있다. 프레임 스트림 result 로는
+    // 구간을 닫지 않는다.
+    if (next.closeReason !== undefined) {
+      console.log(
+        `[Word] result close=${next.closeReason} frames=${String(next.wordFrameCount)}` +
+          ` span=${String(next.spanMs)}ms text=${JSON.stringify(next.text)}` +
+          ` conf=${String(next.confidence)}`,
+      )
+      clearWordSegment()
+    }
     // 모델 연결 전에는 text 가 null 이다. 채널 타입은 아직 string 이라 여기서만
     // 막아 둔다 — null 을 UI 까지 올릴지는 부르는 쪽을 만드는 커밋에서 정한다.
     publishResult({...next, text: next.text ?? ""})
+  }
+
+  // --- 단어 구간 --------------------------------------------------------------
+
+  /** 구간 상태와 안전망 타이머를 함께 비운다. 닫는 경로가 셋이라 한 곳에 모았다. */
+  function clearWordSegment(): void {
+    if (wordSegment?.timer !== undefined) clearTimeout(wordSegment.timer)
+    wordSegment = undefined
+  }
+
+  /**
+   * 짧게 누를 때마다 구간을 열고 닫는다. streaming 밖에서는 받지 않는다
+   */
+  function handleWordPress(): void {
+    if (appState !== "streaming") {
+      console.log("[Word] streaming 아님 — 무시. state=", appState)
+      return
+    }
+    const client = ai
+    if (client === undefined) {
+      console.warn("[Word] AI 클라이언트가 없다 — 무시")
+      return
+    }
+
+    if (wordSegment === undefined) {
+      // 전송에 실패했는데 열어 두면 서버는 구간을 모르는 채로 다음 누름이
+      // word_end 를 보낸다. true 를 받았을 때만 연다.
+      if (!client.sendWordStart()) {
+        console.warn("[Word] word_start 전송 실패 — 구간을 열지 않는다")
+        return
+      }
+      wordSegment = {phase: "open", startedAt: Date.now(), timer: undefined}
+      console.log("[Word] 구간 시작")
+      return
+    }
+
+    if (wordSegment.phase === "closing") {
+      console.log("[Word] 이미 닫는 중 — result 를 기다린다")
+      return
+    }
+
+    // 보낸 즉시 닫지 않는다. 진짜 닫힘은 result 도착이고, 실패하면 안전망
+    // 타이머가 열린 상태를 걷어낸다.
+    if (!client.sendWordEnd()) {
+      console.warn("[Word] word_end 전송 실패 — 안전망 타이머에 맡긴다")
+      return
+    }
+    wordSegment.phase = "closing"
+    console.log(`[Word] 구간 종료 요청. 길이=${Date.now() - wordSegment.startedAt}ms`)
+  }
+
+  /**
+   * AiClient 가 ack 를 받을 때마다 부르는 곳. word_start 가 받아들여진 뒤에야
+   * 안전망 타이머를 건다 — 한도(max_seconds)를 아는 것이 서버뿐이라서다.
+   */
+  function handleAck(ack: AiAck): void {
+    if (ack.status !== "word_start_accepted") return
+    if (wordSegment === undefined) {
+      console.warn("[Word] word_start_accepted 인데 열린 구간이 없다 — 무시")
+      return
+    }
+
+    let maxSeconds = ack.maxSeconds
+    if (maxSeconds === undefined) {
+      maxSeconds = WORD_MAX_SECONDS_FALLBACK
+      console.warn(`[Word] ack 에 max_seconds 가 없다 — ${WORD_MAX_SECONDS_FALLBACK}초로 폴백`)
+    }
+
+    if (wordSegment.timer !== undefined) clearTimeout(wordSegment.timer)
+    wordSegment.timer = setTimeout(() => {
+      // 서버가 자동 종료했으면 result 가 왔어야 한다. 안 왔으면 우리 쪽 상태만
+      // 남은 것이라 걷어낸다. word_end 는 다시 보내지 않는다 — 서버에 열린
+      // 구간이 없다.
+      console.warn("[Word] result 가 안 왔다 — 상태 강제 정리")
+      clearWordSegment()
+    }, maxSeconds * 1000 + WORD_TIMER_GRACE_MS)
   }
 
   /**
@@ -769,6 +872,12 @@ registerMiniapp((session) => {
   function setState(next: AppState): void {
     if (appState === next) return
     console.log(`[State] ${appState} -> ${next}`)
+    // streaming 을 벗어나면 열린 구간은 갈 곳이 없다. 서버도 열린 구간을 결과
+    // 없이 버리므로 word_end 는 보내지 않는다.
+    if (appState === "streaming" && wordSegment !== undefined) {
+      console.log("[Word] streaming 종료 — 구간 정리")
+      clearWordSegment()
+    }
     appState = next
     publishStreamState()
   }
@@ -877,6 +986,8 @@ registerMiniapp((session) => {
         // 브리지는 전적으로 이쪽에 있다.
         handleResult,
         handleAiError,
+        // ack 는 word_start 의 max_seconds 만 쓴다.
+        handleAck,
       )
       console.log("[AI] 인스턴스 생성", ai.getId())
       ai.connect()
@@ -1373,9 +1484,9 @@ registerMiniapp((session) => {
             return
         }
       } else {
-        // 짧게 누르는 것은 의도적으로 무동작이다. 예전 빌드는 여기서 사진 촬영을
-        // 걸었고 그것이 camera_busy 의 원인이었다. 이어받지 않았다.
-        console.log("[Input] short (무시)")
+        // 짧게 누르면 단어 구간을 토글한다. 예전 빌드의 사진 촬영은 이어받지 않았다.
+        console.log("[Input] SHORT state=", appState)
+        handleWordPress()
       }
     }),
   )
