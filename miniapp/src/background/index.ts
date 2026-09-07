@@ -444,7 +444,23 @@ function deviceHasLight(caps: GlassesCapabilities | null): boolean {
  */
 function logLedError(label: string, err: unknown): void {
   const message = asRecord(err)?.message
-  console.warn(`[LED] ${label} 실패:`, typeof message === "string" ? message : JSON.stringify(err))
+  const detail = typeof message === "string" ? message : JSON.stringify(err)
+  // 타임아웃은 실기에서 상태 전이마다 뜬다. warn 으로 두면 진짜 LED 장애가 그 사이에 묻힌다.
+  if (isLedTimeoutError(err)) {
+    console.debug(`[LED] ${label} 타임아웃 (실기에서는 실제로 켜집니다):`, detail)
+    return
+  }
+  console.warn(`[LED] ${label} 실패:`, detail)
+}
+
+/**
+ * LED 명령의 ack 타임아웃인지. 불은 실제로 켜졌는데 응답만 15초쯤 뒤에
+ * timeout 으로 reject 되는 경우가 있어, 그것만 골라내 로그 등급을 낮춘다.
+ */
+function isLedTimeoutError(err: unknown): boolean {
+  const message = asRecord(err)?.message
+  const text = (typeof message === "string" ? message : JSON.stringify(err) ?? "").toLowerCase()
+  return text.includes("timeout") || text.includes("timed out") || text.includes("etimedout")
 }
 
 registerMiniapp((session) => {
