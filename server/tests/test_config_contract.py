@@ -13,7 +13,10 @@ app.config 는 os 와 math 만 쓰므로 CI 에서 안전하게 import 할 수 �
 """
 
 import ast
+import math
 import sys
+import os
+from unittest import mock
 import unittest
 from pathlib import Path
 
@@ -61,6 +64,47 @@ class ConfigContractTest(unittest.TestCase):
     def test_something_is_actually_imported(self):
         """위 테스트가 빈 목록을 훑고 통과하는 것을 막는다."""
         self.assertGreater(len(_config_imports()), 10)
+
+
+class ProbabilityBoundsTest(unittest.TestCase):
+    """임계값이 (0, 1] 을 벗어나면 기동 때 세운다.
+
+    _env_float 는 1.1 도 그냥 받는다. 확률은 1 을 넘을 수 없으므로 그런
+    값이 들어오면 모든 구간이 조용히 거절되고, 서버는 아무 불평 없이
+    단어를 하나도 못 낸다. 오타 하나로 그렇게 되는 것보다 못 뜨는 편이 낫다.
+    """
+
+    @staticmethod
+    def _parse(raw: str):
+        source = (Path(__file__).resolve().parents[1]
+                  / "app" / "config.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        wanted = ("_env_float", "_env_probability")
+        nodes = [n for n in tree.body
+                 if isinstance(n, ast.FunctionDef) and n.name in wanted]
+        assert len(nodes) == len(wanted), "헬퍼 이름이 바뀌었다"
+        namespace = {"os": os, "math": math}
+        exec(compile(ast.Module(nodes, []), "<config>", "exec"), namespace)
+        with mock.patch.dict(os.environ, {"T": raw}):
+            return namespace["_env_probability"]("T", 0.5)
+
+    def test_a_valid_threshold_passes(self):
+        self.assertAlmostEqual(self._parse("0.62"), 0.62)
+
+    def test_one_is_allowed(self):
+        self.assertAlmostEqual(self._parse("1.0"), 1.0)
+
+    def test_above_one_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._parse("1.1")
+
+    def test_zero_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._parse("0")
+
+    def test_negative_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._parse("-0.2")
 
 
 if __name__ == "__main__":

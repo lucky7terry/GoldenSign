@@ -204,6 +204,21 @@ class MalformedOutputTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._run(values)
 
+    def test_negative_probabilities_are_rejected(self):
+        """합만 보면 통과한다. 그래서 합만 보면 안 된다.
+
+        음수가 섞이면 argsort 1위가 진짜 최댓값이 아닐 수 있고 margin 이
+        1 을 넘는 값으로 나온다. softmax 출력이 아니라는 신호다.
+        """
+        values = _probabilities(0.8, 0.05)
+        values[7] -= 0.1
+        values[8] += 0.1
+        self.assertLess(values[7], 0.0)
+        self.assertAlmostEqual(float(values.sum()), 1.0, places=9)
+
+        with self.assertRaises(ValueError):
+            self._run(values)
+
     def test_single_class_output_is_rejected(self):
         with self.assertRaises(ValueError):
             self._run(np.array([1.0]))

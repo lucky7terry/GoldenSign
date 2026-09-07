@@ -181,14 +181,20 @@ def get_recognition_model():
     """
     global _model, _initialization_error
 
+    # 실패를 캐시보다 먼저 본다. 모델은 올라왔지만 워밍업 검사(라벨 수,
+    # 시퀀스 길이)에서 걸린 경우가 있는데, _model 만 보면 그 모델을 그대로
+    # 쓰게 된다. 검사에 걸렸다는 것은 이 모델의 출력을 라벨로 옮기면
+    # 틀린 단어가 나온다는 뜻이므로, 조용히 쓰는 것이 가장 나쁘다.
+    if _initialization_error is not None:
+        raise _initialization_error
     if _model is not None:
         return _model
 
     with _model_lock:
-        if _model is not None:
-            return _model
         if _initialization_error is not None:
             raise _initialization_error
+        if _model is not None:
+            return _model
         try:
             _model = load_recognition_model()
         except RecognitionModelUnavailableError as exc:
@@ -286,16 +292,26 @@ def get_recognition_predictor():
     단어마다 부르면 그래프가 쌓이고 첫 호출마다 트레이싱 비용을 다시 낸다.
     """
     global _predictor
+    # get_recognition_model 과 같은 이유로 실패를 먼저 본다.
+    if _initialization_error is not None:
+        raise _initialization_error
     if _predictor is not None:
         return _predictor
     with _predictor_lock:
+        if _initialization_error is not None:
+            raise _initialization_error
         if _predictor is None:
             _predictor = make_predictor(get_recognition_model())
     return _predictor
 
 
 def recognition_model_available() -> bool:
-    return _model is not None
+    """단어를 인식할 수 있는 상태인가.
+
+    모델 객체가 있는 것만으로는 부족하다. 워밍업 검사에 걸렸으면 그
+    모델로 낸 단어는 믿을 수 없으므로 /health 도 loaded: false 여야 한다.
+    """
+    return _model is not None and _initialization_error is None
 
 
 def recognition_model_error() -> str | None:

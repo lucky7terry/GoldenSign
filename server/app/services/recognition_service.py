@@ -120,6 +120,12 @@ def recognize_word_segment(sequence: np.ndarray) -> WordRecognition:
         # JSON 에 실리고, 그 메시지는 표준 JSON 이 아니라 앱의 파싱이 통째로
         # 실패한다.
         raise ValueError("Model output contains NaN or Inf.")
+    if np.any(probabilities < 0.0):
+        # 합만 보면 [-0.1, 0.8, 0.3, ...] 처럼 음수가 섞여도 1.0 이 되어
+        # 통과한다. 그러면 argsort 1위가 진짜 최댓값이 아닐 수 있고,
+        # margin 이 1 을 넘는 값으로 나온다. softmax 출력이 아니라는
+        # 뜻이므로 여기서 세운다.
+        raise ValueError("Model output contains negative probabilities.")
     total = float(probabilities.sum())
     if not 0.99 <= total <= 1.01:
         # 마지막 층이 softmax 가 아니면(로짓, 로그확률) 임계값이 전부

@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from app.config import (
     FRAME_QUEUE_MAX_SIZE,
     MAX_CONCURRENT_RECOGNITIONS,
+    WORD_DRAIN_TIMEOUT_SECONDS,
     WORD_MAX_SECONDS,
     WS_IDLE_TIMEOUT_SECONDS,
 )
@@ -368,6 +369,34 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
     ) -> str:
         """구간을 닫고 결과를 보낸다. "closed" | "too_short" | "not_open"."""
         loop = asyncio.get_running_loop()
+
+        # 큐에 남은 프레임을 먼저 소진한다. dev-0.2 frame 경로는 ACK 를
+        # 먼저 보내고 인식은 워커가 나중에 하므로, 여기서 바로 닫으면
+        # "받았다"고 답해 놓은 프레임이 구간에서 빠진다. 사용자가 동작을
+        # 마치고 곧바로 버튼을 누를 때가 정확히 그 순간이라, 빠지는 것은
+        # 하필 단어의 끝부분이다.
+        #
+        # 무한정 기다리지는 않는다. MediaPipe 가 5.8fps 까지 떨어지면 큐가
+        # 30장일 때 5초가 걸린다. 그동안 결과를 못 받느니 몇 장 빠진 채로
+        # 답을 주는 편이 낫다. 세마포어를 잡기 전에 기다려야 워커가
+        # 세마포어를 못 얻어 서로 막히는 일이 없다.
+        if WORD_DRAIN_TIMEOUT_SECONDS > 0 and not frame_queue.empty():
+            pending = frame_queue.qsize()
+            try:
+                await asyncio.wait_for(
+                    frame_queue.join(),
+                    timeout=WORD_DRAIN_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Word segment closed with frames still in the queue",
+                    extra={
+                        "session_id": session_id,
+                        "pending_at_start": pending,
+                        "pending_now": frame_queue.qsize(),
+                    },
+                )
+
         try:
             # 프레임 경로와 같은 한도를 쓴다. 구간 마감은 특징 변환과 추론이
             # 붙어 있어 프레임 한 장보다 무겁고, 기본 executor 를 MediaPipe 와

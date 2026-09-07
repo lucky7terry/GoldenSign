@@ -348,7 +348,7 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
     "dropped_after_cap": 0,
     "close_reason": "client"
   },
-  "model": { "loaded": false, "mode": "keypoints_only" },
+  "model": { "loaded": true, "mode": "recognition" },
   "processed_at": "2026-09-05T01:00:02Z"
 }
 ```
