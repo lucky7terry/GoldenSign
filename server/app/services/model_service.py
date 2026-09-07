@@ -6,7 +6,10 @@ from app.services.mediapipe_service import (
     keypoint_extraction_error,
 )
 from app.services.openpose_converter import convert_to_openpose
-from app.services.sequence_service import sequence_store
+from app.services.word_segment_service import (
+    build_openpose_feature_vector,
+    word_store,
+)
 
 
 class FrameValidationError(ValueError):
@@ -39,6 +42,7 @@ def get_model_health_status():
     인식이 되는 것처럼 표시한다. 실제로는 좌표만 뽑고 있다.
 
     인식 모델을 붙일 때 이 함수가 실제 로딩 상태를 읽도록 바꿔야 한다.
+    (단어 구간 파이프라인 다음 PR에서 한다.)
     """
     if not keypoint_extraction_available():
         return {
@@ -58,9 +62,8 @@ def public_result(result: dict) -> dict:
     """클라이언트로 내보낼 형태.
 
     keypoints 는 좌표 959개라 result 메시지의 94% 를 차지하는데
-    (8,338 -> 479 바이트) 미니앱은 text / confidence / is_final /
-    sequence.window_index 만 읽는다. 안경이 폰을 거쳐 받는 구조라
-    초당 13개면 110KB/s 가 그냥 버려진다.
+    (8,338 -> 479 바이트) 미니앱은 text / confidence / is_final 만 읽는다.
+    안경이 폰을 거쳐 받는 구조라 초당 13개면 110KB/s 가 그냥 버려진다.
 
     서버 로그의 검출률 요약은 원본 result 를 쓰므로 영향받지 않는다.
     """
@@ -72,11 +75,19 @@ def public_result(result: dict) -> dict:
 def _recognition_result(
     keypoints,
     session_id: str | None = None,
-    sequence_generation: int | None = None,
+    word_generation: int | None = None,
+    captured_at_ms: float | None = None,
 ):
-    # 인식 모델이 없으므로 단어를 주장하지 않는다. text 에 자리표시자
-    # 문자열을 넣으면 그게 그대로 안경 화면에 뜬다("keypoints_extracted").
-    # 인식된 단어가 없음은 null 로 표현하고, 판단은 소비자에게 맡긴다.
+    """한 프레임의 좌표 추출 결과.
+
+    단어 구간이 열려 있으면 이 프레임을 구간 버퍼에 담는다. 열려 있지
+    않으면 담지 않는다 - 사용자가 단어를 표시하지 않는 동안의 영상은
+    쓸 데가 없다. 단어 판정은 word_end 시점에 구간 전체로 한 번 한다.
+
+    인식 모델이 없으므로 여기서 단어를 주장하지 않는다. text 에 자리표시자
+    문자열을 넣으면 그게 그대로 안경 화면에 뜬다("keypoints_extracted").
+    인식된 단어가 없음은 null 로 표현하고, 판단은 소비자에게 맡긴다.
+    """
     payload = {
         "text": None,
         "confidence": 0.0,
@@ -85,12 +96,17 @@ def _recognition_result(
     }
 
     if session_id is not None:
-        sequence_result = sequence_store.append_openpose_result(
+        append_result = word_store.append(
             session_id,
-            keypoints,
-            sequence_generation,
+            build_openpose_feature_vector(keypoints),
+            captured_at_ms,
+            word_generation,
         )
-        payload["sequence"] = sequence_result.metadata()
+        payload["word"] = {
+            "buffered": append_result.buffered,
+            "frame_count": append_result.frame_count,
+            "at_cap": append_result.at_cap,
+        }
 
     return payload
 
@@ -121,7 +137,8 @@ def recognize_frame(frame_message: dict):
 def recognize_frame_from_image_bytes(
     image_bytes: bytes,
     session_id: str | None = None,
-    sequence_generation: int | None = None,
+    word_generation: int | None = None,
+    captured_at_ms: float | None = None,
 ):
     if not image_bytes:
         raise FrameValidationError(
@@ -137,13 +154,19 @@ def recognize_frame_from_image_bytes(
 
     keypoints = convert_to_openpose(extracted_keypoints)
 
-    return _recognition_result(keypoints, session_id, sequence_generation)
+    return _recognition_result(
+        keypoints,
+        session_id,
+        word_generation,
+        captured_at_ms,
+    )
 
 
 def recognize_frame_from_image(
     image,
     session_id: str | None = None,
-    sequence_generation: int | None = None,
+    word_generation: int | None = None,
+    captured_at_ms: float | None = None,
 ):
     if image is None or image.size == 0:
         raise FrameValidationError(
@@ -159,4 +182,9 @@ def recognize_frame_from_image(
 
     keypoints = convert_to_openpose(extracted_keypoints)
 
-    return _recognition_result(keypoints, session_id, sequence_generation)
+    return _recognition_result(
+        keypoints,
+        session_id,
+        word_generation,
+        captured_at_ms,
+    )
