@@ -850,40 +850,37 @@ registerMiniapp((session) => {
   // --- 처리 fps ---------------------------------------------------------------
 
   /**
-   * 서버 최상위 `sequence_index`(= 누적 처리 프레임 수) 의 직전 값과 그 수신 시각.
-   * 두 지점의 차분으로 처리 fps 를 낸다. 절대값이 아니라 차분인 이유는
-   * sequence_index 가 스트림 시작 이후의 누적치라, 나눌 기준 시각이 따로 없기
-   * 때문이다.
+   * 직전 `word_progress` 의 frame_count 와 그 수신 시각. 두 지점의 차분으로
+   * 처리 fps 를 낸다 — frame_count 는 구간 시작 이후의 누적치라 나눌 기준 시각이
+   * 따로 없기 때문이다.
    */
-  let lastSequenceIndex: number | undefined
-  let lastSequenceAt = 0
+  let lastFrameCount: number | undefined
+  let lastFrameCountAt = 0
 
-  /** 새 스트림에서 서버 카운터가 1부터 다시 시작하므로 기준점도 함께 버린다. */
+  /** 새 스트림은 이전 구간의 기준점을 물려받으면 안 된다. */
   function resetProcessedFps(): void {
-    lastSequenceIndex = undefined
-    lastSequenceAt = 0
+    lastFrameCount = undefined
+    lastFrameCountAt = 0
   }
 
   /**
-   * 스로틀 이전, 서버가 보낸 모든 result 에서 부른다. 방송된 것만 세면 우리가
-   * 건 스로틀이 서버의 처리 속도로 둔갑한다.
+   * word_progress 한 건마다 부른다. 서버가 구간이 열려 있는 동안 초당 한 번
+   * 보내고, 구간마다 0부터 다시 센다.
    */
-  function trackProcessedFps(sequenceIndex: number | null): void {
-    if (sequenceIndex === null) return
-
+  function trackProcessedFps(frameCount: number): void {
     const now = Date.now()
-    const prevIndex = lastSequenceIndex
-    const prevAt = lastSequenceAt
-    lastSequenceIndex = sequenceIndex
-    lastSequenceAt = now
+    const prevCount = lastFrameCount
+    const prevAt = lastFrameCountAt
+    lastFrameCount = frameCount
+    lastFrameCountAt = now
 
     // 첫 표본은 기준점만 남기고 끝낸다 — 차분을 낼 짝이 아직 없다.
-    if (prevIndex === undefined) return
+    if (prevCount === undefined) return
 
-    const frames = sequenceIndex - prevIndex
+    const frames = frameCount - prevCount
     const elapsedSec = (now - prevAt) / 1000
-    // 인덱스가 되감겼거나(서버 재시작·새 스트림) 같은 밀리초에 두 건이 온 경우.
-    // 기준점은 위에서 이미 갱신했으니 다음 result 부터 정상 복귀한다.
+    // 값이 작아졌으면 새 구간이라 이전 값과 짝지을 수 없다. 기준점은 위에서
+    // 새 값으로 갈아 끼웠으니 다음 word_progress 부터 정상 복귀한다.
     if (frames <= 0 || elapsedSec <= 0) return
 
     patch("stream:diagnostics", {
@@ -893,9 +890,8 @@ registerMiniapp((session) => {
     })
   }
 
-  /** AiClient 가 result 를 받을 때마다 부르는 곳. fps 를 먼저 세고 방송한다. */
+  /** AiClient 가 result 를 받을 때마다 부르는 곳. */
   function handleResult(next: AiRecognitionResult): void {
-    trackProcessedFps(next.sequenceIndex)
     // closeReason 은 단어 구간 result 에만 있다. 프레임 스트림 result 로는
     // 구간을 닫지 않는다.
     if (next.closeReason !== undefined) {
@@ -1210,6 +1206,8 @@ registerMiniapp((session) => {
         handleAiError,
         // ack 는 word_start 의 max_seconds 만 쓴다.
         handleAck,
+        // 처리 fps 의 출처. 구간이 열려 있는 동안 초당 한 번 온다.
+        trackProcessedFps,
       )
       console.log("[AI] 인스턴스 생성", ai.getId())
       ai.connect()
