@@ -912,9 +912,20 @@ registerMiniapp((session) => {
       const hasText = next.text !== null && next.text !== ""
       flashLed(hasText ? RESULT_HIGH_LED : RESULT_LOW_LED, FLASH_MS)
     }
-    // 채널 타입이 null 을 받으므로 그대로 올린다. UI 가 null 과 빈 문자열을
-    // 구분해 문구를 고른다.
-    publishResult(next)
+    // 채널에 선언된 필드만 골라 담는다. next 를 통째로 넘기면 UI 가 쓰지 않기로
+    // 한 recognition(임계값 조정용)까지 스냅샷에 실려 간다. text 는 null 그대로
+    // 올린다 — UI 가 null 과 빈 문자열을 구분해 문구를 고른다.
+    publishResult({
+      text: next.text,
+      confidence: next.confidence,
+      isFinal: next.isFinal,
+      windowIndex: next.windowIndex,
+      sequenceIndex: next.sequenceIndex,
+      closeReason: next.closeReason,
+      wordFrameCount: next.wordFrameCount,
+      spanMs: next.spanMs,
+      modelLoaded: next.modelLoaded,
+    })
   }
 
   // --- 단어 구간 --------------------------------------------------------------
@@ -1065,7 +1076,7 @@ registerMiniapp((session) => {
         break
 
       case "model_unavailable":
-        // 프레임 한 장이 실패한 것이다(session_websocket.py:202,218). 수어하는
+        // 프레임 한 장이 실패한 것이다(session_websocket.py). 수어하는
         // 도중에도 오므로 구간을 닫지 않는다 — 닫으면 단어가 통째로 날아간다.
         console.warn("[AI] 프레임 인식 실패 — 구간은 그대로 둔다")
         break
