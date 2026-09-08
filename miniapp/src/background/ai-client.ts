@@ -148,6 +148,17 @@ export interface AiRecognitionDecision {
   accepted: boolean | null
 }
 
+/**
+ * 파싱된 `word_progress` 페이로드. 서버가 구간이 열려 있는 동안 초당 한 번 보낸다.
+ * processedFrameCount 는 서버가 실제로 처리한 수다.
+ */
+export interface AiWordProgress {
+  frameCount: number
+  processedFrameCount: number
+  /** 서버가 계산한 처리 fps. 첫 건에서는 null 이다. */
+  processedFps: number | null
+}
+
 /** 파싱된 `ack` 페이로드. `onAck` 콜백으로 호출부에 전달된다. */
 export interface AiAck {
   /** word_start_accepted / word_already_closed / stream_start_accepted 등. */
@@ -251,8 +262,8 @@ export class AiClient {
    *                서버가 손을 뗀 상황이 호출부까지 닿는 유일한 통로다.
    * @param onAck `ack` 한 건마다 호출된다. word_start 의 max_seconds 처럼
    *              status 에 딸려 오는 값이 호출부까지 닿는 통로다.
-   * @param onWordProgress `word_progress` 한 건마다 지금까지 모인 프레임 수로
-   *                       호출된다. 서버가 구간이 열려 있는 동안 초당 한 번 보낸다.
+   * @param onWordProgress `word_progress` 한 건마다 파싱된 필드로 호출된다.
+   *                       서버가 구간이 열려 있는 동안 초당 한 번 보낸다.
    */
   constructor(
     private readonly userId: string,
@@ -260,7 +271,7 @@ export class AiClient {
     private readonly onResult?: (result: AiRecognitionResult) => void,
     private readonly onError?: (error: AiServerError) => void,
     private readonly onAck?: (ack: AiAck) => void,
-    private readonly onWordProgress?: (frameCount: number) => void,
+    private readonly onWordProgress?: (progress: AiWordProgress) => void,
   ) {}
 
   /**
@@ -689,13 +700,21 @@ export class AiClient {
         // 구간이 열려 있는 동안 초당 한 번 온다. default 로 두면 같은 주기로
         // "미지의 메시지" 경고가 찍힌다.
         const frameCount = m?.frame_count
+        const processedFrameCount = m?.processed_frame_count
+        const processedFps = m?.processed_fps
         console.log(
           `${this.tag} word_progress frames=${String(frameCount)}` +
-            ` processed=${String(m?.processed_frame_count)} fps=${String(m?.processed_fps)}`,
+            ` processed=${String(processedFrameCount)} fps=${String(processedFps)}`,
         )
         if (this.onWordProgress !== undefined) {
           try {
-            this.onWordProgress(typeof frameCount === "number" ? frameCount : 0)
+            this.onWordProgress({
+              frameCount: typeof frameCount === "number" ? frameCount : 0,
+              processedFrameCount:
+                typeof processedFrameCount === "number" ? processedFrameCount : 0,
+              // 첫 건은 서버도 낼 근거가 없어 null 로 온다.
+              processedFps: typeof processedFps === "number" ? processedFps : null,
+            })
           } catch (err) {
             console.error(`${this.tag} onWordProgress 콜백 예외:`, err)
           }

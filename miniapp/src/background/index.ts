@@ -61,6 +61,7 @@ import {
   type AiClientState,
   type AiRecognitionResult,
   type AiServerError,
+  type AiWordProgress,
 } from "./ai-client"
 
 /**
@@ -850,43 +851,16 @@ registerMiniapp((session) => {
   // --- 처리 fps ---------------------------------------------------------------
 
   /**
-   * 직전 `word_progress` 의 frame_count 와 그 수신 시각. 두 지점의 차분으로
-   * 처리 fps 를 낸다 — frame_count 는 구간 시작 이후의 누적치라 나눌 기준 시각이
-   * 따로 없기 때문이다.
+   * word_progress 한 건마다 부른다. fps 는 서버가 이미 계산해서 보낸다.
    */
-  let lastFrameCount: number | undefined
-  let lastFrameCountAt = 0
-
-  /** 새 스트림은 이전 구간의 기준점을 물려받으면 안 된다. */
-  function resetProcessedFps(): void {
-    lastFrameCount = undefined
-    lastFrameCountAt = 0
-  }
-
-  /**
-   * word_progress 한 건마다 부른다. 서버가 구간이 열려 있는 동안 초당 한 번
-   * 보내고, 구간마다 0부터 다시 센다.
-   */
-  function trackProcessedFps(frameCount: number): void {
-    const now = Date.now()
-    const prevCount = lastFrameCount
-    const prevAt = lastFrameCountAt
-    lastFrameCount = frameCount
-    lastFrameCountAt = now
-
-    // 첫 표본은 기준점만 남기고 끝낸다 — 차분을 낼 짝이 아직 없다.
-    if (prevCount === undefined) return
-
-    const frames = frameCount - prevCount
-    const elapsedSec = (now - prevAt) / 1000
-    // 값이 작아졌으면 새 구간이라 이전 값과 짝지을 수 없다. 기준점은 위에서
-    // 새 값으로 갈아 끼웠으니 다음 word_progress 부터 정상 복귀한다.
-    if (frames <= 0 || elapsedSec <= 0) return
+  function trackProcessedFps(progress: AiWordProgress): void {
+    // 첫 건은 서버도 낼 근거가 없어 null 이다. 이전 값을 그대로 둔다.
+    if (progress.processedFps === null) return
 
     patch("stream:diagnostics", {
       ...snapshot.diagnostics,
       // patch 는 진단 슬롯을 통째로 갈아 끼우므로 나머지 필드를 함께 실어야 한다.
-      processedFps: Math.round((frames / elapsedSec) * 10) / 10,
+      processedFps: progress.processedFps,
     })
   }
 
@@ -1564,9 +1538,8 @@ registerMiniapp((session) => {
       //
       // resolvedConfig 는 Optional 이다. 모든 단계를 옵셔널 체이닝으로 탄다.
       // 호스트명은 parseUrlParts() 로 뽑는다 — 이 런타임에 `new URL()` 은 없다.
-      // 새 스트림의 서버 카운터는 1부터 다시 시작한다. 이전 스트림의 처리 fps 를
-      // 그대로 들고 있으면 안 되므로 기준점과 표시값을 함께 비운다.
-      resetProcessedFps()
+      // 아래 processedFps: null 이 이전 스트림의 값을 지운다. 새 스트림의 첫
+      // word_progress 가 오기 전까지는 보여 줄 값이 없다.
       patch("stream:diagnostics", {
         requestedFps,
         resolvedFps: result?.resolvedConfig?.video?.fps ?? null,

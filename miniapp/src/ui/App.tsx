@@ -291,11 +291,11 @@ function DiagnosticsPanel({snap}: {snap: Snapshot}) {
           <dt>fps (처리는 구간 중에만 갱신)</dt>
           <dd className="gs-mono">
             {/*
-              요청 → 협상 → 서버가 실제로 처리 중인 값. 세 번째는 background 가
-              연속한 두 word_progress 의 frame_count 차분으로 계산한다.
+              요청 → 협상 → 서버가 실제로 처리 중인 값. 세 번째는 서버가
+              word_progress 에 실어 보내는 processed_fps 를 그대로 띄운다.
               word_progress 는 단어 구간이 열려 있는 동안에만 오므로, 구간이
               닫혀 있으면 마지막 값이 그대로 멈춰 있다.
-              첫 한 건만으로는 차분이 안 나오므로 그동안은 "—" 다.
+              구간의 첫 건은 서버도 값을 못 내므로 그동안은 "—" 다.
             */}
             {fmt(d.requestedFps)} → {fmt(d.resolvedFps)} → {fmt(d.processedFps)}
           </dd>
