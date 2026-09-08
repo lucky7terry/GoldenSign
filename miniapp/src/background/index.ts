@@ -866,11 +866,11 @@ registerMiniapp((session) => {
 
   /** AiClient 가 result 를 받을 때마다 부르는 곳. */
   function handleResult(next: AiRecognitionResult): void {
-    // closeReason 은 단어 구간 result 에만 있다. 프레임 스트림 result 로는
-    // 구간을 닫지 않는다.
-    if (next.closeReason !== undefined) {
+    // word 블록이 실려 있으면 구간 결과다. close_reason 이 비어도 구간은 닫아야 한다
+    // — 안 닫으면 안전망 타이머가 걷어낼 때까지 버튼이 안 먹는다.
+    if (next.isWordResult) {
       console.log(
-        `[Word] result close=${next.closeReason} frames=${String(next.wordFrameCount)}` +
+        `[Word] result close=${String(next.closeReason)} frames=${String(next.wordFrameCount)}` +
           ` span=${String(next.spanMs)}ms text=${JSON.stringify(next.text)}` +
           ` conf=${String(next.confidence)}`,
       )

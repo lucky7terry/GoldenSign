@@ -120,6 +120,11 @@ export interface AiRecognitionResult {
   /** 서버 누적 처리 프레임 수. 없거나 숫자가 아니면 null. */
   sequenceIndex: number | null
   // 아래는 단어 구간(word) 결과에만 실려 온다. 프레임 스트림 result 에는 없다.
+  /**
+   * `word` 블록이 실려 있었는지. 이 결과가 구간 결과인지 가르는 유일한 기준이다
+   * — 개별 필드가 비어도 판단이 흔들리지 않게 블록 유무만 본다.
+   */
+  isWordResult: boolean
   /** "client" | "timeout" — 구간이 왜 닫혔는지. */
   closeReason?: string
   /** 구간이 모은 원본 프레임 수(리샘플 전). */
@@ -777,6 +782,7 @@ export class AiClient {
               isFinal: r?.is_final === true,
               windowIndex: typeof windowIndex === "number" ? windowIndex : -1,
               sequenceIndex: typeof sequenceIndex === "number" ? sequenceIndex : null,
+              isWordResult: word !== undefined,
               closeReason: typeof word?.close_reason === "string" ? word.close_reason : undefined,
               wordFrameCount: typeof word?.frame_count === "number" ? word.frame_count : undefined,
               spanMs: typeof spanMs === "number" ? spanMs : undefined,
