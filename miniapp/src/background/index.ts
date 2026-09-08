@@ -1192,6 +1192,14 @@ registerMiniapp((session) => {
           // 라 아무것도 하지 않고, 시작 시퀀스가 제 자리에서 보낸다.
           const live = activeStream
           if (live?.webrtcUrl === undefined) return
+
+          // 새 session_id 라 서버엔 열린 구간이 없다. 남겨 두면 다음 짧게
+          // 누르기가 word_end 로 나가 word_not_started 로 거절된다.
+          if (wordSegment !== undefined) {
+            console.log("[Word] 재연결 — 남아 있던 구간 정리")
+            clearWordSegment()
+          }
+
           console.log("[Stream] ready 이후 stream_start 재전송. streamId=", live.streamId)
           if (!ai?.sendStreamStart(live.streamId, live.webrtcUrl)) {
             // 롤백도 error 방송도 하지 않는다. ready 직후라 소켓은 열려 있으므로
