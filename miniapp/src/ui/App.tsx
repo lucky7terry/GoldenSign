@@ -74,7 +74,9 @@ function fmtWindowIndex(value: number | undefined): string {
 function resultLabel(r: Channels["recognition:result"] | undefined): string {
   if (r === undefined) return "—"
   if (r.text !== null && r.text !== "") return r.text
-  return r.modelLoaded === true ? "확신 부족" : "모델 미연결"
+  if (r.modelLoaded === false) return "모델 미연결"
+
+  return r.modelLoaded === true ? "확신 부족" : "—"
 }
 
 /**
@@ -239,8 +241,8 @@ function VisualFeedback({tone, animated}: {tone: Tone; animated: boolean}) {
 function ResultPanel({results}: {results: Channels["recognition:result"][]}) {
   const finals = results.filter((r) => r.isFinal)
   const sentence = finals.length > 0 ? resultLabel(finals[finals.length - 1]) : null
-  // 마지막 단어 구간 요약.
-  const lastWord = results.filter((r) => r.closeReason !== undefined).pop()
+  // 마지막 단어 구간 요약. close_reason 이 비어도 구간 결과다.
+  const lastWord = results.filter((r) => r.isWordResult).pop()
 
   return (
     <section className="gs-card">

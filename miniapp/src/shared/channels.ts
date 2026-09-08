@@ -106,6 +106,11 @@ export interface Channels {
     windowIndex: number
     /** 서버 누적 처리 프레임 수. 서버가 숫자로 주지 않으면 null. */
     sequenceIndex: number | null
+    /**
+     * 이 결과가 단어 구간 결과인지. background 가 서버의 `word` 블록 유무로
+     * 정한다 — 서버 필드가 아니라 앱이 만든 판단이라 화면이 기대도 된다.
+     */
+    isWordResult: boolean
     // 아래는 단어 구간 결과에만 실려 온다. 프레임 스트림 결과에는 없다.
     /** "client" | "timeout" — 구간이 왜 닫혔는지. */
     closeReason?: string

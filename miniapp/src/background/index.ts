@@ -895,6 +895,7 @@ registerMiniapp((session) => {
       isFinal: next.isFinal,
       windowIndex: next.windowIndex,
       sequenceIndex: next.sequenceIndex,
+      isWordResult: next.isWordResult,
       closeReason: next.closeReason,
       wordFrameCount: next.wordFrameCount,
       spanMs: next.spanMs,
