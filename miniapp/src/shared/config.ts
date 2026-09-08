@@ -35,5 +35,11 @@ export const HELLO_SCHEMA = "dev-0.2"
  */
 export const STREAM_SCHEMA = "dev-0.3"
 
+/**
+ * 단어 구간 메시지 계열(word_start / word_end)의 스키마 버전.
+ * server/app/constants.py 의 WORD_SCHEMA_VERSION 과 일치해야 한다.
+ */
+export const WORD_SCHEMA = "dev-0.4"
+
 /** POST /v1/sessions 의 `client` 필드. 서버 로그에서 세션 출처를 식별한다. */
 export const CLIENT_NAME = "mentra-local-miniapp"

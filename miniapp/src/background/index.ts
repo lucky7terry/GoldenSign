@@ -54,7 +54,15 @@ import {
   type WifiData,
 } from "@mentra/miniapp/background"
 import type {Channels, Snapshot} from "../shared/channels"
-import {AiClient, probeRuntime, type AiClientState, type AiServerError} from "./ai-client"
+import {
+  AiClient,
+  probeRuntime,
+  type AiAck,
+  type AiClientState,
+  type AiRecognitionResult,
+  type AiServerError,
+  type AiWordProgress,
+} from "./ai-client"
 
 /**
  * background 엔트리는 `StreamModule` 은 re-export 하지만 옵션/결과 인터페이스는
@@ -311,6 +319,15 @@ const MAX_RESULTS = 20
 const RESULT_THROTTLE_MS = 200
 
 /**
+ * word_start ack 에 `max_seconds` 가 없을 때만 쓰는 폴백(초). 서버의
+ * WORD_MAX_SECONDS 와 같은 값이지만, ack 가 준 값이 늘 우선이다.
+ */
+const WORD_MAX_SECONDS_FALLBACK = 8
+
+/** 안전망 타이머가 서버의 한도보다 더 기다리는 여유분. result 가 건너올 시간이다. */
+const WORD_TIMER_GRACE_MS = 1000
+
+/**
  * AiClient 의 7개짜리 상태를 UI 가 신경 쓰는 4개로 접는다. `AiClientState` 자체는
  * 일부러 두었다 — 이건 투영일 뿐 그 상태머신에 새 상태를 만드는 게 아니다.
  */
@@ -406,6 +423,35 @@ function ledCommandFor(state: AppState): LedCommand {
 }
 
 /**
+ * 단어 구간 LED. 상태 매핑(ledCommandFor)과 별개의 축이라 8개 상태 어디에도
+ * 넣지 않는다. 열림만 유지형이고 나머지 셋은 FLASH_MS 동안만 얹는다.
+ */
+const WORD_OPEN_LED: LedCommand = {kind: "solid", color: "orange"}
+/** 결과 있음. */
+const RESULT_HIGH_LED: LedCommand = {kind: "solid", color: "white"}
+/** 결과 없음. */
+const RESULT_LOW_LED: LedCommand = {kind: "blink", color: "orange"}
+/** 거절/오류. */
+const REJECT_LED: LedCommand = {kind: "blink", color: "red"}
+
+/** 얹는 불의 지속 시간. */
+const FLASH_MS = 600
+
+/**
+ * flash 전용 깜빡임 주기. 기존 400/400 은 FLASH_MS 안에 한 번밖에 안 보인다.
+ */
+const FLASH_BLINK_ON_MS = 120
+const FLASH_BLINK_OFF_MS = 120
+
+/**
+ * durationMs 안에 끝나는 깜빡임 횟수. LED_BLINK_COUNT(30초 기준 37회)를 그대로
+ * 쓰면 복귀 명령 뒤에도 깜빡임이 한참 살아 있을 수 있어 따로 센다.
+ */
+function flashBlinkCount(durationMs: number): number {
+  return Math.max(1, Math.floor(durationMs / (FLASH_BLINK_ON_MS + FLASH_BLINK_OFF_MS)))
+}
+
+/**
  * `hasLight` 는 GlassesCapabilities 의 선언된 표면에 없다. summarizeCapabilities
  * 가 읽는 다른 필드들과 마찬가지로 `[key: string]: unknown` 인덱스 시그니처를
  * 타고 들어온다. 캐시하지 않고 매번 읽는 이유는 세션 도중 기기가 바뀌는 경우
@@ -428,7 +474,23 @@ function deviceHasLight(caps: GlassesCapabilities | null): boolean {
  */
 function logLedError(label: string, err: unknown): void {
   const message = asRecord(err)?.message
-  console.warn(`[LED] ${label} 실패:`, typeof message === "string" ? message : JSON.stringify(err))
+  const detail = typeof message === "string" ? message : JSON.stringify(err)
+  // 타임아웃은 실기에서 상태 전이마다 뜬다. warn 으로 두면 진짜 LED 장애가 그 사이에 묻힌다.
+  if (isLedTimeoutError(err)) {
+    console.debug(`[LED] ${label} 타임아웃 (실기에서는 실제로 켜집니다):`, detail)
+    return
+  }
+  console.warn(`[LED] ${label} 실패:`, detail)
+}
+
+/**
+ * LED 명령의 ack 타임아웃인지. 불은 실제로 켜졌는데 응답만 15초쯤 뒤에
+ * timeout 으로 reject 되는 경우가 있어, 그것만 골라내 로그 등급을 낮춘다.
+ */
+function isLedTimeoutError(err: unknown): boolean {
+  const message = asRecord(err)?.message
+  const text = (typeof message === "string" ? message : JSON.stringify(err) ?? "").toLowerCase()
+  return text.includes("timeout") || text.includes("timed out") || text.includes("etimedout")
 }
 
 registerMiniapp((session) => {
@@ -460,6 +522,13 @@ registerMiniapp((session) => {
    * 번째 롱프레스가 병렬 실행을 시작해서는 안 되기 때문이다.
    */
   let startInFlight = false
+  /**
+   * 열려 있는 단어 구간. 닫혀 있으면 undefined 다. `phase` 가 "closing" 인 구간은
+   * word_end 를 보내고 result 를 기다리는 중이다 — 진짜 닫힘은 result 도착이다.
+   */
+  let wordSegment:
+    | {phase: "open" | "closing"; startedAt: number; timer: ReturnType<typeof setTimeout> | undefined}
+    | undefined
 
   // "ready" 안에서 만든다. session.userId 는 CONNECT_ACK 이후에야 채워지기
   // 때문이다. 런타임 확인에 실패하면 undefined 로 남는다.
@@ -519,15 +588,27 @@ registerMiniapp((session) => {
    *  호출마다 다시 거는 것을 막는다. */
   let lastAppliedLedState: AppState | undefined
 
-  /** 명령에 해당하는 LED Promise 를 만들기만 한다(await 하지 않는다). */
-  function sendLed(command: LedCommand) {
+  /** 진행 중인 flash 의 복귀 타이머. 하나뿐이라 겹쳐 부르면 앞의 것을 덮는다. */
+  let ledFlashTimer: ReturnType<typeof setTimeout> | undefined
+
+  /**
+   * 명령에 해당하는 LED Promise 를 만들기만 한다(await 하지 않는다).
+   * blink 인자는 기본값이 기존 값이라 상태 LED 의 동작은 그대로다 — 짧게 얹는
+   * flash 만 다른 주기/횟수를 넘긴다.
+   */
+  function sendLed(
+    command: LedCommand,
+    blinkOnMs: number = LED_BLINK_ON_MS,
+    blinkOffMs: number = LED_BLINK_OFF_MS,
+    blinkCount: number = LED_BLINK_COUNT,
+  ) {
     switch (command.kind) {
       case "off":
         return session.led.turnOff()
       case "solid":
         return session.led.solid(command.color, LED_HOLD_MS)
       case "blink":
-        return session.led.blink(command.color, LED_BLINK_ON_MS, LED_BLINK_OFF_MS, LED_BLINK_COUNT)
+        return session.led.blink(command.color, blinkOnMs, blinkOffMs, blinkCount)
     }
   }
 
@@ -561,12 +642,86 @@ registerMiniapp((session) => {
   }
 
   /**
+   * 지금 보여야 할 지속 상태로 되돌린다. 얹은 불(flash / 구간)이 끝나는 자리는
+   * 전부 여기를 지난다 — 열린 구간이 상태 색보다 우선이라는 규칙이 한 곳에만 있다.
+   */
+  function restoreLed(): void {
+    // closing 도 아직 서버가 처리 중이라 주황을 유지한다.
+    if (wordSegment !== undefined) {
+      setWordLed(true)
+      return
+    }
+    lastAppliedLedState = undefined
+    applyLed(appState)
+  }
+
+  /**
+   * 구간 열림은 잠깐이 아니라 열려 있는 내내 유지돼야 해서 flash 가 아니다.
+   * 닫을 때는 restoreLed 가 그 시점에 맞는 불을 고른다.
+   */
+  function setWordLed(open: boolean): void {
+    if (!deviceHasLight(session.capabilities)) return
+    if (open) {
+      // 예약된 복귀가 방금 켠 주황을 덮지 않게 먼저 버린다.
+      clearLedFlashTimer()
+      console.log("[LED] word open ->", JSON.stringify(WORD_OPEN_LED))
+      try {
+        void sendLed(WORD_OPEN_LED).catch((err) => logLedError("word open", err))
+      } catch (err) {
+        logLedError("word open 동기 예외", err)
+      }
+      return
+    }
+    restoreLed()
+  }
+
+  function clearLedFlashTimer(): void {
+    if (ledFlashTimer !== undefined) {
+      clearTimeout(ledFlashTimer)
+      ledFlashTimer = undefined
+    }
+  }
+
+  /**
+   * 상태 LED 위에 잠깐 다른 색을 얹고 durationMs 뒤 현재 appState 의 불로
+   * 돌아온다. applyLed 와 달리 가드가 없어 같은 명령이어도 매번 다시 켠다.
+   */
+  function flashLed(command: LedCommand, durationMs: number): void {
+    if (!deviceHasLight(session.capabilities)) return
+    // 겹쳐 부르면 앞의 복귀 타이머는 버린다. 복귀는 마지막 flash 기준이다.
+    clearLedFlashTimer()
+    console.log("[LED] flash", JSON.stringify(command), `${durationMs}ms`)
+
+    // blink 는 durationMs 안에 끝나는 짧은 주기로 쏜다. 복귀 뒤에도 깜빡임이
+    // 남는 것을 SDK 가 멈춰 준다는 보장이 없다.
+    try {
+      void sendLed(
+        command,
+        FLASH_BLINK_ON_MS,
+        FLASH_BLINK_OFF_MS,
+        flashBlinkCount(durationMs),
+      ).catch((err) => logLedError("flash", err))
+    } catch (err) {
+      logLedError("flash 동기 예외", err)
+    }
+
+    ledFlashTimer = setTimeout(() => {
+      ledFlashTimer = undefined
+      // 상태 색이 아니라 restoreLed 로 돌아간다. 거절 깜빡임 직후 새 구간을 연 경우 상태 색이 주황을 덮으면 안 된다.
+      restoreLed()
+    }, durationMs)
+  }
+
+  /**
    * 상태 맵을 우회하는 무조건 소등. 종료 경로 전용이다.
    *
    * lastAppliedLedState 를 지우므로, 나중에 같은 상태로 applyLed 가 불려도
    * 중복으로 건너뛰지 않고 다시 점등한다.
    */
   function turnOffLed(reason: string): void {
+    // hasLight 판정보다 먼저 지운다. 세션 도중 capabilities 가 바뀌어도 예약된
+    // 복귀가 소등 뒤에 불을 되살리면 안 된다.
+    clearLedFlashTimer()
     if (!deviceHasLight(session.capabilities)) return
     lastAppliedLedState = undefined
     console.log("[LED] turnOff:", reason)
@@ -696,60 +851,214 @@ registerMiniapp((session) => {
   // --- 처리 fps ---------------------------------------------------------------
 
   /**
-   * 서버 최상위 `sequence_index`(= 누적 처리 프레임 수) 의 직전 값과 그 수신 시각.
-   * 두 지점의 차분으로 처리 fps 를 낸다. 절대값이 아니라 차분인 이유는
-   * sequence_index 가 스트림 시작 이후의 누적치라, 나눌 기준 시각이 따로 없기
-   * 때문이다.
+   * word_progress 한 건마다 부른다. fps 는 서버가 이미 계산해서 보낸다.
    */
-  let lastSequenceIndex: number | undefined
-  let lastSequenceAt = 0
-
-  /** 새 스트림에서 서버 카운터가 1부터 다시 시작하므로 기준점도 함께 버린다. */
-  function resetProcessedFps(): void {
-    lastSequenceIndex = undefined
-    lastSequenceAt = 0
-  }
-
-  /**
-   * 스로틀 이전, 서버가 보낸 모든 result 에서 부른다. 방송된 것만 세면 우리가
-   * 건 스로틀이 서버의 처리 속도로 둔갑한다.
-   */
-  function trackProcessedFps(sequenceIndex: number | null): void {
-    if (sequenceIndex === null) return
-
-    const now = Date.now()
-    const prevIndex = lastSequenceIndex
-    const prevAt = lastSequenceAt
-    lastSequenceIndex = sequenceIndex
-    lastSequenceAt = now
-
-    // 첫 표본은 기준점만 남기고 끝낸다 — 차분을 낼 짝이 아직 없다.
-    if (prevIndex === undefined) return
-
-    const frames = sequenceIndex - prevIndex
-    const elapsedSec = (now - prevAt) / 1000
-    // 인덱스가 되감겼거나(서버 재시작·새 스트림) 같은 밀리초에 두 건이 온 경우.
-    // 기준점은 위에서 이미 갱신했으니 다음 result 부터 정상 복귀한다.
-    if (frames <= 0 || elapsedSec <= 0) return
+  function trackProcessedFps(progress: AiWordProgress): void {
+    // 첫 건은 서버도 낼 근거가 없어 null 이다. 이전 값을 그대로 둔다.
+    if (progress.processedFps === null) return
 
     patch("stream:diagnostics", {
       ...snapshot.diagnostics,
       // patch 는 진단 슬롯을 통째로 갈아 끼우므로 나머지 필드를 함께 실어야 한다.
-      processedFps: Math.round((frames / elapsedSec) * 10) / 10,
+      processedFps: progress.processedFps,
     })
   }
 
-  /** AiClient 가 result 를 받을 때마다 부르는 곳. fps 를 먼저 세고 방송한다. */
-  function handleResult(next: Channels["recognition:result"]): void {
-    trackProcessedFps(next.sequenceIndex)
-    publishResult(next)
+  /** AiClient 가 result 를 받을 때마다 부르는 곳. */
+  function handleResult(next: AiRecognitionResult): void {
+    // word 블록이 실려 있으면 구간 결과다. close_reason 이 비어도 구간은 닫아야 한다
+    // — 안 닫으면 안전망 타이머가 걷어낼 때까지 버튼이 안 먹는다.
+    if (next.isWordResult) {
+      console.log(
+        `[Word] result close=${String(next.closeReason)} frames=${String(next.wordFrameCount)}` +
+          ` span=${String(next.spanMs)}ms text=${JSON.stringify(next.text)}` +
+          ` conf=${String(next.confidence)}`,
+      )
+      if (next.resampledOnTime === false) {
+        console.warn("[Word] resampled_on_time=false — 입력에 촬영 시각이 안 붙었다")
+      }
+      clearWordSegment()
+      // 구간을 닫은 뒤에 얹는다. 순서가 반대면 flash 복귀가 아직 살아 있는
+      // 구간을 보고 주황으로 돌아가 결과 색이 묻힌다.
+      //
+      // 판정은 서버가 끝냈고 text 가 그 결과다. 앱은 confidence 를 다시 보지
+      // 않는다 — 원본 text 유무만 본다.
+      const hasText = next.text !== null && next.text !== ""
+      flashLed(hasText ? RESULT_HIGH_LED : RESULT_LOW_LED, FLASH_MS)
+    }
+    // 채널에 선언된 필드만 골라 담는다. next 를 통째로 넘기면 UI 가 쓰지 않기로
+    // 한 recognition(임계값 조정용)까지 스냅샷에 실려 간다. text 는 null 그대로
+    // 올린다 — UI 가 null 과 빈 문자열을 구분해 문구를 고른다.
+    publishResult({
+      text: next.text,
+      confidence: next.confidence,
+      isFinal: next.isFinal,
+      windowIndex: next.windowIndex,
+      sequenceIndex: next.sequenceIndex,
+      isWordResult: next.isWordResult,
+      closeReason: next.closeReason,
+      wordFrameCount: next.wordFrameCount,
+      spanMs: next.spanMs,
+      modelLoaded: next.modelLoaded,
+    })
+  }
+
+  // --- 단어 구간 --------------------------------------------------------------
+
+  /**
+   * 구간 상태와 안전망 타이머를 함께 비운다. 닫는 경로 넷(result / 안전망 /
+   * 오류 / 스트림 종료)이 전부 여기를 지나므로 불도 여기서 되돌린다.
+   */
+  function clearWordSegment(): void {
+    if (wordSegment === undefined) return
+    if (wordSegment.timer !== undefined) clearTimeout(wordSegment.timer)
+    wordSegment = undefined
+    setWordLed(false)
   }
 
   /**
-   * AiClient 가 서버 `error` 를 받을 때마다 부르는 곳. 지금은 방송만 한다 —
-   * LED 매핑은 단어 단위 입력 설계가 확정된 뒤에 붙인다.
+   * 짧게 누를 때마다 구간을 열고 닫는다. streaming 밖에서는 받지 않는다
+   */
+  function handleWordPress(): void {
+    if (appState !== "streaming") {
+      console.log("[Word] streaming 아님 — 무시. state=", appState)
+      return
+    }
+    const client = ai
+    if (client === undefined) {
+      console.warn("[Word] AI 클라이언트가 없다 — 무시")
+      return
+    }
+
+    if (wordSegment === undefined) {
+      // 전송에 실패했는데 열어 두면 서버는 구간을 모르는 채로 다음 누름이
+      // word_end 를 보낸다. true 를 받았을 때만 연다.
+      if (!client.sendWordStart()) {
+        console.warn("[Word] word_start 전송 실패 — 구간을 열지 않는다")
+        return
+      }
+      wordSegment = {phase: "open", startedAt: Date.now(), timer: undefined}
+      setWordLed(true)
+      console.log("[Word] 구간 시작")
+      return
+    }
+
+    if (wordSegment.phase === "closing") {
+      console.log("[Word] 이미 닫는 중 — result 를 기다린다")
+      return
+    }
+
+    // 보낸 즉시 닫지 않는다. 진짜 닫힘은 result 도착이고, 실패하면 안전망
+    // 타이머가 열린 상태를 걷어낸다.
+    if (!client.sendWordEnd()) {
+      console.warn("[Word] word_end 전송 실패 — 안전망 타이머에 맡긴다")
+      return
+    }
+    wordSegment.phase = "closing"
+    console.log(`[Word] 구간 종료 요청. 길이=${Date.now() - wordSegment.startedAt}ms`)
+  }
+
+  /**
+   * AiClient 가 ack 를 받을 때마다 부르는 곳. word_start 가 받아들여진 뒤에야
+   * 안전망 타이머를 건다 — 한도(max_seconds)를 아는 것이 서버뿐이라서다.
+   */
+  function handleAck(ack: AiAck): void {
+    if (ack.status === "word_already_closed") {
+      // 서버가 한도로 먼저 닫은 뒤 word_end 가 도착했다. 오류가 아니라 경합이다.
+      console.log("[Word] 서버가 이미 닫은 구간이다 — 상태만 정리")
+      clearWordSegment()
+      return
+    }
+    if (ack.status !== "word_start_accepted") return
+    if (wordSegment === undefined) {
+      console.warn("[Word] word_start_accepted 인데 열린 구간이 없다 — 무시")
+      return
+    }
+
+    let maxSeconds = ack.maxSeconds
+    if (maxSeconds === undefined) {
+      maxSeconds = WORD_MAX_SECONDS_FALLBACK
+      console.warn(`[Word] ack 에 max_seconds 가 없다 — ${WORD_MAX_SECONDS_FALLBACK}초로 폴백`)
+    }
+    armWordTimer(maxSeconds)
+  }
+
+  /** 열린 구간에 안전망 타이머를 (다시) 건다. 이미 걸려 있으면 갈아 끼운다. */
+  function armWordTimer(maxSeconds: number): void {
+    if (wordSegment === undefined) return
+    if (wordSegment.timer !== undefined) clearTimeout(wordSegment.timer)
+    wordSegment.timer = setTimeout(() => {
+      // 서버가 자동 종료했으면 result 가 왔어야 한다. 안 왔으면 우리 쪽 상태만
+      // 남은 것이라 걷어낸다. word_end 는 다시 보내지 않는다 — 서버에 열린
+      // 구간이 없다.
+      console.warn("[Word] result 가 안 왔다 — 상태 강제 정리")
+      clearWordSegment()
+    }, maxSeconds * 1000 + WORD_TIMER_GRACE_MS)
+  }
+
+  /**
+   * AiClient 가 서버 `error` 를 받을 때마다 부르는 곳. 구간 오류 넷은 앱 상태를
+   * 서버에 맞춘 뒤, 나머지 code 와 똑같이 방송한다.
    */
   function handleAiError(err: AiServerError): void {
+    // 구간 오류는 스트림을 죽이지 않는다 — 넷 다 setState("error") 를 부르지
+    // 않는 이유다. 실패한 것은 구간 하나뿐이다.
+    //
+    // clearWordSegment() 는 open 이든 closing 이든 지운다. word_end 를 보낸 뒤
+    // result 대신 오류가 오는 경우가 있는데, closing 이 남으면 안전망 타이머가
+    // 터질 때까지 버튼이 안 먹는다.
+    //
+    // 거절 깜빡임은 switch 뒤에서 한 번만 얹는다. 구간 정리·복원이 끝난 뒤 flash 복귀가 그 시점에 맞는 불을 고른다.
+    let rejected = false
+    switch (err.code) {
+      case "word_too_short":
+        // 8프레임 미만. 서버는 이미 닫았으므로 앱도 닫는다.
+        console.warn("[Word] 구간이 너무 짧습니다.")
+        clearWordSegment()
+        rejected = true
+        break
+
+      case "word_not_started":
+        // 앱은 열린 줄 알았는데 서버엔 없다. 앱을 닫아 서버에 맞춘다.
+        console.warn("[Word] 서버에 열린 구간이 없습니다 — 앱 상태를 닫습니다")
+        clearWordSegment()
+        rejected = true
+        break
+
+      case "word_already_started": {
+        // 반대 방향의 어긋남. 서버엔 열려 있으니 앱을 열림으로 맞춘다. 연 시각은
+        // 알 수 없어 기존 값이 있으면 그대로 쓰고, 오류에는 max_seconds 가 실려
+        // 오지 않아 안전망은 폴백으로 건다.
+        console.warn("[Word] 서버에 구간이 이미 열려 있습니다 — 앱 상태를 열림으로 맞춥니다")
+        const startedAt = wordSegment?.startedAt ?? Date.now()
+        clearWordSegment()
+        wordSegment = {phase: "open", startedAt, timer: undefined}
+        // 서버 기준으로는 열린 구간이라 불도 열림으로 되돌린다.
+        setWordLed(true)
+        armWordTimer(WORD_MAX_SECONDS_FALLBACK)
+        rejected = true
+        break
+      }
+
+      case "word_recognition_failed":
+        // 서버는 구간을 닫았는데 판정에 실패했다. result 가 오지 않는 유일한
+        // 경로라 여기서 닫지 않으면 다음 짧게 누르기가 word_end 로 나간다.
+        // retryable=true 로 오지만 읽지 않는다 — 다시 누르는 것은 같은 구간의
+        // 재시도가 아니라 word_start 부터의 새 구간이다.
+        console.warn("[Word] 서버 판정에 실패했습니다. — 구간을 닫습니다.")
+        clearWordSegment()
+        rejected = true
+        break
+
+      case "model_unavailable":
+        // 프레임 한 장이 실패한 것이다(session_websocket.py). 수어하는
+        // 도중에도 오므로 구간을 닫지 않는다 — 닫으면 단어가 통째로 날아간다.
+        console.warn("[AI] 프레임 인식 실패 — 구간은 그대로 둔다")
+        break
+    }
+
+    if (rejected) flashLed(REJECT_LED, FLASH_MS)
+
     patch("error", {code: err.code, message: err.message, retryable: err.retryable})
   }
 
@@ -761,7 +1070,19 @@ registerMiniapp((session) => {
   function setState(next: AppState): void {
     if (appState === next) return
     console.log(`[State] ${appState} -> ${next}`)
+    // 상태가 바뀌면 flash 는 버린다. 아래 publishStreamState 가 새 상태의 불을
+    // 켜므로, 남겨 두면 옛 상태로 되돌리는 복귀가 뒤늦게 덮어쓴다.
+    clearLedFlashTimer()
+    // streaming 을 벗어나면 열린 구간은 갈 곳이 없다. 서버도 열린 구간을 결과
+    // 없이 버리므로 word_end 는 보내지 않는다.
+    const leavingStreaming = appState === "streaming" && wordSegment !== undefined
     appState = next
+    // 정리를 appState 를 옮긴 뒤로 미룬다. 먼저 하면 clearWordSegment 안의
+    // restoreLed 가 옛 상태의 불을 한 번 켰다가 곧바로 새 상태로 덮인다.
+    if (leavingStreaming) {
+      console.log("[Word] streaming 종료 — 구간 정리")
+      clearWordSegment()
+    }
     publishStreamState()
   }
 
@@ -857,6 +1178,14 @@ registerMiniapp((session) => {
           // 라 아무것도 하지 않고, 시작 시퀀스가 제 자리에서 보낸다.
           const live = activeStream
           if (live?.webrtcUrl === undefined) return
+
+          // 새 session_id 라 서버엔 열린 구간이 없다. 남겨 두면 다음 짧게
+          // 누르기가 word_end 로 나가 word_not_started 로 거절된다.
+          if (wordSegment !== undefined) {
+            console.log("[Word] 재연결 — 남아 있던 구간 정리")
+            clearWordSegment()
+          }
+
           console.log("[Stream] ready 이후 stream_start 재전송. streamId=", live.streamId)
           if (!ai?.sendStreamStart(live.streamId, live.webrtcUrl)) {
             // 롤백도 error 방송도 하지 않는다. ready 직후라 소켓은 열려 있으므로
@@ -869,6 +1198,10 @@ registerMiniapp((session) => {
         // 브리지는 전적으로 이쪽에 있다.
         handleResult,
         handleAiError,
+        // ack 는 word_start 의 max_seconds 만 쓴다.
+        handleAck,
+        // 처리 fps 의 출처. 구간이 열려 있는 동안 초당 한 번 온다.
+        trackProcessedFps,
       )
       console.log("[AI] 인스턴스 생성", ai.getId())
       ai.connect()
@@ -1206,9 +1539,8 @@ registerMiniapp((session) => {
       //
       // resolvedConfig 는 Optional 이다. 모든 단계를 옵셔널 체이닝으로 탄다.
       // 호스트명은 parseUrlParts() 로 뽑는다 — 이 런타임에 `new URL()` 은 없다.
-      // 새 스트림의 서버 카운터는 1부터 다시 시작한다. 이전 스트림의 처리 fps 를
-      // 그대로 들고 있으면 안 되므로 기준점과 표시값을 함께 비운다.
-      resetProcessedFps()
+      // 아래 processedFps: null 이 이전 스트림의 값을 지운다. 새 스트림의 첫
+      // word_progress 가 오기 전까지는 보여 줄 값이 없다.
       patch("stream:diagnostics", {
         requestedFps,
         resolvedFps: result?.resolvedConfig?.video?.fps ?? null,
@@ -1365,9 +1697,9 @@ registerMiniapp((session) => {
             return
         }
       } else {
-        // 짧게 누르는 것은 의도적으로 무동작이다. 예전 빌드는 여기서 사진 촬영을
-        // 걸었고 그것이 camera_busy 의 원인이었다. 이어받지 않았다.
-        console.log("[Input] short (무시)")
+        // 짧게 누르면 단어 구간을 토글한다. 예전 빌드의 사진 촬영은 이어받지 않았다.
+        console.log("[Input] SHORT state=", appState)
+        handleWordPress()
       }
     }),
   )

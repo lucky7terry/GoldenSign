@@ -24,7 +24,7 @@
  *     멱등이므로 소켓이 사라진 뒤에 보내도 무해하다.
  */
 
-import {AI_HTTP, CLIENT_NAME, HELLO_SCHEMA, STREAM_SCHEMA} from "../shared/config"
+import {AI_HTTP, CLIENT_NAME, HELLO_SCHEMA, STREAM_SCHEMA, WORD_SCHEMA} from "../shared/config"
 
 // ---------------------------------------------------------------------------
 // 런타임 전역 확인
@@ -112,12 +112,65 @@ function logFetchError(tag: string, label: string, err: unknown): void {
  * 없으니 헷갈리지 말 것.
  */
 export interface AiRecognitionResult {
-  text: string
+  /** 모델 연결 전에는 서버가 null 을 보낸다. "" 로 뭉개면 빈 결과와 구분이 안 된다. */
+  text: string | null
   confidence: number
   isFinal: boolean
   windowIndex: number
   /** 서버 누적 처리 프레임 수. 없거나 숫자가 아니면 null. */
   sequenceIndex: number | null
+  // 아래는 단어 구간(word) 결과에만 실려 온다. 프레임 스트림 result 에는 없다.
+  /**
+   * `word` 블록이 실려 있었는지. 이 결과가 구간 결과인지 가르는 유일한 기준이다
+   * — 개별 필드가 비어도 판단이 흔들리지 않게 블록 유무만 본다.
+   */
+  isWordResult: boolean
+  /** "client" | "timeout" — 구간이 왜 닫혔는지. */
+  closeReason?: string
+  /** 구간이 모은 원본 프레임 수(리샘플 전). */
+  wordFrameCount?: number
+  /** 구간의 실제 길이(ms). 서버가 null 로 주면 없다. */
+  spanMs?: number
+  /** 시간축 리샘플이 제때 끝났는지. */
+  resampledOnTime?: boolean
+  /** 결과 생성 시점의 모델 로드 여부. */
+  modelLoaded?: boolean
+  /** 서버의 판정 근거. 거절됐을 때 무엇을 1위로 봤는지 로그로 남기는 용도다. */
+  recognition?: AiRecognitionDecision
+}
+
+/**
+ * `result.recognition` 블록. 화면에도 LED 에도 쓰지 않는다 — 앱 동작은 이 값에
+ * 의존하지 않고, 서버가 왜 그렇게 판정했는지 로그로 남기기 위한 것이다.
+ */
+export interface AiRecognitionDecision {
+  /** 1위 후보. 서버가 문자열로 주지 않으면 null. */
+  candidate: string | null
+  confidence: number | null
+  /** 1위와 2위의 점수 차. */
+  margin: number | null
+  /** 임계값을 넘겨 채택됐는지. */
+  accepted: boolean | null
+}
+
+/**
+ * 파싱된 `word_progress` 페이로드. 서버가 구간이 열려 있는 동안 초당 한 번 보낸다.
+ * processedFrameCount 는 서버가 실제로 처리한 수다.
+ */
+export interface AiWordProgress {
+  frameCount: number
+  processedFrameCount: number
+  /** 서버가 계산한 처리 fps. 첫 건에서는 null 이다. */
+  processedFps: number | null
+}
+
+/** 파싱된 `ack` 페이로드. `onAck` 콜백으로 호출부에 전달된다. */
+export interface AiAck {
+  /** word_start_accepted / word_already_closed / stream_start_accepted 등. */
+  status: string | null
+  clientMessageId: string | null
+  /** word_start ack 에만 실린다. 서버가 구간을 자동으로 닫는 한도(초). */
+  maxSeconds?: number
 }
 
 /**
@@ -212,12 +265,18 @@ export class AiClient {
    *                순수 데이터만 나가며 이 클래스는 UI 를 참조하지 않는다.
    * @param onError `error` 메시지 한 건마다 호출된다. stream_unavailable 처럼
    *                서버가 손을 뗀 상황이 호출부까지 닿는 유일한 통로다.
+   * @param onAck `ack` 한 건마다 호출된다. word_start 의 max_seconds 처럼
+   *              status 에 딸려 오는 값이 호출부까지 닿는 통로다.
+   * @param onWordProgress `word_progress` 한 건마다 파싱된 필드로 호출된다.
+   *                       서버가 구간이 열려 있는 동안 초당 한 번 보낸다.
    */
   constructor(
     private readonly userId: string,
     private readonly onReady?: () => void,
     private readonly onResult?: (result: AiRecognitionResult) => void,
     private readonly onError?: (error: AiServerError) => void,
+    private readonly onAck?: (ack: AiAck) => void,
+    private readonly onWordProgress?: (progress: AiWordProgress) => void,
   ) {}
 
   /**
@@ -624,6 +683,47 @@ export class AiClient {
           }
         }
         console.log(`${this.tag} ack 전문:`, JSON.stringify(parsed))
+
+        // status 를 로그만 찍고 버리면 word_start 의 max_seconds 가 여기서 끊긴다.
+        if (this.onAck !== undefined) {
+          const status = m?.status
+          const maxSeconds = m?.max_seconds
+          try {
+            this.onAck({
+              status: typeof status === "string" ? status : null,
+              clientMessageId: typeof cmid === "string" ? cmid : null,
+              maxSeconds: typeof maxSeconds === "number" ? maxSeconds : undefined,
+            })
+          } catch (err) {
+            console.error(`${this.tag} onAck 콜백 예외:`, err)
+          }
+        }
+        break
+      }
+
+      case "word_progress": {
+        // 구간이 열려 있는 동안 초당 한 번 온다. default 로 두면 같은 주기로
+        // "미지의 메시지" 경고가 찍힌다.
+        const frameCount = m?.frame_count
+        const processedFrameCount = m?.processed_frame_count
+        const processedFps = m?.processed_fps
+        console.log(
+          `${this.tag} word_progress frames=${String(frameCount)}` +
+            ` processed=${String(processedFrameCount)} fps=${String(processedFps)}`,
+        )
+        if (this.onWordProgress !== undefined) {
+          try {
+            this.onWordProgress({
+              frameCount: typeof frameCount === "number" ? frameCount : 0,
+              processedFrameCount:
+                typeof processedFrameCount === "number" ? processedFrameCount : 0,
+              // 첫 건은 서버도 낼 근거가 없어 null 로 온다.
+              processedFps: typeof processedFps === "number" ? processedFps : null,
+            })
+          } catch (err) {
+            console.error(`${this.tag} onWordProgress 콜백 예외:`, err)
+          }
+        }
         break
       }
 
@@ -638,6 +738,27 @@ export class AiClient {
             ` window=${String(asRecord(r?.sequence)?.window_index)}` +
             ` seq=${String(m?.sequence_index)}`,
         )
+        // 단어 구간 result 는 word / model / recognition 블록을 함께 싣는다.
+        // 프레임 스트림 result 에는 셋 다 없다.
+        const word = asRecord(m?.word)
+        const model = asRecord(m?.model)
+        const decision = asRecord(m?.recognition)
+        if (word !== undefined) {
+          console.log(
+            `${this.tag} result.word close=${String(word.close_reason)}` +
+              ` frames=${String(word.frame_count)} span=${String(word.span_ms)}ms` +
+              ` resampled_on_time=${String(word.resampled_on_time)}` +
+              ` model_loaded=${String(model?.loaded)}`,
+          )
+        }
+        // 거절됐을 때 서버가 무엇을 1위로 봤는지 남긴다. 화면에도 LED 에도 쓰지 않는다.
+        if (decision !== undefined) {
+          console.log(
+            `${this.tag} result.recognition candidate=${JSON.stringify(decision.candidate)}` +
+              ` conf=${String(decision.confidence)} margin=${String(decision.margin)}` +
+              ` accepted=${String(decision.accepted)}`,
+          )
+        }
         if (RESULT_VERBOSE) {
           console.log(`${this.tag} result.sequence=`, JSON.stringify(r?.sequence))
           console.log(`${this.tag} result 전문:`, JSON.stringify(parsed))
@@ -652,13 +773,32 @@ export class AiClient {
           const windowIndex = asRecord(r?.sequence)?.window_index
           // r 이 아니라 m 에서 읽는다 — 최상위 형제 필드다.
           const sequenceIndex = m?.sequence_index
+          const spanMs = word?.span_ms
           try {
             this.onResult({
-              text: typeof r?.text === "string" ? r.text : "",
+              // 서버가 null 을 보내는 것과 빈 문자열을 보내는 것은 다른 뜻이다.
+              text: typeof r?.text === "string" ? r.text : null,
               confidence: typeof r?.confidence === "number" ? r.confidence : 0,
               isFinal: r?.is_final === true,
               windowIndex: typeof windowIndex === "number" ? windowIndex : -1,
               sequenceIndex: typeof sequenceIndex === "number" ? sequenceIndex : null,
+              isWordResult: word !== undefined,
+              closeReason: typeof word?.close_reason === "string" ? word.close_reason : undefined,
+              wordFrameCount: typeof word?.frame_count === "number" ? word.frame_count : undefined,
+              spanMs: typeof spanMs === "number" ? spanMs : undefined,
+              resampledOnTime:
+                typeof word?.resampled_on_time === "boolean" ? word.resampled_on_time : undefined,
+              modelLoaded: typeof model?.loaded === "boolean" ? model.loaded : undefined,
+              recognition:
+                decision === undefined
+                  ? undefined
+                  : {
+                      candidate: typeof decision.candidate === "string" ? decision.candidate : null,
+                      confidence:
+                        typeof decision.confidence === "number" ? decision.confidence : null,
+                      margin: typeof decision.margin === "number" ? decision.margin : null,
+                      accepted: typeof decision.accepted === "boolean" ? decision.accepted : null,
+                    },
             })
           } catch (err) {
             console.error(`${this.tag} onResult 콜백 예외:`, err)
@@ -843,6 +983,72 @@ export class AiClient {
     this.streamStopSent.add(streamId)
     this.pendingAcks.set(clientMessageId, {label: "stream_stop", sentAt: Date.now()})
     console.log(`${this.streamTag} stream_stop 전송 시각=`, new Date().toISOString())
+    return sent
+  }
+
+  // -------------------------------------------------------------------------
+  // 단어 구간 메시지
+  // -------------------------------------------------------------------------
+
+  /**
+   * 한 단어의 시작을 알린다. 이 시점부터 word_end 까지의 프레임만 서버가 모은다.
+   *
+   * stream_start 와 달리 중복 가드가 없다 — 단어는 한 세션에서 여러 번 반복된다.
+   * 이미 열린 구간이 있으면 서버가 word_already_started 오류로 거절한다.
+   * 동기 함수라 어느 콜백에서 불러도 안전하다. 아무것도 안 보냈으면 false.
+   */
+  sendWordStart(): boolean {
+    const sessionId = this.sessionId
+    if (sessionId === undefined) {
+      console.error(`${this.tag} word_start 전송 불가 — AI session_id 없음`)
+      return false
+    }
+
+    const clientMessageId = `word-start-${Date.now()}`
+    const sent = this.sendJson(
+      {
+        // 단어 계열은 WORD_SCHEMA 를 탄다.
+        type: "word_start",
+        schema_version: WORD_SCHEMA,
+        session_id: sessionId,
+        client_message_id: clientMessageId,
+      },
+      "word_start",
+    )
+    if (!sent) return false
+
+    this.pendingAcks.set(clientMessageId, {label: "word_start", sentAt: Date.now()})
+    console.log(`${this.tag} word_start 전송 시각=`, new Date().toISOString())
+    return sent
+  }
+
+  /**
+   * 단어의 끝을 알린다. 서버가 구간을 닫고 `result` 를 보낸다.
+   *
+   * 이미 서버가 max_seconds 로 자동 종료했다면 오류가 아니라
+   * status="word_already_closed" 인 ack 이 온다.
+   */
+  sendWordEnd(): boolean {
+    const sessionId = this.sessionId
+    if (sessionId === undefined) {
+      console.error(`${this.tag} word_end 전송 불가 — AI session_id 없음`)
+      return false
+    }
+
+    const clientMessageId = `word-end-${Date.now()}`
+    const sent = this.sendJson(
+      {
+        type: "word_end",
+        schema_version: WORD_SCHEMA,
+        session_id: sessionId,
+        client_message_id: clientMessageId,
+      },
+      "word_end",
+    )
+    if (!sent) return false
+
+    this.pendingAcks.set(clientMessageId, {label: "word_end", sentAt: Date.now()})
+    console.log(`${this.tag} word_end 전송 시각=`, new Date().toISOString())
     return sent
   }
 

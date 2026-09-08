@@ -68,6 +68,18 @@ function fmtWindowIndex(value: number | undefined): string {
 }
 
 /**
+ * 화면에 띄울 문구. 판정은 서버가 끝냈고 text 가 그 결과라 앱은 confidence 를
+ * 다시 보지 않는다. 비어 있을 때만 왜 비었는지를 대신 보여 준다.
+ */
+function resultLabel(r: Channels["recognition:result"] | undefined): string {
+  if (r === undefined) return "—"
+  if (r.text !== null && r.text !== "") return r.text
+  if (r.modelLoaded === false) return "모델 미연결"
+
+  return r.modelLoaded === true ? "확신 부족" : "—"
+}
+
+/**
  * 스냅샷의 히스토리를 이미 도착한 live 결과 *아래* 로 접어 넣는다.
  *
  * 히스토리가 먼저이고 live 가 뒤인 이유는 히스토리가 구조적으로 더 오래됐기
@@ -228,7 +240,9 @@ function VisualFeedback({tone, animated}: {tone: Tone; animated: boolean}) {
  */
 function ResultPanel({results}: {results: Channels["recognition:result"][]}) {
   const finals = results.filter((r) => r.isFinal)
-  const sentence = finals.length > 0 ? finals[finals.length - 1].text : null
+  const sentence = finals.length > 0 ? resultLabel(finals[finals.length - 1]) : null
+  // 마지막 단어 구간 요약. close_reason 이 비어도 구간 결과다.
+  const lastWord = results.filter((r) => r.isWordResult).pop()
 
   return (
     <section className="gs-card">
@@ -245,7 +259,7 @@ function ResultPanel({results}: {results: Channels["recognition:result"][]}) {
               key={`${i}-${r.windowIndex}`}
               className={`gs-chip ${r.isFinal ? "gs-chip-final" : "gs-chip-interim"}`}
             >
-              {r.text}
+              {resultLabel(r)}
               {r.isFinal ? "" : "…"}
             </span>
           ))}
@@ -255,6 +269,13 @@ function ResultPanel({results}: {results: Channels["recognition:result"][]}) {
       <p className="gs-sentence" aria-live="polite">
         {sentence ?? "—"}
       </p>
+
+      {lastWord === undefined ? null : (
+        <p className="gs-empty">
+          마지막 구간: {fmt(lastWord.wordFrameCount)}프레임 · {fmt(lastWord.spanMs)}ms ·{" "}
+          {fmt(lastWord.closeReason)}
+        </p>
+      )}
     </section>
   )
 }
@@ -269,12 +290,14 @@ function DiagnosticsPanel({snap}: {snap: Snapshot}) {
 
       <dl className="gs-diag-list">
         <div className="gs-diag-row">
-          <dt>fps</dt>
+          <dt>fps (처리는 구간 중에만 갱신)</dt>
           <dd className="gs-mono">
             {/*
-              요청 → 협상 → 서버가 실제로 처리 중인 값. 세 번째는 background 가
-              연속한 두 result 의 최상위 `sequence_index` 차분으로 계산한다.
-              첫 result 한 건만으로는 차분이 안 나오므로 그동안은 "—" 다.
+              요청 → 협상 → 서버가 실제로 처리 중인 값. 세 번째는 서버가
+              word_progress 에 실어 보내는 processed_fps 를 그대로 띄운다.
+              word_progress 는 단어 구간이 열려 있는 동안에만 오므로, 구간이
+              닫혀 있으면 마지막 값이 그대로 멈춰 있다.
+              구간의 첫 건은 서버도 값을 못 내므로 그동안은 "—" 다.
             */}
             {fmt(d.requestedFps)} → {fmt(d.resolvedFps)} → {fmt(d.processedFps)}
           </dd>
@@ -299,10 +322,13 @@ function DiagnosticsPanel({snap}: {snap: Snapshot}) {
           <dt>window index</dt>
           <dd className="gs-mono">{fmtWindowIndex(latest?.windowIndex)}</dd>
         </div>
-        <div className="gs-diag-row">
-          <dt>confidence</dt>
-          <dd className="gs-mono">{fmt(latest?.confidence)}</dd>
-        </div>
+        {/* 모델 미연결이면 서버가 0.0 을 보낸다. 그리면 "확신도 0%" 로 읽힌다. */}
+        {latest?.modelLoaded === false ? null : (
+          <div className="gs-diag-row">
+            <dt>confidence</dt>
+            <dd className="gs-mono">{fmt(latest?.confidence)}</dd>
+          </div>
+        )}
         <div className="gs-diag-row">
           <dt>stream.state</dt>
           <dd className="gs-mono">{snap.stream.state}</dd>
