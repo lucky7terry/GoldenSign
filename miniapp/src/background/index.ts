@@ -63,6 +63,7 @@ import {
   type AiServerError,
   type AiWordProgress,
 } from "./ai-client"
+import {speakSafe, START_ANNOUNCEMENT} from "./tts"
 
 /**
  * background 엔트리는 `StreamModule` 은 re-export 하지만 옵션/결과 인터페이스는
@@ -522,6 +523,10 @@ registerMiniapp((session) => {
    * 번째 롱프레스가 병렬 실행을 시작해서는 안 되기 때문이다.
    */
   let startInFlight = false
+  /**
+   * 시작 안내를 읽었는지 확인.
+   */
+  let startAnnounced = false
   /**
    * 열려 있는 단어 구간. 닫혀 있으면 undefined 다. `phase` 가 "closing" 인 구간은
    * word_end 를 보내고 result 를 기다리는 중이다 — 진짜 닫힘은 result 도착이다.
@@ -1166,8 +1171,17 @@ registerMiniapp((session) => {
       ai = new AiClient(
         session.userId,
         () => {
-          if (appState === "connecting_ai" || appState === "error") setState("ai_ready")
-          else console.log("[AI] ready 수신했지만 state 유지:", appState)
+          if (appState === "connecting_ai" || appState === "error") {
+            setState("ai_ready")
+            // 읽을 수 있게 된 첫 순간에 안내한다. 
+            if (!startAnnounced) {
+              startAnnounced = true
+              speakSafe(session.speaker, START_ANNOUNCEMENT, "start")
+            }
+          } else {
+            // 스트리밍 중 재연결로 온 ready의 경우는 읽지 않는다. 
+            console.log("[AI] ready 수신했지만 state 유지:", appState)
+          }
           // 조건 없이 방송한다. AI 단계는 별개의 축이라, 이미 스트리밍 중일 때
           // 재연결이 성공하면 appState 는 그대로여도 UI 에는 알려야 한다.
           publishAiState("ready")
