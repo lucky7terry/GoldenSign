@@ -6,6 +6,9 @@ import type {SpeakerModule} from "@mentra/miniapp/background"
 export const START_ANNOUNCEMENT =
   "안녕하세요, 골든사인입니다. 환자분의 수어를 안경 카메라로 읽고, 그 뜻을 바로 음성으로 알려 드릴게요. 버튼을 길게 누르면 인식이 시작되고, 수어 단어 하나를 시작할 때와 끝날 때 짧게 눌러 주세요."
 
+// 설정을 넘기면 서버 기본값이 통째로 교체되므로 속도만 바꿀 때도 네 값을 모두 넘긴다.
+const VOICE_SETTINGS = {speed: 1.0, stability: 0.68, similarity_boost: 0.75, style: 0}
+
 type UnknownRecord = Record<string, unknown>
 
 function asRecord(value: unknown): UnknownRecord | undefined {
@@ -30,7 +33,7 @@ export function speakSafe(speaker: SpeakerModule, text: string, tag: string): vo
   // voice_id 금지 — "ko" 를 넣으면 클라우드가 실패하고 오프라인으로 조용히 넘어간다.
   try {
     void speaker
-      .speak(text)
+      .speak(text, {voice_settings: VOICE_SETTINGS})
       .then((result) => {
         // completed=false 는 실패가 아니라 중단
         console.log(`[TTS] ${tag} 완료 completed=${result.completed}`)

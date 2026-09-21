@@ -890,6 +890,8 @@ registerMiniapp((session) => {
       // 않는다 — 원본 text 유무만 본다.
       const hasText = next.text !== null && next.text !== ""
       flashLed(hasText ? RESULT_HIGH_LED : RESULT_LOW_LED, FLASH_MS)
+      // 텍스트가 없는 결과는 읽지 않는다.
+      if (next.text !== null && next.text !== "") speakSafe(session.speaker, next.text, "result")
     }
     // 채널에 선언된 필드만 골라 담는다. next 를 통째로 넘기면 UI 가 쓰지 않기로
     // 한 recognition(임계값 조정용)까지 스냅샷에 실려 간다. text 는 null 그대로
