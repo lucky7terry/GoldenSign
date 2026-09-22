@@ -123,8 +123,18 @@ RECOGNITION_MARGIN_THRESHOLD = _env_probability(
 )
 
 # 단어 구간을 닫기 전에 큐에 남은 프레임을 기다리는 최대 시간. 0 이면
-# 기다리지 않는다.
-WORD_DRAIN_TIMEOUT_SECONDS = _env_float("WORD_DRAIN_TIMEOUT_SECONDS", 2.0)
+# 기다리지 않는다 - allow_disable 이 없으면 _env_float 가 0 을 거절해서
+# "기다리지 않는다"를 설정할 방법이 없다.
+WORD_DRAIN_TIMEOUT_SECONDS = _env_float(
+    "WORD_DRAIN_TIMEOUT_SECONDS", 2.0, allow_disable=True,
+)
+
+# word_start ack 의 max_seconds. 앱은 이 값으로 "이 안에는 result 나 오류가
+# 온다"는 안전망 타이머를 건다. 자동 종료(WORD_MAX_SECONDS)가 지나도 큐 소진
+# 대기(WORD_DRAIN_TIMEOUT_SECONDS)와 추론이 남아 있으므로, WORD_MAX_SECONDS 만
+# 보내면 앱 타이머가 result 보다 먼저 터지고 뒤늦게 온 result 는 이미 지워진
+# 구간 위에 떨어진다.
+WORD_RESULT_DEADLINE_SECONDS = WORD_MAX_SECONDS + max(WORD_DRAIN_TIMEOUT_SECONDS, 0.0)
 
 # result 메시지에 좌표를 실을지. 좌표는 실수 959개로 메시지의 94% 를 차지하는데
 # (8,338 -> 479 바이트) 미니앱은 읽지 않는다. 기본은 빼고, 서버 좌표를 눈으로
