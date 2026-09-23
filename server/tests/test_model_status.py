@@ -19,7 +19,7 @@ def _function(name, **injected):
         "keypoint_extraction_error": lambda: None,
         "recognition_model_available": lambda: True,
         "recognition_model_error": lambda: None,
-        "model_path": lambda: Path("models/model_fold0.keras"),
+        "recognition_models_loaded": lambda: 5,
     }
     namespace.update(injected)
     exec(compile(ast.Module([node], []), "<model_service>", "exec"), namespace)
@@ -38,7 +38,7 @@ class ModelStatusTest(unittest.TestCase):
 
         self.assertTrue(status["loaded"])
         self.assertEqual(status["mode"], "recognition")
-        self.assertIn("model_fold0", status["version"])
+        self.assertIn("5-fold ensemble", status["version"])
 
     def test_status_is_not_loaded_while_only_keypoints_work(self):
         """MediaPipe 는 되는데 인식 모델만 없는 상태."""

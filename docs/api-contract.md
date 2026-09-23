@@ -463,7 +463,8 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 | `WORD_SOURCE_FPS` | `30.0` | 되돌릴 격자의 프레임레이트. 원본 영상과 같게 둔다 |
 | `RECOGNITION_CONFIDENCE_THRESHOLD` | `0.5` | 이 아래면 단어를 주장하지 않는다 |
 | `RECOGNITION_MARGIN_THRESHOLD` | `0.15` | 2위와의 격차가 이 아래면 주장하지 않는다 |
-| `RECOGNITION_MODEL_FILENAME` | `model_fold0.keras` | `server/models/` 안의 파일명 |
+| `RECOGNITION_MODEL_FILENAMES` | `model_fold0.keras,…,model_fold4.keras` | 확률을 평균할 모델 파일들(`server/models/` 안). 하나라도 없으면 인식 모델 전체가 비활성 |
+| `RECOGNITION_MODEL_FILENAME` | (없음) | 예전 설정. `…FILENAMES` 가 없고 이것만 있으면 그 파일 하나로 돈다 |
 
 ---
 

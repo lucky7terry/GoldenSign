@@ -3,6 +3,12 @@
 학습 노트북(transformer_tuning_얼굴포함_개선.ipynb)이 저장한 Keras 모델을
 읽는다. 모델은 (60, 420) 특징 시퀀스를 받아 50개 단어에 대한 확률을 낸다.
 
+5-fold 교차검증으로 학습한 모델 5개를 모두 올려 확률을 평균한다(앙상블).
+안경 영상 50개 실측(scripts/compare_team_vs_server.py)에서 fold0 단독 대비
+오답 중 확신도 0.5 초과 비율이 52% -> 23%, 서버가 내보낸 단어 중 정답 비율이
+58% -> 78% 였다. 모델 5개가 같은 오답에 똑같이 확신하는 경우가 드물어서다.
+단어 단위 판정이라 추론이 단어당 한 번뿐이므로 5배 비용은 문제가 안 된다.
+
 커스텀 레이어 3개가 `sign>` 패키지 이름으로 직렬화되어 있어, 같은 이름으로
 등록된 정의가 프로세스 안에 있어야 load_model 이 성공한다. 아래 클래스들은
 학습 코드의 정의를 그대로 옮긴 것이다 — 추론에만 필요한 경로만 남겼다.
@@ -21,6 +27,7 @@ NUM_CLASSES = 50
 
 _MODEL_DIR = Path(__file__).resolve().parents[2] / "models"
 _DEFAULT_MODEL_FILENAME = "model_fold0.keras"
+_DEFAULT_MODEL_FILENAMES = tuple(f"model_fold{k}.keras" for k in range(5))
 
 
 class RecognitionModelUnavailableError(RuntimeError):
@@ -93,7 +100,48 @@ def _register_custom_layers():
 
 
 def model_path() -> Path:
+    """모델 파일 하나의 경로. 검증 스크립트가 단일 모델로 돌 때 쓴다."""
     return _MODEL_DIR / os.getenv("RECOGNITION_MODEL_FILENAME", _DEFAULT_MODEL_FILENAME)
+
+
+def model_paths() -> list[Path]:
+    """서버가 올릴 모델 파일들. 기본은 model_fold0~4 다섯 개.
+
+    RECOGNITION_MODEL_FILENAMES 에 쉼표로 적으면 그 목록을 쓴다. 예전
+    설정인 RECOGNITION_MODEL_FILENAME 만 있으면 그 파일 하나로 돈다 -
+    이미 그렇게 배포한 곳이 조용히 앙상블로 바뀌지 않게 한다.
+
+    같은 파일이 두 번 적히면 거절한다. 평균에서 그 모델만 두 배 무게를
+    받는데, 겉으로는 정상 동작이라 아무도 모른다.
+    """
+    listed = os.getenv("RECOGNITION_MODEL_FILENAMES")
+    single = os.getenv("RECOGNITION_MODEL_FILENAME")
+    if listed is not None:
+        names = [name.strip() for name in listed.split(",") if name.strip()]
+    elif single:
+        names = [single]
+    else:
+        names = list(_DEFAULT_MODEL_FILENAMES)
+
+    if not names:
+        raise RecognitionModelUnavailableError(
+            "RECOGNITION_MODEL_FILENAMES is set but lists no model files."
+        )
+    if len(set(names)) != len(names):
+        raise RecognitionModelUnavailableError(
+            f"RECOGNITION_MODEL_FILENAMES lists a model twice: {names}."
+        )
+    return [_MODEL_DIR / name for name in names]
+
+
+def load_recognition_models() -> list:
+    """model_paths() 의 모델을 전부 읽는다. 하나라도 실패하면 전체 실패다.
+
+    일부만 올라온 채로 돌면 확률이 3개, 4개로 평균되는데 /health 는
+    정상이고 결과도 그럴듯해서 아무도 모른다. 임계값은 5개 평균 기준으로
+    잡은 값이라 모델 수가 바뀌면 의미가 달라진다. 그래서 전부 아니면 없음이다.
+    """
+    return [load_recognition_model(path) for path in model_paths()]
 
 
 def load_recognition_model(path: Path | None = None):
@@ -163,6 +211,33 @@ def make_predictor(model, batch_size: int = 1):
     return _infer
 
 
+def make_ensemble_predictor(models, batch_size: int = 1):
+    """모델 여러 개의 softmax 확률을 평균하는 추론 함수.
+
+    make_predictor 와 같은 고정 시그니처 tf.function 이다. 모델마다 따로
+    부르지 않고 한 그래프 안에서 평균까지 끝낸다 - 트레이싱이 한 번이고
+    파이썬 왕복도 한 번이다. 모델이 하나면 평균 없이 그대로 돌려준다.
+    """
+    import tensorflow as tf
+
+    models = list(models)
+    if not models:
+        raise ValueError("make_ensemble_predictor needs at least one model.")
+
+    @tf.function(
+        input_signature=[
+            tf.TensorSpec([batch_size, SEQUENCE_LENGTH, FEATURE_DIM], tf.float32)
+        ]
+    )
+    def _infer(features):
+        if len(models) == 1:
+            return models[0](features, training=False)
+        outputs = [model(features, training=False) for model in models]
+        return tf.reduce_mean(tf.stack(outputs, axis=0), axis=0)
+
+    return _infer
+
+
 _model = None
 _initialization_error: RecognitionModelUnavailableError | None = None
 _model_lock = threading.Lock()
@@ -196,7 +271,7 @@ def get_recognition_model():
         if _model is not None:
             return _model
         try:
-            _model = load_recognition_model()
+            _model = load_recognition_models()
         except RecognitionModelUnavailableError as exc:
             _initialization_error = exc
             raise
@@ -275,7 +350,11 @@ def _warm_up() -> None:
     predictor(np.zeros((1, SEQUENCE_LENGTH, FEATURE_DIM), dtype=np.float32))
     logger.info(
         "Recognition model ready",
-        extra={"classes": NUM_CLASSES, "sequence_length": SEQUENCE_LENGTH},
+        extra={
+            "classes": NUM_CLASSES,
+            "sequence_length": SEQUENCE_LENGTH,
+            "models": recognition_models_loaded(),
+        },
     )
 
 
@@ -301,7 +380,7 @@ def get_recognition_predictor():
         if _initialization_error is not None:
             raise _initialization_error
         if _predictor is None:
-            _predictor = make_predictor(get_recognition_model())
+            _predictor = make_ensemble_predictor(get_recognition_model())
     return _predictor
 
 
@@ -312,6 +391,13 @@ def recognition_model_available() -> bool:
     모델로 낸 단어는 믿을 수 없으므로 /health 도 loaded: false 여야 한다.
     """
     return _model is not None and _initialization_error is None
+
+
+def recognition_models_loaded() -> int:
+    """평균에 들어가는 모델 수. 인식할 수 없는 상태면 0."""
+    if not recognition_model_available():
+        return 0
+    return len(_model)
 
 
 def recognition_model_error() -> str | None:
