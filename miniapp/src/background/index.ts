@@ -63,7 +63,7 @@ import {
   type AiServerError,
   type AiWordProgress,
 } from "./ai-client"
-import {speakSafe, START_ANNOUNCEMENT} from "./tts"
+import {speakSafe, START_ANNOUNCEMENT, RETRY_ANNOUNCEMENT} from "./tts"
 
 /**
  * background 엔트리는 `StreamModule` 은 re-export 하지만 옵션/결과 인터페이스는
@@ -523,9 +523,7 @@ registerMiniapp((session) => {
    * 번째 롱프레스가 병렬 실행을 시작해서는 안 되기 때문이다.
    */
   let startInFlight = false
-  /**
-   * 시작 안내를 읽었는지 확인.
-   */
+  /** 시작 안내를 이미 읽었는지 확인한다. */
   let startAnnounced = false
   /**
    * 열려 있는 단어 구간. 닫혀 있으면 undefined 다. `phase` 가 "closing" 인 구간은
@@ -890,8 +888,9 @@ registerMiniapp((session) => {
       // 않는다 — 원본 text 유무만 본다.
       const hasText = next.text !== null && next.text !== ""
       flashLed(hasText ? RESULT_HIGH_LED : RESULT_LOW_LED, FLASH_MS)
-      // 텍스트가 없는 결과는 읽지 않는다.
+      // 텍스트가 있으면 그 텍스트를 읽고 없으면 재시도 안내를 읽는다.
       if (next.text !== null && next.text !== "") speakSafe(session.speaker, next.text, "result")
+      else speakSafe(session.speaker, RETRY_ANNOUNCEMENT, "retry")
     }
     // 채널에 선언된 필드만 골라 담는다. next 를 통째로 넘기면 UI 가 쓰지 않기로
     // 한 recognition(임계값 조정용)까지 스냅샷에 실려 간다. text 는 null 그대로
@@ -1017,12 +1016,15 @@ registerMiniapp((session) => {
     //
     // 거절 깜빡임은 switch 뒤에서 한 번만 얹는다. 구간 정리·복원이 끝난 뒤 flash 복귀가 그 시점에 맞는 불을 고른다.
     let rejected = false
+    // 구간이 닫혔고 다시 눌러야 하는 오류에서만 켠다.
+    let retryVoice = false
     switch (err.code) {
       case "word_too_short":
         // 8프레임 미만. 서버는 이미 닫았으므로 앱도 닫는다.
         console.warn("[Word] 구간이 너무 짧습니다.")
         clearWordSegment()
         rejected = true
+        retryVoice = true
         break
 
       case "word_not_started":
@@ -1055,6 +1057,7 @@ registerMiniapp((session) => {
         console.warn("[Word] 서버 판정에 실패했습니다. — 구간을 닫습니다.")
         clearWordSegment()
         rejected = true
+        retryVoice = true
         break
 
       case "model_unavailable":
@@ -1065,6 +1068,8 @@ registerMiniapp((session) => {
     }
 
     if (rejected) flashLed(REJECT_LED, FLASH_MS)
+    // 불을 못 보는 착용자를 위해 같은 거절을 소리로도 알린다.
+    if (retryVoice) speakSafe(session.speaker, RETRY_ANNOUNCEMENT, "retry")
 
     patch("error", {code: err.code, message: err.message, retryable: err.retryable})
   }
@@ -1175,13 +1180,13 @@ registerMiniapp((session) => {
         () => {
           if (appState === "connecting_ai" || appState === "error") {
             setState("ai_ready")
-            // 읽을 수 있게 된 첫 순간에 안내한다. 
+            // 읽을 수 있게 된 첫 순간에 안내한다.
             if (!startAnnounced) {
               startAnnounced = true
               speakSafe(session.speaker, START_ANNOUNCEMENT, "start")
             }
           } else {
-            // 스트리밍 중 재연결로 온 ready의 경우는 읽지 않는다. 
+            // 스트리밍 중 재연결로 온 ready의 경우는 읽지 않는다.
             console.log("[AI] ready 수신했지만 state 유지:", appState)
           }
           // 조건 없이 방송한다. AI 단계는 별개의 축이라, 이미 스트리밍 중일 때
