@@ -4,7 +4,10 @@ import type {SpeakerModule} from "@mentra/miniapp/background"
 
 // 기동 시 한 번 출력. 인식 결과는 서버 text 를 그대로 읽으므로 상수가 없다.
 export const START_ANNOUNCEMENT =
-  "안녕하세요, 골든사인입니다. 환자분의 수어를 안경 카메라로 읽고, 그 뜻을 바로 음성으로 알려 드릴게요. 버튼을 길게 누르면 인식이 시작되고, 수어 단어 하나를 시작할 때와 끝날 때 짧게 눌러 주세요."
+  "골든사인입니다. 버튼을 길게 누르면 인식이 시작됩니다. 수어 단어의 시작과 끝에 버튼을 짧게 눌러 주세요."
+
+// 구간 인식이 실패했을 때 LED 대신 소리로 알린다.
+export const RETRY_ANNOUNCEMENT = "인식에 실패했습니다. 재시도해주세요"
 
 // 설정을 넘기면 서버 기본값이 통째로 교체되므로 속도만 바꿀 때도 네 값을 모두 넘긴다.
 const VOICE_SETTINGS = {speed: 1.0, stability: 0.68, similarity_boost: 0.75, style: 0}
