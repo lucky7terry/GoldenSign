@@ -17,7 +17,7 @@
  * 사설 IP 로의 평문 http:// 는 iOS ATS 와 Android cleartext 정책이 각각
  * 차단할 수 있다. ai-client.ts 의 로그가 그 경우와 "서버 미기동" 을 구분한다.
  */
-export const AI_HTTP = "http://192.168.35.161:8000"
+export const AI_HTTP = "http://192.168.0.24:8000"
 
 /**
  * 세션·핸드셰이크 메시지 계열(hello / ready / frame / result / ack / stop)의
