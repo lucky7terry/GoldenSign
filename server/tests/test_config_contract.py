@@ -111,11 +111,16 @@ class WordResultDeadlineTest(unittest.TestCase):
     """word_start ack 의 max_seconds 는 자동 종료 시각이 아니라 답이 오는 상한이다.
 
     자동 종료(WORD_MAX_SECONDS) 뒤에도 큐 소진 대기(WORD_DRAIN_TIMEOUT_SECONDS)
-    와 추론이 남아 있다. WORD_MAX_SECONDS 만 보내면 앱의 안전망 타이머가
-    result 보다 먼저 터진다.
+    와 추론(WORD_INFERENCE_BUDGET_SECONDS)이 남아 있다. 하나라도 빠지면 앱의
+    안전망 타이머가 result 보다 먼저 터진다.
     """
 
-    _NAMES = ("WORD_MAX_SECONDS", "WORD_DRAIN_TIMEOUT_SECONDS", "WORD_RESULT_DEADLINE_SECONDS")
+    _NAMES = (
+        "WORD_MAX_SECONDS",
+        "WORD_DRAIN_TIMEOUT_SECONDS",
+        "WORD_INFERENCE_BUDGET_SECONDS",
+        "WORD_RESULT_DEADLINE_SECONDS",
+    )
 
     @classmethod
     def _load(cls, env: dict[str, str]):
@@ -139,15 +144,38 @@ class WordResultDeadlineTest(unittest.TestCase):
             exec(compile(ast.Module(nodes, []), "<config>", "exec"), namespace)
         return namespace
 
-    def test_deadline_covers_auto_close_and_drain(self):
-        ns = self._load({"WORD_MAX_SECONDS": "8", "WORD_DRAIN_TIMEOUT_SECONDS": "2"})
-        self.assertAlmostEqual(ns["WORD_RESULT_DEADLINE_SECONDS"], 10.0)
+    def test_deadline_covers_auto_close_drain_and_inference(self):
+        ns = self._load({
+            "WORD_MAX_SECONDS": "8",
+            "WORD_DRAIN_TIMEOUT_SECONDS": "2",
+            "WORD_INFERENCE_BUDGET_SECONDS": "1",
+        })
+        self.assertAlmostEqual(ns["WORD_RESULT_DEADLINE_SECONDS"], 11.0)
+
+    def test_default_deadline_includes_inference_budget(self):
+        """기본값만으로도 추론 여유가 들어가 있어야 한다. 빠지면 경합이 남는다."""
+        ns = self._load({})
+        self.assertGreater(ns["WORD_INFERENCE_BUDGET_SECONDS"], 0.0)
+        self.assertAlmostEqual(
+            ns["WORD_RESULT_DEADLINE_SECONDS"],
+            ns["WORD_MAX_SECONDS"]
+            + ns["WORD_DRAIN_TIMEOUT_SECONDS"]
+            + ns["WORD_INFERENCE_BUDGET_SECONDS"],
+        )
+
+    def test_inference_budget_zero_is_rejected(self):
+        """0 이면 추론 시간만큼 앱 타이머가 먼저 터진다. 기동 때 세운다."""
+        with self.assertRaises(ValueError):
+            self._load({"WORD_INFERENCE_BUDGET_SECONDS": "0"})
 
     def test_drain_can_be_disabled_with_zero(self):
         """0 은 '기다리지 않는다'다. _env_float 의 0 거절에 걸리면 서버가 못 뜬다."""
         ns = self._load({"WORD_DRAIN_TIMEOUT_SECONDS": "0"})
         self.assertEqual(ns["WORD_DRAIN_TIMEOUT_SECONDS"], 0.0)
-        self.assertAlmostEqual(ns["WORD_RESULT_DEADLINE_SECONDS"], ns["WORD_MAX_SECONDS"])
+        self.assertAlmostEqual(
+            ns["WORD_RESULT_DEADLINE_SECONDS"],
+            ns["WORD_MAX_SECONDS"] + ns["WORD_INFERENCE_BUDGET_SECONDS"],
+        )
 
     def test_deadline_is_never_below_auto_close(self):
         ns = self._load({"WORD_DRAIN_TIMEOUT_SECONDS": "-1"})

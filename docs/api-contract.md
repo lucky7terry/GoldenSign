@@ -252,15 +252,17 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
   "session_id": "abc-123",
   "client_message_id": "word-start-001",
   "status": "word_start_accepted",
-  "max_seconds": 10.0,
+  "max_seconds": 11.0,
   "received_at": "2026-09-05T01:00:00Z"
 }
 ```
 
-`max_seconds` 는 **이 안에는 반드시 `result` 나 오류가 온다**는 상한이다.
-자동 종료 시각(`WORD_MAX_SECONDS`, 8초)이 아니다. 자동 종료 뒤에도 큐 소진
-대기(`WORD_DRAIN_TIMEOUT_SECONDS`, 2초)와 추론이 남아 있어 그만큼 더한 값이다.
-앱이 안전망 타이머를 둘 거라면 이 값에 네트워크 여유만 더해서 쓴다.
+`max_seconds` 는 **서버가 이 안에 반드시 `result` 나 오류를 송신한다**는
+상한이다. 앱 도착 시각이 아니다 - 네트워크 지연은 포함하지 않는다. 자동 종료
+시각(`WORD_MAX_SECONDS`, 8초)도 아니다. 자동 종료 뒤에 남은 큐 소진
+대기(`WORD_DRAIN_TIMEOUT_SECONDS`, 2초)와 구간 마감·추론
+여유(`WORD_INFERENCE_BUDGET_SECONDS`, 1초)를 더한 값이다. 앱이 안전망 타이머를
+둘 거라면 이 값에 네트워크 여유를 더해서 쓴다.
 
 ### Client -> Server: word_end
 
@@ -458,6 +460,7 @@ ack 를 보내지 않는 이유: 앱은 `result` 를 받는 순간 구간을 닫
 |---|---|---|
 | `WORD_MAX_SECONDS` | `8.0` | 이 시간이 지나면 서버가 구간을 닫는다 |
 | `WORD_DRAIN_TIMEOUT_SECONDS` | `2.0` | 구간을 닫기 전에 큐에 남은 프레임을 기다리는 최대 시간. `0` 이면 기다리지 않는다 |
+| `WORD_INFERENCE_BUDGET_SECONDS` | `1.0` | 큐 소진 뒤 구간 마감과 추론에 주는 여유. `0` 보다 커야 한다. `max_seconds` = `WORD_MAX_SECONDS` + `WORD_DRAIN_TIMEOUT_SECONDS` + 이 값이므로 셋은 같이 조정한다 |
 | `WORD_MIN_FRAMES` | `8` | 이보다 적으면 `word_too_short`. 이슈 [#42](https://github.com/mentraconsulting/golden-sign/issues/42)에서 10을 제안했으나, 실측(영상 5개, 8~12프레임, 5/5 정답, 확신도 0.765~0.809)으로 8이 정확도를 유지하면서 짧은 단어를 덜 거절함을 확인하여 8로 결정 |
 | `WORD_TARGET_FRAMES` | `60` | 모델 입력 길이. 학습이 60이다 |
 | `WORD_SOURCE_FPS` | `30.0` | 되돌릴 격자의 프레임레이트. 원본 영상과 같게 둔다 |
