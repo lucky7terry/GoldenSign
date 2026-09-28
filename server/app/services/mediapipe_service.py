@@ -1,6 +1,7 @@
 import base64
 import binascii
 import logging
+import math
 import threading
 import time
 from pathlib import Path
@@ -246,6 +247,123 @@ class MediaPipeService:
             for landmark in landmarks
         ]
 
+    # MediaPipe Pose 의 얼굴 관련 랜드마크 번호.
+    _POSE_NOSE = 0
+    _POSE_LEFT_EYE = 2
+    _POSE_RIGHT_EYE = 5
+    _POSE_LEFT_EAR = 7
+    _POSE_RIGHT_EAR = 8
+
+    # 얼굴 폭의 몇 배를 자를지. 2.2 면 실측 기준 얼굴이 크롭의 45% 를
+    # 차지한다 - 검출기가 편하게 보는 비율이다. 너무 좁게 자르면 턱선과
+    # 이마가 잘려 70점 중 윤곽점이 틀어진다.
+    _FACE_CROP_RATIO = 2.2
+    # 크롭 한 변의 최소 픽셀. 얼굴이 아주 작게 잡힌 프레임에서 몇 픽셀짜리
+    # 이미지를 넣으면 검출기가 아무것도 못 한다.
+    _FACE_CROP_MIN_SIDE = 96
+
+    @classmethod
+    def _face_crop_box(
+        cls,
+        pose_result: Any,
+        image_width: int,
+        image_height: int,
+    ) -> tuple[int, int, int, int] | None:
+        """pose 가 찾은 얼굴 둘레를 정사각형으로 돌려준다.
+
+        정사각형인 이유는 검출기가 어차피 정사각형으로 리사이즈하기
+        때문이다. 직사각형을 넣으면 그 안에서 또 레터박스가 생겨 지금
+        고치려는 문제가 그대로 남는다.
+
+        pose 가 없거나 얼굴 점을 못 찾았으면 None - 호출자가 원본으로
+        떨어진다.
+        """
+        if not pose_result.pose_landmarks:
+            return None
+        landmarks = pose_result.pose_landmarks[0]
+        needed = (
+            cls._POSE_NOSE,
+            cls._POSE_LEFT_EYE,
+            cls._POSE_RIGHT_EYE,
+            cls._POSE_LEFT_EAR,
+            cls._POSE_RIGHT_EAR,
+        )
+        if len(landmarks) <= max(needed):
+            return None
+
+        points = [
+            (
+                landmarks[index].x * image_width,
+                landmarks[index].y * image_height,
+            )
+            for index in needed
+        ]
+        if not all(
+            math.isfinite(x) and math.isfinite(y) for x, y in points
+        ):
+            return None
+
+        xs = [x for x, _ in points]
+        ys = [y for _, y in points]
+        center_x = 0.5 * (min(xs) + max(xs))
+        center_y = 0.5 * (min(ys) + max(ys))
+
+        # 귀 사이 거리를 얼굴 폭으로 본다. 옆모습이면 두 귀가 겹쳐 0 에
+        # 가까워지므로, 눈·코까지 포함한 점들의 퍼짐을 같이 본다.
+        ear_span = math.dist(points[3], points[4])
+        spread = max(max(xs) - min(xs), max(ys) - min(ys))
+        side = cls._FACE_CROP_RATIO * max(ear_span, spread)
+        side = max(side, float(cls._FACE_CROP_MIN_SIDE))
+        if not math.isfinite(side) or side <= 0:
+            return None
+
+        half = side / 2.0
+        left = int(round(center_x - half))
+        top = int(round(center_y - half))
+        right = int(round(center_x + half))
+        bottom = int(round(center_y + half))
+
+        # 화면 밖으로 나가면 잘라낸다. 이때 정사각형이 깨지지만, 얼굴이
+        # 화면 가장자리에 붙은 경우라 어차피 일부가 안 보인다.
+        left = max(0, min(left, image_width - 1))
+        top = max(0, min(top, image_height - 1))
+        right = max(left + 1, min(right, image_width))
+        bottom = max(top + 1, min(bottom, image_height))
+
+        if right - left < 2 or bottom - top < 2:
+            return None
+        return left, top, right, bottom
+
+    @staticmethod
+    def _restore_face_to_frame(
+        face: list[dict[str, float | None]],
+        face_box: tuple[int, int, int, int],
+        image_width: int,
+        image_height: int,
+    ) -> list[dict[str, float | None]]:
+        """크롭 기준 정규화 좌표를 원본 프레임 기준으로 되돌린다.
+
+        이 변환을 빼먹으면 얼굴 좌표가 화면 좌상단 근처에 몰린 채로
+        나가고, 그게 그대로 모델 입력이 된다. 검출은 성공했는데 값은
+        틀린 - 눈에 잘 안 띄는 실패다.
+        """
+        left, top, right, bottom = face_box
+        crop_width = float(right - left)
+        crop_height = float(bottom - top)
+        for landmark in face:
+            landmark["x"] = (
+                left + float(landmark["x"]) * crop_width
+            ) / image_width
+            landmark["y"] = (
+                top + float(landmark["y"]) * crop_height
+            ) / image_height
+            # z 는 x 와 같은 단위(폭 기준)라 같은 비율로 줄인다.
+            if landmark.get("z") is not None:
+                landmark["z"] = (
+                    float(landmark["z"]) * crop_width / image_width
+                )
+        return face
+
     @staticmethod
     def _serialize_face_landmarks(
         landmarks: Any,
@@ -322,6 +440,9 @@ class MediaPipeService:
                 "Image is empty."
             )
 
+        # 얼굴 크롭이 검출 단계에서 픽셀 좌표를 쓰므로 미리 구한다.
+        image_height, image_width = image.shape[:2]
+
         try:
             rgb_image = cv2.cvtColor(
                 image,
@@ -360,9 +481,38 @@ class MediaPipeService:
                     (face_started_at - pose_started_at) * 1000.0
                 )
 
-                face_result = self._face_landmarker.detect(
-                    mediapipe_image
+                # 얼굴은 원본 프레임 그대로 넣으면 못 찾는다. 검출기가
+                # 입력을 정사각형으로 리사이즈하는데 16:9 를 넣으면 위아래가
+                # 레터박스로 채워져 얼굴이 더 작아진다. 실측: 1920x1080
+                # 원본에서 임계값을 0.1 까지 낮춰도 실패, 축소(960x540,
+                # 633x356)도 실패, 중앙 크롭(960x1080)에서만 478점 검출.
+                # 축소가 안 듣는 이유는 얼굴도 같이 작아져 비율이 그대로라서다.
+                #
+                # 그래서 pose 가 찾아 둔 얼굴 위치를 써서 잘라 넣는다.
+                # 부수 효과로 검출기가 보는 이미지가 작아져 더 빠르다.
+                face_box = self._face_crop_box(
+                    pose_result, image_width, image_height
                 )
+                #
+                # 크롭에서 못 찾았을 때 원본으로 다시 보지 않는다. 원본은
+                # 위에서 실패가 확인된 바로 그 조건이라(학습 영상 250개 검출률
+                # 0.00) 비용만 두 배가 된다. 원본은 pose 가 없어 크롭을 못
+                # 만들 때만 쓴다. 이렇게 하면 프레임당 검출이 항상 한 번이라
+                # face_detect_stats 평균에 한 번/두 번 돈 프레임이 섞이지 않는다.
+                if face_box is not None:
+                    left, top, right, bottom = face_box
+                    face_result = self._face_landmarker.detect(
+                        mp.Image(
+                            image_format=mp.ImageFormat.SRGB,
+                            data=np.ascontiguousarray(
+                                rgb_image[top:bottom, left:right]
+                            ),
+                        )
+                    )
+                else:
+                    face_result = self._face_landmarker.detect(
+                        mediapipe_image
+                    )
                 self.face_detect_stats.record(
                     (time.perf_counter() - face_started_at) * 1000.0
                 )
@@ -376,7 +526,6 @@ class MediaPipeService:
         right_hand: list[dict[str, float | None]] = []
         face: list[dict[str, float | None]] = []
         pose: list[dict[str, float | None]] = []
-        image_height, image_width = image.shape[:2]
 
         # Pose 결과 — 손 좌우 배정에 손목 좌표를 쓰므로 먼저 계산한다.
         if pose_result.pose_landmarks:
@@ -420,11 +569,15 @@ class MediaPipeService:
         if assignment["right"] is not None:
             right_hand = assignment["right"]["landmarks"]
 
-        # Face 결과
+        # Face 결과 — 크롭해서 넣었으면 좌표가 크롭 기준이므로 되돌린다.
         if face_result.face_landmarks:
             face = self._serialize_face_landmarks(
                 face_result.face_landmarks[0]
             )
+            if face_box is not None:
+                face = self._restore_face_to_frame(
+                    face, face_box, image_width, image_height
+                )
 
         self._report_timing_if_due()
 
