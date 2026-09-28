@@ -216,16 +216,29 @@ class AssignmentOrderTest(unittest.TestCase):
     이 함수를 아무도 실행하지 않기 때문이다. 첫 프레임에서 터졌다.
     """
 
-    NAMES = ("image_width", "image_height")
+    # 검출 결과들은 try 안에서만 대입되고 try 뒤에서 쓰인다. 여기에 넣어
+    # 두어야 대입 전에 쓰는 순서 실수가 잡힌다.
+    NAMES = (
+        "image_width",
+        "image_height",
+        "hand_result",
+        "pose_result",
+        "face_box",
+        "face_result",
+    )
 
-    def test_frame_size_is_assigned_before_it_is_used(self):
+    @staticmethod
+    def _function():
         tree = ast.parse(_SOURCE)
         klass = next(n for n in tree.body
                      if isinstance(n, ast.ClassDef)
                      and n.name == "MediaPipeService")
-        func = next(n for n in ast.walk(klass)
+        return next(n for n in ast.walk(klass)
                     if isinstance(n, ast.FunctionDef)
                     and n.name == "extract_keypoints_from_image")
+
+    def test_frame_size_is_assigned_before_it_is_used(self):
+        func = self._function()
 
         for name in self.NAMES:
             stores = [n.lineno for n in ast.walk(func)
@@ -244,6 +257,52 @@ class AssignmentOrderTest(unittest.TestCase):
                 f"{name} 을 만들기 전에 쓴다 "
                 f"(대입 {min(stores)}행, 사용 {min(loads)}행)",
             )
+
+    def test_detection_failure_never_falls_through(self):
+        """검출 결과는 try 안에서만 대입된다. except 가 삼키면 try 뒤에서
+        대입 안 된 face_box / face_result 를 읽어 NameError 가 난다.
+        except 가 전부 다시 던지는지 본다."""
+        func = self._function()
+        tries = [n for n in ast.walk(func) if isinstance(n, ast.Try)]
+        self.assertTrue(tries, "검출을 감싸는 try 가 없다")
+        for node in tries:
+            for handler in node.handlers:
+                self.assertIsInstance(
+                    handler.body[-1], ast.Raise,
+                    f"{handler.lineno}행 except 가 예외를 삼킨다",
+                )
+
+    def test_face_is_detected_once_per_frame(self):
+        """크롭이 빗나가도 원본으로 다시 보지 않는다.
+
+        원본은 검출률 0.00 이 확인된 조건이라 비용만 두 배가 되고,
+        face_detect_stats 평균에 한 번/두 번 돈 프레임이 섞인다. 크롭과
+        원본이 if/else 로 갈라져 있어야 한 프레임에 한 번만 돈다.
+        """
+        func = self._function()
+
+        def face_detect_calls(nodes):
+            return [
+                n for node in nodes for n in ast.walk(node)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "detect"
+                and isinstance(n.func.value, ast.Attribute)
+                and n.func.value.attr == "_face_landmarker"
+            ]
+
+        calls = face_detect_calls([func])
+        self.assertEqual(len(calls), 2, "크롭 한 번, 원본 한 번이어야 한다")
+        branches = [
+            n for n in ast.walk(func)
+            if isinstance(n, ast.If)
+            and len(face_detect_calls(n.body)) == 1
+            and len(face_detect_calls(n.orelse)) == 1
+        ]
+        self.assertEqual(
+            len(branches), 1,
+            "크롭 검출과 원본 검출이 같은 if/else 의 양쪽에 있어야 한다",
+        )
 
 
 if __name__ == "__main__":

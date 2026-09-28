@@ -493,7 +493,12 @@ class MediaPipeService:
                 face_box = self._face_crop_box(
                     pose_result, image_width, image_height
                 )
-                face_result = None
+                #
+                # 크롭에서 못 찾았을 때 원본으로 다시 보지 않는다. 원본은
+                # 위에서 실패가 확인된 바로 그 조건이라(학습 영상 250개 검출률
+                # 0.00) 비용만 두 배가 된다. 원본은 pose 가 없어 크롭을 못
+                # 만들 때만 쓴다. 이렇게 하면 프레임당 검출이 항상 한 번이라
+                # face_detect_stats 평균에 한 번/두 번 돈 프레임이 섞이지 않는다.
                 if face_box is not None:
                     left, top, right, bottom = face_box
                     face_result = self._face_landmarker.detect(
@@ -504,11 +509,7 @@ class MediaPipeService:
                             ),
                         )
                     )
-                    if not face_result.face_landmarks:
-                        # 크롭이 빗나갔을 수 있다. 원본으로 한 번 더 본다.
-                        face_box = None
-                        face_result = None
-                if face_result is None:
+                else:
                     face_result = self._face_landmarker.detect(
                         mediapipe_image
                     )
