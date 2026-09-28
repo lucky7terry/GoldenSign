@@ -7,9 +7,9 @@ from app.services.mediapipe_service import (
 )
 from app.services.openpose_converter import convert_to_openpose
 from app.services.recognition_model import (
-    model_path,
     recognition_model_available,
     recognition_model_error,
+    recognition_models_loaded,
 )
 from app.services.word_segment_service import (
     build_openpose_feature_vector,
@@ -63,10 +63,13 @@ def get_model_health_status():
             "version": "recognition model not loaded",
         }
 
+    # 필드는 세 개로 둔다. 미니앱이 {loaded, mode, version} 으로 타입을
+    # 잡았다. 모델 수는 version 에 싣는다. 일부만 올라온 상태는 로딩에서
+    # 이미 막히므로(load_recognition_models) loaded 가 true 면 전부다.
     return {
         "loaded": True,
         "mode": "recognition",
-        "version": f"mediapipe tasks-0.10.35 + {model_path().name}",
+        "version": f"mediapipe tasks-0.10.35 + {recognition_models_loaded()}-fold ensemble",
     }
 
 

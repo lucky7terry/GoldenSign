@@ -90,9 +90,14 @@ http://127.0.0.1:8000/docs
 
 ## 인식 모델
 
-`server/models/model_fold0.keras` 가 있어야 단어를 판정한다. 이 파일은
-저장소에 없다(`.gitignore`) — 모델팀에게 받아 그 경로에 두면 된다.
-파일명은 `RECOGNITION_MODEL_FILENAME` 로 바꿀 수 있다.
+`server/models/model_fold0.keras` ~ `model_fold4.keras` 5개가 있어야 단어를
+판정한다. 5-fold 모델의 확률을 평균한다(앙상블). 이 파일들은 저장소에 없다
+(`.gitignore`) — 모델팀에게 받아 그 경로에 두면 된다.
+
+하나라도 없으면 인식 모델 전체가 올라오지 않는다. 일부만으로 평균을 내면
+확률 분포가 달라져 임계값이 맞지 않는데 겉으로는 정상처럼 보이기 때문이다.
+목록은 `RECOGNITION_MODEL_FILENAMES`(쉼표 구분)로 바꿀 수 있고, 예전 설정인
+`RECOGNITION_MODEL_FILENAME` 만 있으면 그 파일 하나로 돈다.
 
 없어도 서버는 뜬다. 좌표 추출은 그대로 동작하고, `/health` 의 `loaded` 가
 `false` · `mode` 가 `keypoints_only` 로 나가며 `word_end` 결과의 `text` 는

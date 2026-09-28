@@ -47,8 +47,8 @@ def _module(*, model=None, predictor=None, error=None, loader=None):
         "_model_lock": threading.Lock(),
         "_predictor_lock": threading.Lock(),
         "RecognitionModelUnavailableError": _Unavailable,
-        "load_recognition_model": loader or (lambda: object()),
-        "make_predictor": lambda m: ("predictor", m),
+        "load_recognition_models": loader or (lambda: object()),
+        "make_ensemble_predictor": lambda m: ("predictor", m),
     }
     exec(compile(ast.Module(nodes, []), "<recognition_model>", "exec"), namespace)
     return namespace
