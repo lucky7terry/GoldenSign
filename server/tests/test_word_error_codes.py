@@ -58,6 +58,15 @@ class WordErrorCodeContractTest(unittest.TestCase):
         self.assertIn("word_recognition_failed", _word_error_codes())
         self.assertIn("word_recognition_failed", _documented_word_codes())
 
+    def test_late_word_end_after_auto_close_gets_no_ack(self):
+        """자동 종료 뒤에 온 word_end 에 ack 를 보내지 않는다.
+
+        앱은 result 로 구간을 닫고 곧바로 다음 구간을 열 수 있다. 그 뒤에
+        이전 word_end 의 ack 가 도착하면 앱은 새 구간에 대한 답으로 읽는다.
+        """
+        self.assertNotIn("word_already_closed", _SOURCE)
+        self.assertNotIn('"status": "word_already_closed"', _CONTRACT)
+
 
 if __name__ == "__main__":
     unittest.main()

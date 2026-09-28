@@ -123,8 +123,31 @@ RECOGNITION_MARGIN_THRESHOLD = _env_probability(
 )
 
 # 단어 구간을 닫기 전에 큐에 남은 프레임을 기다리는 최대 시간. 0 이면
-# 기다리지 않는다.
-WORD_DRAIN_TIMEOUT_SECONDS = _env_float("WORD_DRAIN_TIMEOUT_SECONDS", 2.0)
+# 기다리지 않는다 - allow_disable 이 없으면 _env_float 가 0 을 거절해서
+# "기다리지 않는다"를 설정할 방법이 없다.
+WORD_DRAIN_TIMEOUT_SECONDS = _env_float(
+    "WORD_DRAIN_TIMEOUT_SECONDS", 2.0, allow_disable=True,
+)
+
+# 큐 소진 뒤 구간 마감과 추론에 주는 여유. 특징 변환과 추론 자체는 단어당
+# 20ms 쯤이지만, 그 앞에서 프레임 워커와 _recognition_semaphore 를 나눠 쓴다.
+# 소진 대기가 시간 초과로 끝나면 큐에 프레임이 남아 있고, MediaPipe 가 5.8fps
+# 까지 떨어지면 한 장에 170ms 쯤 잡고 있다. 그 대기까지 덮도록 넉넉히 잡는다.
+# 0 은 받지 않는다 - 0 이면 추론 시간만큼 앱 타이머가 먼저 터지는 경합이
+# 그대로 남는다.
+WORD_INFERENCE_BUDGET_SECONDS = _env_float("WORD_INFERENCE_BUDGET_SECONDS", 1.0)
+
+# word_start ack 의 max_seconds. 서버가 result 나 오류를 "송신하는" 시점의
+# 상한이다. 앱은 여기에 네트워크 여유를 더해 안전망 타이머를 건다. 자동
+# 종료(WORD_MAX_SECONDS)가 지나도 큐 소진 대기(WORD_DRAIN_TIMEOUT_SECONDS)와
+# 추론(WORD_INFERENCE_BUDGET_SECONDS)이 남아 있으므로, 하나라도 빠지면 앱
+# 타이머가 result 보다 먼저 터지고 뒤늦게 온 result 는 이미 지워진 구간 위에
+# 떨어진다. 세 값은 묶여 있다 - 하나만 올리면 상한이 의미를 잃는다.
+WORD_RESULT_DEADLINE_SECONDS = (
+    WORD_MAX_SECONDS
+    + max(WORD_DRAIN_TIMEOUT_SECONDS, 0.0)
+    + WORD_INFERENCE_BUDGET_SECONDS
+)
 
 # result 메시지에 좌표를 실을지. 좌표는 실수 959개로 메시지의 94% 를 차지하는데
 # (8,338 -> 479 바이트) 미니앱은 읽지 않는다. 기본은 빼고, 서버 좌표를 눈으로
