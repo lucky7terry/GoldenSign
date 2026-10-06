@@ -262,6 +262,52 @@ class MediaPipeService:
     # 이미지를 넣으면 검출기가 아무것도 못 한다.
     _FACE_CROP_MIN_SIDE = 96
 
+    # MediaPipe Pose 의 어깨 번호. 손 크롭의 가로 중심을 잡는 데 쓴다.
+    _POSE_LEFT_SHOULDER = 11
+    _POSE_RIGHT_SHOULDER = 12
+
+    @classmethod
+    def _hand_crop_box(
+        cls,
+        pose_result: Any,
+        image_width: int,
+        image_height: int,
+    ) -> tuple[int, int, int, int]:
+        """손 검출기에 넣을 정사각형. 한 변은 화면의 짧은 쪽이다.
+
+        얼굴과 같은 문제다. 손 검출기도 입력을 정사각형으로 리사이즈하므로
+        16:9 원본을 넣으면 위아래가 레터박스로 채워져 손이 작아진다.
+        실측(느린 수어 안경 영상 50개): 원본에서 왼손/오른손 검출률
+        0.22 / 0.72 -> 이 크롭에서 0.94 / 0.98. 두 손이 화면 안에 또렷이
+        있는데도 원본에서는 한 손만 찾았다.
+
+        얼굴처럼 좁게 자르지 않는다. 수어는 손이 몸 앞 넓은 범위를 오가고,
+        두 손을 한 번에 봐야 좌우 배정이 된다. 짧은 변 전체를 쓰면 1080p
+        에서 1080x1080 - 사람 양옆의 빈 배경만 덜어낸다.
+
+        가로 중심은 pose 어깨 중점이다. pose 가 없으면 화면 중앙. 크롭은
+        항상 화면 안에 들어오게 민다(정사각형 유지).
+        """
+        side = min(image_width, image_height)
+        center_x = image_width / 2.0
+        center_y = image_height / 2.0
+
+        if pose_result.pose_landmarks:
+            landmarks = pose_result.pose_landmarks[0]
+            needed = (cls._POSE_LEFT_SHOULDER, cls._POSE_RIGHT_SHOULDER)
+            if len(landmarks) > max(needed):
+                xs = [landmarks[i].x * image_width for i in needed]
+                ys = [landmarks[i].y * image_height for i in needed]
+                if all(math.isfinite(v) for v in xs + ys):
+                    center_x = sum(xs) / 2.0
+                    center_y = sum(ys) / 2.0
+
+        left = int(round(center_x - side / 2.0))
+        top = int(round(center_y - side / 2.0))
+        left = max(0, min(left, image_width - side))
+        top = max(0, min(top, image_height - side))
+        return left, top, left + side, top + side
+
     @classmethod
     def _face_crop_box(
         cls,
@@ -464,21 +510,33 @@ class MediaPipeService:
                 )
 
                 # 세 검출기 각각의 소요 시간 — 어느 쪽이 지배적인지 보려고 나눈다.
-                hand_started_at = time.perf_counter()
-                hand_result = self._hand_landmarker.detect(
-                    mediapipe_image
-                )
+                # pose 를 먼저 돌린다. 손과 얼굴 모두 pose 위치로 크롭한다.
                 pose_started_at = time.perf_counter()
-                self.hand_detect_stats.record(
-                    (pose_started_at - hand_started_at) * 1000.0
-                )
-
                 pose_result = self._pose_landmarker.detect(
                     mediapipe_image
                 )
-                face_started_at = time.perf_counter()
+                hand_started_at = time.perf_counter()
                 self.pose_detect_stats.record(
-                    (face_started_at - pose_started_at) * 1000.0
+                    (hand_started_at - pose_started_at) * 1000.0
+                )
+
+                # 손은 정사각형으로 잘라 넣는다(_hand_crop_box). pose 가
+                # 없어도 화면 중앙 정사각형으로 간다 - 원본보다 나쁠 일이 없다.
+                hand_box = self._hand_crop_box(
+                    pose_result, image_width, image_height
+                )
+                h_left, h_top, h_right, h_bottom = hand_box
+                hand_result = self._hand_landmarker.detect(
+                    mp.Image(
+                        image_format=mp.ImageFormat.SRGB,
+                        data=np.ascontiguousarray(
+                            rgb_image[h_top:h_bottom, h_left:h_right]
+                        ),
+                    )
+                )
+                face_started_at = time.perf_counter()
+                self.hand_detect_stats.record(
+                    (face_started_at - hand_started_at) * 1000.0
                 )
 
                 # 얼굴은 원본 프레임 그대로 넣으면 못 찾는다. 검출기가
@@ -538,8 +596,14 @@ class MediaPipeService:
         for index, landmarks in enumerate(
             hand_result.hand_landmarks
         ):
-            serialized = self._serialize_hand_landmarks(
-                landmarks
+            # 크롭 기준 좌표를 원본 기준으로 되돌린다. 좌우 배정이 pose
+            # 손목(원본 기준)과 거리를 재므로 배정 전에 해야 한다.
+            # 얼굴용으로 만든 함수지만 변환(크롭 -> 원본 정규화 좌표)은 같다.
+            serialized = self._restore_face_to_frame(
+                self._serialize_hand_landmarks(landmarks),
+                hand_box,
+                image_width,
+                image_height,
             )
 
             handedness_name = ""
