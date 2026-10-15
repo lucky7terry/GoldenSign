@@ -1,0 +1,31 @@
+# 배포용 구성: AI 서버 + Caddy(HTTPS 자동 발급, WebSocket 프록시).
+# 사용법은 infra/README.md 참고.
+services:
+  server:
+    build: ../server
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # 인식 모델(.keras)과 MediaPipe .task 파일을 둔다. 저장소에는 없다.
+      - ./models:/app/models
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - server
+
+volumes:
+  caddy_data:
+  caddy_config:
