@@ -2,8 +2,10 @@ import base64
 import binascii
 import logging
 import math
+import queue
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +13,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
-from app.config import KEYPOINT_TIMING_INTERVAL_SECONDS
+from app.config import KEYPOINT_TIMING_INTERVAL_SECONDS, KEYPOINT_WORKERS
 from app.constants import MAX_FRAME_BYTES
 from app.services.hand_assignment import assign_hands
 from app.services.timing_stats import TimingReporter, TimingStats
@@ -680,12 +682,69 @@ class MediaPipeService:
         self._face_landmarker.close()
 
 
-_mediapipe_service: MediaPipeService | None = None
+class MediaPipeServicePool:
+    """MediaPipeService 여러 개를 돌려 쓰는 묶음. 바깥에서는 하나처럼 보인다.
+
+    서비스 하나는 락 하나로 보호되어 프레임을 한 번에 하나씩만 처리한다.
+    MediaPipe 는 추론 중에 GIL 을 놓으므로, 서비스를 여러 개 두고 스레드마다
+    비어 있는 것을 하나씩 빌려 쓰면 코어 수만큼 동시에 돈다. 랜드마커는
+    서비스마다 따로 가지고 있어서 서로 상태를 나누지 않는다(IMAGE 모드).
+    """
+
+    def __init__(self, services: list["MediaPipeService"]) -> None:
+        if not services:
+            raise ValueError("MediaPipeServicePool needs at least one service.")
+        self._services = list(services)
+        self._idle: queue.Queue = queue.Queue()
+        for service in self._services:
+            self._idle.put(service)
+
+    @property
+    def size(self) -> int:
+        return len(self._services)
+
+    @contextmanager
+    def _borrow(self):
+        # 전부 바쁘면 하나가 돌아올 때까지 기다린다. 호출 쪽(WHEP)이 동시
+        # 처리 수를 같은 값으로 묶어 두므로 실제로 오래 기다리지는 않는다.
+        service = self._idle.get()
+        try:
+            yield service
+        finally:
+            self._idle.put(service)
+
+    def extract_keypoints_from_image(self, image: np.ndarray) -> dict[str, Any]:
+        with self._borrow() as service:
+            return service.extract_keypoints_from_image(image)
+
+    def extract_keypoints_from_base64(self, encoded_image: str) -> dict[str, Any]:
+        with self._borrow() as service:
+            return service.extract_keypoints_from_base64(encoded_image)
+
+    def extract_keypoints_from_bytes(self, image_bytes: bytes) -> dict[str, Any]:
+        with self._borrow() as service:
+            return service.extract_keypoints_from_bytes(image_bytes)
+
+    def close(self) -> None:
+        for service in self._services:
+            service.close()
+
+
+def _create_service():
+    """KEYPOINT_WORKERS 가 1 이면 예전처럼 서비스 하나를 그대로 쓴다."""
+    if KEYPOINT_WORKERS <= 1:
+        return MediaPipeService()
+    return MediaPipeServicePool(
+        [MediaPipeService() for _ in range(KEYPOINT_WORKERS)]
+    )
+
+
+_mediapipe_service: MediaPipeService | MediaPipeServicePool | None = None
 _initialization_error: MediaPipeUnavailableError | None = None
 _mediapipe_service_lock = threading.Lock()
 
 
-def get_mediapipe_service() -> MediaPipeService:
+def get_mediapipe_service() -> "MediaPipeService | MediaPipeServicePool":
     """랜드마커 서비스를 돌려준다. 로드에 실패했으면 매번 같은 예외를 던진다.
 
     실패를 기억하지 않으면 프레임마다 모델 로딩을 다시 시도하게 된다.
@@ -704,7 +763,7 @@ def get_mediapipe_service() -> MediaPipeService:
         if _initialization_error is not None:
             raise _initialization_error
         try:
-            _mediapipe_service = MediaPipeService()
+            _mediapipe_service = _create_service()
         except Exception as exc:
             _initialization_error = MediaPipeUnavailableError(str(exc))
             raise _initialization_error from exc
@@ -726,7 +785,10 @@ def preload_mediapipe_service() -> bool:
             extra={"error": str(exc)},
         )
         return False
-    logger.info("MediaPipe landmarkers loaded")
+    logger.info(
+        "MediaPipe landmarkers loaded",
+        extra={"workers": getattr(_mediapipe_service, "size", 1)},
+    )
     return True
 
 

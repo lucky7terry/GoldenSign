@@ -64,6 +64,11 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SESSION_TTL_SECONDS = _env_int("SESSION_TTL_SECONDS", 3600)
 MAX_CONCURRENT_RECOGNITIONS = _env_int("MAX_CONCURRENT_RECOGNITIONS", 2)
 FRAME_QUEUE_MAX_SIZE = _env_int("FRAME_QUEUE_MAX_SIZE", 30)
+# 키포인트 추출을 동시에 몇 프레임까지 돌릴지. MediaPipe 한 세트는 프레임을
+# 순서대로 하나씩 처리해서 코어 1개만 쓴다(Mac M3 실측 CPU ~105%). 세트를
+# 여러 개 두고 프레임을 번갈아 맡기면 코어 수만큼 처리량이 늘어난다
+# (2 vCPU 실측 12.5 -> 23.8 fps). 코어 수보다 크게 잡으면 서로 다투기만 한다.
+KEYPOINT_WORKERS = _env_int("KEYPOINT_WORKERS", 2)
 PUBLIC_WS_BASE_URL = os.getenv("PUBLIC_WS_BASE_URL")
 WS_IDLE_TIMEOUT_SECONDS = _env_float("WS_IDLE_TIMEOUT_SECONDS", 60.0)
 

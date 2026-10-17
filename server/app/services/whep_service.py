@@ -9,6 +9,7 @@ from time import monotonic
 from urllib.parse import urljoin, urlparse
 
 from app.config import (
+    KEYPOINT_WORKERS,
     WHEP_ALLOWED_HOST_SUFFIXES,
     WHEP_CONNECT_TIMEOUT_SECONDS,
     WHEP_FIRST_FRAME_TIMEOUT_SECONDS,
@@ -36,7 +37,7 @@ def _utc_now_iso():
 def _recognize_whep_frame(
     session_id: str,
     word_generation: int,
-    image,
+    video_frame,
     captured_at_ms: float | None,
 ):
     from app.services.model_service import (
@@ -44,6 +45,9 @@ def _recognize_whep_frame(
         recognize_frame_from_image,
     )
 
+    # YUV -> BGR 변환도 워커 스레드에서 한다. 이벤트 루프에서 하면 동시에
+    # 처리 중인 다른 프레임과 수신 루프가 그만큼 멈춘다.
+    image = video_frame.to_ndarray(format="bgr24")
     return (
         recognize_frame_from_image(
             image,
@@ -107,6 +111,21 @@ def _keypoint_summary(keypoints: dict) -> str:
         f"L-hand {detected(left_hand)}/{len(left_hand) // 3}, "
         f"R-hand {detected(right_hand)}/{len(right_hand) // 3}"
     )
+
+
+@dataclass
+class _FrameProcessingState:
+    """동시에 도는 프레임 처리들이 함께 쓰는 카운터. 이벤트 루프에서만 바뀐다."""
+
+    processed_frame_count: int = 0
+    last_processed_log_at: float = 0.0
+    last_processed_frame_count: int = 0
+    last_error_sent_at: float = 0.0
+    last_progress_sent_at: float = 0.0
+    last_progress_frame_count: int = 0
+
+    def __post_init__(self) -> None:
+        self.last_processed_log_at = monotonic()
 
 
 @dataclass
@@ -564,140 +583,198 @@ class WhepPullService:
         handle: WhepStreamHandle,
         latest_frame_queue: asyncio.Queue,
     ) -> None:
-        processed_frame_count = 0
-        last_processed_log_at = monotonic()
-        last_processed_frame_count = 0
-        last_error_sent_at = 0.0
-        last_progress_sent_at = 0.0
-        last_progress_frame_count = 0
+        """최신 프레임을 꺼내 최대 KEYPOINT_WORKERS 개까지 동시에 처리한다.
 
-        while not handle.stop_event.is_set():
-            try:
-                frame_count, video_frame = await asyncio.wait_for(
-                    latest_frame_queue.get(),
-                    timeout=1.0,
-                )
-            except asyncio.TimeoutError:
-                continue
+        예전에는 한 프레임이 끝나야 다음 프레임을 꺼냈다. MediaPipe 한
+        세트가 코어 1개만 쓰므로 서버 코어가 몇 개든 처리 속도가 같았다.
+        이제 빈 자리가 생길 때마다 그 순간의 최신 프레임을 꺼내 워커에
+        넘긴다. "가장 최근 프레임만 처리한다"는 규칙은 그대로다.
 
-            try:
-                image = video_frame.to_ndarray(format="bgr24")
-                captured_at_ms = _frame_timestamp_ms(video_frame)
-                word_generation = _current_word_generation(handle.session_id)
-                if word_generation is None:
-                    continue
-                loop = asyncio.get_running_loop()
-                result, model_status = await loop.run_in_executor(
-                    None,
-                    _recognize_whep_frame,
-                    handle.session_id,
-                    word_generation,
-                    image,
-                    captured_at_ms,
-                )
-            except ValueError:
-                logger.exception(
-                    "WHEP frame validation failed",
-                    extra={
-                        "session_id": handle.session_id,
-                        "stream_id": handle.stream_id,
-                        "frame_count": frame_count,
-                    },
-                )
-                continue
-            except Exception as exc:
-                if _is_word_session_closed(exc):
-                    raise WhepFrameProcessingStopped(
-                        "Recognition session closed."
-                    ) from exc
-                logger.exception(
-                    "WHEP frame processing failed",
-                    extra={
-                        "session_id": handle.session_id,
-                        "stream_id": handle.stream_id,
-                        "frame_count": frame_count,
-                    },
-                )
-                now = monotonic()
-                if now - last_error_sent_at >= 5.0:
-                    last_error_sent_at = now
-                    await handle.send_json(
-                        error_message(
-                            WEBRTC_SCHEMA_VERSION,
-                            handle.session_id,
-                            "model_unavailable",
-                            "WHEP frame processing failed.",
-                            handle.client_message_id,
-                            retryable=True,
-                        )
+        결과가 끝나는 순서는 꺼낸 순서와 다를 수 있지만, 단어 구간은
+        촬영 시각(pts)으로 정렬해서 리샘플하므로 순서는 상관없다.
+        카운터와 진행 상황 전송은 이벤트 루프 안에서만 바뀌므로 락이
+        필요 없다.
+        """
+        state = _FrameProcessingState()
+        slots = asyncio.Semaphore(max(1, KEYPOINT_WORKERS))
+        in_flight: set[asyncio.Task] = set()
+        stopped: list[BaseException] = []
+
+        def _on_done(task: asyncio.Task) -> None:
+            in_flight.discard(task)
+            slots.release()
+            if task.cancelled():
+                return
+            error = task.exception()
+            if error is not None:
+                stopped.append(error)
+
+        try:
+            while not handle.stop_event.is_set():
+                if stopped:
+                    raise stopped[0]
+                await slots.acquire()
+                try:
+                    frame_count, video_frame = await asyncio.wait_for(
+                        latest_frame_queue.get(),
+                        timeout=1.0,
                     )
-                continue
+                except asyncio.TimeoutError:
+                    slots.release()
+                    continue
+                except BaseException:
+                    slots.release()
+                    raise
 
-            processed_frame_count += 1
+                task = asyncio.create_task(
+                    self._process_one_video_frame(
+                        handle, state, frame_count, video_frame
+                    )
+                )
+                in_flight.add(task)
+                task.add_done_callback(_on_done)
+            if stopped:
+                raise stopped[0]
+        finally:
+            for task in list(in_flight):
+                task.cancel()
+            if in_flight:
+                await asyncio.gather(*in_flight, return_exceptions=True)
+
+    async def _process_one_video_frame(
+        self,
+        handle: WhepStreamHandle,
+        state: "_FrameProcessingState",
+        frame_count: int,
+        video_frame,
+    ) -> None:
+        """프레임 하나를 키포인트 추출·단어 버퍼에 넣고 진행 상황을 알린다.
+
+        WhepFrameProcessingStopped 만 밖으로 나간다(세션이 닫힘). 나머지
+        오류는 기록하고 이 프레임만 버린다 — 예전 루프의 continue 와 같다.
+        """
+        try:
+            captured_at_ms = _frame_timestamp_ms(video_frame)
+            word_generation = _current_word_generation(handle.session_id)
+            if word_generation is None:
+                return
+            loop = asyncio.get_running_loop()
+            result, model_status = await loop.run_in_executor(
+                None,
+                _recognize_whep_frame,
+                handle.session_id,
+                word_generation,
+                video_frame,
+                captured_at_ms,
+            )
+        except ValueError:
+            logger.exception(
+                "WHEP frame validation failed",
+                extra={
+                    "session_id": handle.session_id,
+                    "stream_id": handle.stream_id,
+                    "frame_count": frame_count,
+                },
+            )
+            return
+        except Exception as exc:
+            if _is_word_session_closed(exc):
+                raise WhepFrameProcessingStopped(
+                    "Recognition session closed."
+                ) from exc
+            logger.exception(
+                "WHEP frame processing failed",
+                extra={
+                    "session_id": handle.session_id,
+                    "stream_id": handle.stream_id,
+                    "frame_count": frame_count,
+                },
+            )
             now = monotonic()
-            if handle.on_frame is not None:
-                handle.on_frame()
-
-            # 단어 모드에서는 프레임마다 result 를 보내지 않는다. 판정은
-            # word_end 한 번뿐이고, 그 전에 나가는 result 는 text 가 항상
-            # null 이라 앱이 쓸 것이 없다. 초당 10개씩 나가던 것을 구간이
-            # 열려 있는 동안 초당 1개의 진행 상황으로 줄인다.
-            word_state = result.get("word") or {}
-            if (
-                word_state.get("buffered")
-                and now - last_progress_sent_at >= _WORD_PROGRESS_INTERVAL_SECONDS
-            ):
-                # 프레임마다 나가던 result 를 없애면서 sequence_index 도
-                # 사라졌다. 미니앱이 그 값의 차이로 처리 속도를 표시하고
-                # 있었으므로(background/index.ts trackProcessedFps), 대신
-                # 쓸 값을 여기 싣는다. processed_frame_count 는 스트림
-                # 전체에 걸쳐 단조 증가한다 - 구간마다 0으로 돌아가는
-                # frame_count 와 다르다.
-                elapsed_since_progress = max(now - last_progress_sent_at, 1e-6)
-                processed_fps = (
-                    (processed_frame_count - last_progress_frame_count)
-                    / elapsed_since_progress
-                    if last_progress_sent_at > 0.0
-                    else None
-                )
-                last_progress_sent_at = now
-                last_progress_frame_count = processed_frame_count
+            if now - state.last_error_sent_at >= 5.0:
+                state.last_error_sent_at = now
                 await handle.send_json(
-                    {
-                        "type": "word_progress",
-                        "schema_version": WORD_SCHEMA_VERSION,
-                        "session_id": handle.session_id,
-                        "client_message_id": handle.client_message_id,
-                        "stream_id": handle.stream_id,
-                        "frame_count": word_state.get("frame_count", 0),
-                        "processed_frame_count": processed_frame_count,
-                        "processed_fps": (
-                            None if processed_fps is None
-                            else round(processed_fps, 2)
-                        ),
-                        "model": model_status,
-                        "processed_at": _utc_now_iso(),
-                    }
+                    error_message(
+                        WEBRTC_SCHEMA_VERSION,
+                        handle.session_id,
+                        "model_unavailable",
+                        "WHEP frame processing failed.",
+                        handle.client_message_id,
+                        retryable=True,
+                    )
                 )
+            return
 
-            if processed_frame_count == 1 or now - last_processed_log_at >= 5.0:
-                elapsed = max(now - last_processed_log_at, 0.001)
-                interval_processed_frames = (
-                    processed_frame_count - last_processed_frame_count
-                )
-                logger.info(
-                    "Processed WHEP video frames",
-                    extra={
-                        "session_id": handle.session_id,
-                        "stream_id": handle.stream_id,
-                        "frame_count": frame_count,
-                        "processed_frame_count": processed_frame_count,
-                        "fps": round(interval_processed_frames / elapsed, 2),
-                        "keypoints": _keypoint_summary(result.get("keypoints", {})),
-                    },
-                )
-                last_processed_log_at = now
-                last_processed_frame_count = processed_frame_count
+        state.processed_frame_count += 1
+        processed_frame_count = state.processed_frame_count
+        now = monotonic()
+        if handle.on_frame is not None:
+            handle.on_frame()
+
+        # 단어 모드에서는 프레임마다 result 를 보내지 않는다. 판정은
+        # word_end 한 번뿐이고, 그 전에 나가는 result 는 text 가 항상
+        # null 이라 앱이 쓸 것이 없다. 초당 10개씩 나가던 것을 구간이
+        # 열려 있는 동안 초당 1개의 진행 상황으로 줄인다.
+        word_state = result.get("word") or {}
+        if (
+            word_state.get("buffered")
+            and now - state.last_progress_sent_at >= _WORD_PROGRESS_INTERVAL_SECONDS
+        ):
+            # 프레임마다 나가던 result 를 없애면서 sequence_index 도
+            # 사라졌다. 미니앱이 그 값의 차이로 처리 속도를 표시하고
+            # 있었으므로(background/index.ts trackProcessedFps), 대신
+            # 쓸 값을 여기 싣는다. processed_frame_count 는 스트림
+            # 전체에 걸쳐 단조 증가한다 - 구간마다 0으로 돌아가는
+            # frame_count 와 다르다.
+            elapsed_since_progress = max(now - state.last_progress_sent_at, 1e-6)
+            processed_fps = (
+                (processed_frame_count - state.last_progress_frame_count)
+                / elapsed_since_progress
+                if state.last_progress_sent_at > 0.0
+                else None
+            )
+            state.last_progress_sent_at = now
+            state.last_progress_frame_count = processed_frame_count
+            await handle.send_json(
+                {
+                    "type": "word_progress",
+                    "schema_version": WORD_SCHEMA_VERSION,
+                    "session_id": handle.session_id,
+                    "client_message_id": handle.client_message_id,
+                    "stream_id": handle.stream_id,
+                    "frame_count": word_state.get("frame_count", 0),
+                    "processed_frame_count": processed_frame_count,
+                    "processed_fps": (
+                        None if processed_fps is None
+                        else round(processed_fps, 2)
+                    ),
+                    "model": model_status,
+                    "processed_at": _utc_now_iso(),
+                }
+            )
+
+        if (
+            processed_frame_count == 1
+            or now - state.last_processed_log_at >= 5.0
+        ):
+            elapsed = max(now - state.last_processed_log_at, 0.001)
+            interval_processed_frames = (
+                processed_frame_count - state.last_processed_frame_count
+            )
+            logger.info(
+                "Processed WHEP video frames",
+                extra={
+                    "session_id": handle.session_id,
+                    "stream_id": handle.stream_id,
+                    "frame_count": frame_count,
+                    "processed_frame_count": processed_frame_count,
+                    "fps": round(interval_processed_frames / elapsed, 2),
+                    "workers": KEYPOINT_WORKERS,
+                    "keypoints": _keypoint_summary(result.get("keypoints", {})),
+                },
+            )
+            state.last_processed_log_at = now
+            state.last_processed_frame_count = processed_frame_count
 
     async def _request_video_keyframe(self, peer_connection, video_track=None) -> None:
         receivers = self._video_receivers(peer_connection, video_track)
