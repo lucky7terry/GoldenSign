@@ -12,6 +12,8 @@
 """
 
 import argparse
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import os
 import sys
 
@@ -36,6 +38,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.config import KEYPOINT_WORKERS  # noqa: E402
 from app.services.feature_service import SEQUENCE_LENGTH, build_features  # noqa: E402
 from app.services.label_service import word_for_index  # noqa: E402
 from app.services.mediapipe_service import get_mediapipe_service  # noqa: E402
@@ -65,22 +68,37 @@ def frames_from_video(path: Path, every: int = 1):
     print(f"  원본 fps={fps:.1f}, 총 {index}프레임")
 
 
+def _openpose_row(keypoints) -> list[float]:
+    person = convert_to_openpose(keypoints).people
+    return (
+        person.pose_keypoints_2d
+        + person.hand_left_keypoints_2d
+        + person.hand_right_keypoints_2d
+        + person.face_keypoints_2d
+    )
+
+
 def extract_openpose_sequence(path: Path, every: int) -> np.ndarray:
+    """서버와 같은 워커 수(KEYPOINT_WORKERS)로 동시에 추출한다.
+
+    서버 처리량을 재려고 쓰는 스크립트라 서버와 같은 방식으로 돌린다.
+    결과 순서는 프레임 순서 그대로다. 디코딩한 프레임이 메모리에 쌓이지
+    않도록 앞서 나간 작업은 워커 수의 2배까지만 둔다.
+    """
     service = get_mediapipe_service()
     rows = []
     started = time.time()
-    for image in frames_from_video(path, every):
-        keypoints = service.extract_keypoints_from_image(image)
-        person = convert_to_openpose(keypoints).people
-        rows.append(
-            person.pose_keypoints_2d
-            + person.hand_left_keypoints_2d
-            + person.hand_right_keypoints_2d
-            + person.face_keypoints_2d
-        )
+    with ThreadPoolExecutor(max_workers=KEYPOINT_WORKERS) as pool:
+        pending: deque = deque()
+        for image in frames_from_video(path, every):
+            pending.append(pool.submit(service.extract_keypoints_from_image, image))
+            if len(pending) >= KEYPOINT_WORKERS * 2:
+                rows.append(_openpose_row(pending.popleft().result()))
+        while pending:
+            rows.append(_openpose_row(pending.popleft().result()))
     elapsed = time.time() - started
     print(f"  MediaPipe: {len(rows)}프레임 / {elapsed:.1f}초 "
-          f"= {len(rows)/max(elapsed, 1e-6):.1f} fps")
+          f"= {len(rows)/max(elapsed, 1e-6):.1f} fps (workers={KEYPOINT_WORKERS})")
     return np.array(rows, dtype=np.float32)
 
 
