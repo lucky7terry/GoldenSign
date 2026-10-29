@@ -467,12 +467,6 @@ ack 를 보내지 않는 이유: 앱은 `result` 를 받는 순간 구간을 닫
 | `RECOGNITION_CONFIDENCE_THRESHOLD` | `0.5` | 이 아래면 단어를 주장하지 않는다 |
 | `RECOGNITION_MARGIN_THRESHOLD` | `0.15` | 2위와의 격차가 이 아래면 주장하지 않는다 |
 | `RECOGNITION_MODEL_FILENAME` | `model_fold0.keras` | `server/models/` 안의 파일명 |
-| `GOOGLE_TTS_API_KEY` | (없음) | Google Cloud TTS API 키. 비어 있으면 서버가 음성을 합성하지 않는다 |
-| `TTS_VOICE_NAME` | `ko-KR-Chirp3-HD-Algieba` | 합성에 쓰는 Chirp 3 HD 한국어 음색 |
-| `TTS_SPEAKING_RATE` | `1.0` | 말하기 속도. `0` 보다 커야 한다 |
-| `TTS_MAX_CHARS` | `200` | 이보다 긴 텍스트는 합성하지 않고 거절한다 |
-| `TTS_CACHE_DIR` | `server/data/tts_cache` | 합성한 mp3 를 쌓는 디렉터리. 이미지에서는 `/app/data/tts_cache` |
-| `TTS_REQUEST_TIMEOUT_SECONDS` | `5.0` | Google TTS 응답을 기다리는 한도 |
 
 ---
 
@@ -545,3 +539,85 @@ half-pixel centers 다. 출력 i번째가 보는 원본 위치는
 타임스탬프가 함의하는 프레임레이트가 1~240 범위를 벗어나면(pts 32비트
 랩어라운드, 기기 시계 점프, 두 입력 경로의 시각이 섞인 경우) 시각을 버리고
 도착 순서를 쓴다. 그때 `resampled_on_time` 이 `false` 로 나간다.
+
+---
+
+## 7. 한국어 TTS (GET /v1/tts)
+
+**Purpose**: 미니앱이 읽는 음성을 폰 TTS 대신 서버가 합성한 Google
+Chirp 3 HD 한국어 음성으로 바꾼다.
+
+앱은 오디오 바이트를 받지 않는다. 이 URL 을 그대로 재생기에 넘기므로
+(`SpeakerModule.play({audioUrl})`) 서버는 mp3 를 본문으로만 돌려주면 된다.
+
+### Request
+
+```text
+GET /v1/tts?text=%EC%95%88%EB%85%95%ED%95%98%EC%84%B8%EC%9A%94
+```
+
+| 파라미터 | 필수 | 의미 |
+|---|---|---|
+| `text` | 사실상 필수 | 읽을 한국어 문장. `TTS_MAX_CHARS`(기본 200) 이하 |
+
+`text` 는 스키마상 선택이고 기본값이 빈 문자열이다. 필수로 두면 빠뜨렸을 때
+FastAPI 의 422 가 나가는데 앱이 분기하는 모양이 아니므로, 빠뜨린 것과 비워
+보낸 것을 아래 400 하나로 모은다.
+
+### Response
+
+200, 본문은 mp3 바이트다.
+
+| 헤더 | 값 |
+|---|---|
+| `Content-Type` | `audio/mpeg` |
+| `Cache-Control` | `public, max-age=86400` |
+
+### 오류
+
+본문은 `{"code": ..., "message": ...}` 다.
+
+| status | code | 언제 |
+|---|---|---|
+| 400 | `tts_invalid_text` | `text` 가 비었거나 `TTS_MAX_CHARS` 를 넘었다 |
+| 502 | `tts_upstream_error` | Google TTS 가 2xx 를 주지 않았거나 제때 답하지 않았다 |
+| 503 | `tts_unavailable` | 이 서버에 `GOOGLE_TTS_API_KEY` 가 없다 |
+
+**앱은 어떤 실패든 폰 TTS(`speaker.speak`)로 폴백한다.** 그래서 서버는
+실패를 status 로 정직하게 내야 한다 — 빈 200 을 주면 앱은 재생에 성공한
+줄 알고 폴백하지 않아, 착용자는 아무 소리도 듣지 못한다.
+
+503 과 502 는 앱 입장에서 같다(둘 다 폰 TTS 로 간다). 구분은 서버를 보는
+쪽을 위한 것이다 — 503 은 키를 넣으면 되고, 502 는 Google 쪽이거나 그
+문장이 문제다.
+
+### 캐시
+
+합성 결과는 디스크에 쌓는다(`TTS_CACHE_DIR`). 캐시 키는
+`sha256(음색|속도|텍스트)` 이고 파일명은 `<key>.mp3` 다. 같은 문장은 두 번
+합성하지 않으며, 음색이나 속도를 바꾸면 키가 달라져 자연히 새로 합성한다.
+
+같은 문장에 대한 동시 요청은 키별 락으로 묶어 Google 을 한 번만 부른다.
+쓰기는 임시 파일에 쓴 뒤 `os.replace` 로 갈아 끼운다 — 반만 쓰인 mp3 가
+캐시 hit 으로 잡히면 그 문장은 영구히 재생되지 않는다.
+
+기동 때 **단어 50개와 안내 문구 3개를 미리 합성한다.** 모델 로딩이 끝난
+뒤 뒤에서 도므로 기동을 막지 않고, 개별 실패는 로그만 남긴다. 키가 없으면
+한 줄 남기고 건너뛴다. 안내 문구는 `server/app/api/tts.py` 의 상수이며
+`miniapp/src/background/tts.ts` 의 문구와 글자까지 같아야 한다 — 다르면
+미리 만든 음성이 캐시에서 한 번도 맞지 않는다.
+
+### 서버 설정
+
+| 환경변수 | 기본값 | 의미 |
+|---|---|---|
+| `GOOGLE_TTS_API_KEY` | (없음) | Google Cloud TTS API 키. 비어 있으면 합성하지 않고 503 을 낸다 |
+| `TTS_VOICE_NAME` | `ko-KR-Chirp3-HD-Algieba` | 합성에 쓰는 Chirp 3 HD 한국어 음색 |
+| `TTS_SPEAKING_RATE` | `1.0` | 말하기 속도. `0` 보다 커야 한다 |
+| `TTS_MAX_CHARS` | `200` | 이보다 긴 텍스트는 합성하지 않고 거절한다 |
+| `TTS_CACHE_DIR` | `server/data/tts_cache` | 합성한 mp3 를 쌓는 디렉터리. 이미지에서는 `/app/data/tts_cache` |
+| `TTS_REQUEST_TIMEOUT_SECONDS` | `5.0` | Google TTS 응답을 기다리는 한도 |
+
+인증은 API 키 헤더(`X-Goog-Api-Key`) 하나라서 `google-cloud-texttospeech` 를
+쓰지 않고 이미 있는 aiohttp 로 REST 를 직접 부른다. 키는 요청 헤더에만
+있고 로그와 응답에는 남지 않는다.
