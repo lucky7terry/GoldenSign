@@ -467,6 +467,12 @@ ack 를 보내지 않는 이유: 앱은 `result` 를 받는 순간 구간을 닫
 | `RECOGNITION_CONFIDENCE_THRESHOLD` | `0.5` | 이 아래면 단어를 주장하지 않는다 |
 | `RECOGNITION_MARGIN_THRESHOLD` | `0.15` | 2위와의 격차가 이 아래면 주장하지 않는다 |
 | `RECOGNITION_MODEL_FILENAME` | `model_fold0.keras` | `server/models/` 안의 파일명 |
+| `GOOGLE_TTS_API_KEY` | (없음) | Google Cloud TTS API 키. 비어 있으면 서버가 음성을 합성하지 않는다 |
+| `TTS_VOICE_NAME` | `ko-KR-Chirp3-HD-Algieba` | 합성에 쓰는 Chirp 3 HD 한국어 음색 |
+| `TTS_SPEAKING_RATE` | `1.0` | 말하기 속도. `0` 보다 커야 한다 |
+| `TTS_MAX_CHARS` | `200` | 이보다 긴 텍스트는 합성하지 않고 거절한다 |
+| `TTS_CACHE_DIR` | `server/data/tts_cache` | 합성한 mp3 를 쌓는 디렉터리. 이미지에서는 `/app/data/tts_cache` |
+| `TTS_REQUEST_TIMEOUT_SECONDS` | `5.0` | Google TTS 응답을 기다리는 한도 |
 
 ---
 

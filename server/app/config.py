@@ -181,3 +181,20 @@ WHEP_ALLOWED_HOST_SUFFIXES = _env_csv(
     "WHEP_ALLOWED_HOST_SUFFIXES",
     "cloudflarestream.com,videodelivery.net",
 )
+
+# 서버 한국어 TTS. 키가 비어 있으면 합성하지 않고, 앱은 폰 TTS 로 폴백한다.
+GOOGLE_TTS_API_KEY = os.getenv("GOOGLE_TTS_API_KEY", "")
+TTS_VOICE_NAME = os.getenv("TTS_VOICE_NAME", "ko-KR-Chirp3-HD-Algieba")
+TTS_SPEAKING_RATE = _env_float("TTS_SPEAKING_RATE", 1.0)
+# 앱이 읽는 것은 안내 문구와 단어 하나뿐이라 그보다 긴 텍스트는 거절한다.
+TTS_MAX_CHARS = _env_int("TTS_MAX_CHARS", 200)
+# 기본 경로는 .gitignore 의 data/ 에 걸리고, 이미지에서는 /app/data/tts_cache 다.
+TTS_CACHE_DIR = os.getenv(
+    "TTS_CACHE_DIR",
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "data",
+        "tts_cache",
+    ),
+)
+TTS_REQUEST_TIMEOUT_SECONDS = _env_float("TTS_REQUEST_TIMEOUT_SECONDS", 5.0)
