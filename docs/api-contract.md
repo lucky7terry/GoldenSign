@@ -351,6 +351,7 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
     "span_ms": 2140.0,
     "resampled_on_time": true,
     "dropped_after_cap": 0,
+    "coverage": { "face": 0.963, "hand": 1.0 },
     "close_reason": "client"
   },
   "model": { "loaded": true, "mode": "recognition" },
@@ -367,6 +368,10 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 - `resampled_on_time`: 시간축으로 맞췄으면 `true`, 촬영 시각이 없거나
   믿을 수 없어 도착 순서로 떨어졌으면 `false`. **`false` 가 계속 나오면
   입력 경로에 타임스탬프가 안 붙고 있다는 뜻이니 알려달라.**
+- `coverage`: 도착한 프레임 중 얼굴이 보인 비율과 두 손 중 하나라도 보인
+  비율. 이 값이 `WORD_MIN_FACE_RATIO` / `WORD_MIN_HAND_RATIO` 미만이면
+  `result` 대신 `word_out_of_frame` 이 나간다. 통과한 구간에도 실리므로
+  기준을 조정할 때 근거가 된다.
 - `close_reason`: `"client"`(word_end) 또는 `"timeout"`(8초 자동 종료).
 - `text`: 임계값을 넘었을 때만 채운다. 못 넘으면 `null` 이다 — 서버가 확신하지
   못한 것이므로 앱은 아무것도 표시하지 않아야 한다. 인식 모델이 아직 안 올라온
@@ -416,10 +421,23 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 | `word_already_started` | 이미 열린 구간에 `word_start` 가 또 왔다 | false |
 | `word_not_started` | 열린 구간이 없는데 `word_end` 가 왔다 | false |
 | `word_too_short` | 구간 프레임이 `WORD_MIN_FRAMES`(기본 8) 미만 | true |
+| `word_out_of_frame` | 얼굴이나 손이 구간 대부분에서 화면 밖이었다 | true |
 | `word_recognition_failed` | 구간을 닫는 중 추론이 실패했다 (라벨 파일 문제, 텐서플로 런타임 오류, 입력 shape 불일치) | true |
 
-`word_too_short` 와 `word_recognition_failed` 로 거절해도 **구간은 닫힌다.**
-앱은 다시 `word_start` 부터 보내면 된다.
+`word_too_short`, `word_out_of_frame`, `word_recognition_failed` 로 거절해도
+**구간은 닫힌다.** 앱은 다시 `word_start` 부터 보내면 된다.
+
+`word_out_of_frame` 은 얼굴이 보인 프레임 비율이 `WORD_MIN_FACE_RATIO`
+미만이거나, 두 손 중 하나라도 보인 프레임 비율이 `WORD_MIN_HAND_RATIO`
+미만일 때 나간다. 양손을 요구하지 않는 것은 한 손 수어에서 다른 손이 화면
+밖인 것이 정상이기 때문이다. `message` 에 두 비율이 담기고, 서버 로그에도
+`face_ratio` / `hand_ratio` 로 남는다.
+
+좌표가 없어도 추론은 돌아간다 — 미검출은 보간되거나 0 이 되고 모델은
+무언가를 답한다. 그래서 거절하지 않으면 **근거 없는 단어가 하나 나오고**
+착용자는 왜 틀렸는지 알 수 없다. 이 code 를 받은 앱은 다시 시도하라는
+안내가 아니라 **무엇을 고쳐야 하는지**("상대방의 얼굴과 손이 함께 보이도록
+바라보세요")를 읽어야 한다.
 
 `word_recognition_failed` 는 `result` 대신 나간다. `client_message_id` 는
 구간을 닫은 쪽(`word_end`, 자동 종료면 `word_start`)의 것이다.
@@ -464,6 +482,8 @@ ack 를 보내지 않는 이유: 앱은 `result` 를 받는 순간 구간을 닫
 | `WORD_MIN_FRAMES` | `8` | 이보다 적으면 `word_too_short`. 이슈 [#42](https://github.com/mentraconsulting/golden-sign/issues/42)에서 10을 제안했으나, 실측(영상 5개, 8~12프레임, 5/5 정답, 확신도 0.765~0.809)으로 8이 정확도를 유지하면서 짧은 단어를 덜 거절함을 확인하여 8로 결정 |
 | `WORD_TARGET_FRAMES` | `60` | 모델 입력 길이. 학습이 60이다 |
 | `WORD_SOURCE_FPS` | `30.0` | 되돌릴 격자의 프레임레이트. 원본 영상과 같게 둔다 |
+| `WORD_MIN_FACE_RATIO` | `0.5` | 얼굴이 보인 프레임 비율이 이보다 낮으면 `word_out_of_frame` |
+| `WORD_MIN_HAND_RATIO` | `0.5` | 두 손 중 하나라도 보인 프레임 비율이 이보다 낮으면 `word_out_of_frame` |
 | `RECOGNITION_CONFIDENCE_THRESHOLD` | `0.5` | 이 아래면 단어를 주장하지 않는다 |
 | `RECOGNITION_MARGIN_THRESHOLD` | `0.15` | 2위와의 격차가 이 아래면 주장하지 않는다 |
 | `RECOGNITION_MODEL_FILENAME` | `model_fold0.keras` | `server/models/` 안의 파일명 |

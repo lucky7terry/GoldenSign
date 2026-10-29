@@ -37,6 +37,14 @@ def _word_error_codes() -> set[str]:
     return codes
 
 
+def _finalize_word_source() -> str:
+    """finalize_word 본문만. 핸들러 순서를 파일 전체에서 재면 다른 함수의
+    except 가 섞인다."""
+    start = _SOURCE.index("    async def finalize_word(")
+    end = _SOURCE.index("    async def auto_close_word(")
+    return _SOURCE[start:end]
+
+
 def _documented_word_codes() -> set[str]:
     """api-contract.md 의 dev-0.4 'Server -> Client: 오류' 표에 적힌 code."""
     section = _CONTRACT.split("### Server -> Client: 오류", 1)[1]
@@ -57,6 +65,25 @@ class WordErrorCodeContractTest(unittest.TestCase):
     def test_finalization_failure_has_its_own_code(self):
         self.assertIn("word_recognition_failed", _word_error_codes())
         self.assertIn("word_recognition_failed", _documented_word_codes())
+
+    def test_out_of_frame_has_its_own_code(self):
+        self.assertIn("word_out_of_frame", _word_error_codes())
+        self.assertIn("word_out_of_frame", _documented_word_codes())
+
+    def test_finalize_word_reports_the_out_of_frame_rejection(self):
+        """거절한 구간은 result 가 오지 않으므로 앱이 알 길은 이 code 뿐이다."""
+        body = _finalize_word_source()
+        self.assertIn("except WordOutOfFrame as exc:", body)
+        self.assertIn('return "out_of_frame"', body)
+
+    def test_out_of_frame_is_caught_before_the_generic_handler(self):
+        """WordOutOfFrame 도 RuntimeError 다. 순서가 뒤바뀌면 조용히
+        word_recognition_failed 로 나가서 앱이 안내 문구를 못 고른다."""
+        body = _finalize_word_source()
+        self.assertLess(
+            body.index("except WordOutOfFrame"),
+            body.index("except Exception:"),
+        )
 
     def test_late_word_end_after_auto_close_gets_no_ack(self):
         """자동 종료 뒤에 온 word_end 에 ack 를 보내지 않는다.
