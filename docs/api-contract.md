@@ -351,6 +351,7 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
     "span_ms": 2140.0,
     "resampled_on_time": true,
     "dropped_after_cap": 0,
+    "coverage": { "face": 0.963, "hand": 1.0 },
     "close_reason": "client"
   },
   "model": { "loaded": true, "mode": "recognition" },
@@ -367,6 +368,10 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 - `resampled_on_time`: 시간축으로 맞췄으면 `true`, 촬영 시각이 없거나
   믿을 수 없어 도착 순서로 떨어졌으면 `false`. **`false` 가 계속 나오면
   입력 경로에 타임스탬프가 안 붙고 있다는 뜻이니 알려달라.**
+- `coverage`: 도착한 프레임 중 얼굴이 보인 비율과 두 손 중 하나라도 보인
+  비율. 이 값이 `WORD_MIN_FACE_RATIO` / `WORD_MIN_HAND_RATIO` 미만이면
+  `result` 대신 `word_out_of_frame` 이 나간다. 통과한 구간에도 실리므로
+  기준을 조정할 때 근거가 된다.
 - `close_reason`: `"client"`(word_end) 또는 `"timeout"`(8초 자동 종료).
 - `text`: 임계값을 넘었을 때만 채운다. 못 넘으면 `null` 이다 — 서버가 확신하지
   못한 것이므로 앱은 아무것도 표시하지 않아야 한다. 인식 모델이 아직 안 올라온
@@ -416,10 +421,23 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 | `word_already_started` | 이미 열린 구간에 `word_start` 가 또 왔다 | false |
 | `word_not_started` | 열린 구간이 없는데 `word_end` 가 왔다 | false |
 | `word_too_short` | 구간 프레임이 `WORD_MIN_FRAMES`(기본 8) 미만 | true |
+| `word_out_of_frame` | 얼굴이나 손이 구간 대부분에서 화면 밖이었다 | true |
 | `word_recognition_failed` | 구간을 닫는 중 추론이 실패했다 (라벨 파일 문제, 텐서플로 런타임 오류, 입력 shape 불일치) | true |
 
-`word_too_short` 와 `word_recognition_failed` 로 거절해도 **구간은 닫힌다.**
-앱은 다시 `word_start` 부터 보내면 된다.
+`word_too_short`, `word_out_of_frame`, `word_recognition_failed` 로 거절해도
+**구간은 닫힌다.** 앱은 다시 `word_start` 부터 보내면 된다.
+
+`word_out_of_frame` 은 얼굴이 보인 프레임 비율이 `WORD_MIN_FACE_RATIO`
+미만이거나, 두 손 중 하나라도 보인 프레임 비율이 `WORD_MIN_HAND_RATIO`
+미만일 때 나간다. 양손을 요구하지 않는 것은 한 손 수어에서 다른 손이 화면
+밖인 것이 정상이기 때문이다. `message` 에 두 비율이 담기고, 서버 로그에도
+`face_ratio` / `hand_ratio` 로 남는다.
+
+좌표가 없어도 추론은 돌아간다 — 미검출은 보간되거나 0 이 되고 모델은
+무언가를 답한다. 그래서 거절하지 않으면 **근거 없는 단어가 하나 나오고**
+착용자는 왜 틀렸는지 알 수 없다. 이 code 를 받은 앱은 다시 시도하라는
+안내가 아니라 **무엇을 고쳐야 하는지**("상대방의 얼굴과 손이 함께 보이도록
+바라보세요")를 읽어야 한다.
 
 `word_recognition_failed` 는 `result` 대신 나간다. `client_message_id` 는
 구간을 닫은 쪽(`word_end`, 자동 종료면 `word_start`)의 것이다.
@@ -464,6 +482,8 @@ ack 를 보내지 않는 이유: 앱은 `result` 를 받는 순간 구간을 닫
 | `WORD_MIN_FRAMES` | `8` | 이보다 적으면 `word_too_short`. 이슈 [#42](https://github.com/mentraconsulting/golden-sign/issues/42)에서 10을 제안했으나, 실측(영상 5개, 8~12프레임, 5/5 정답, 확신도 0.765~0.809)으로 8이 정확도를 유지하면서 짧은 단어를 덜 거절함을 확인하여 8로 결정 |
 | `WORD_TARGET_FRAMES` | `60` | 모델 입력 길이. 학습이 60이다 |
 | `WORD_SOURCE_FPS` | `30.0` | 되돌릴 격자의 프레임레이트. 원본 영상과 같게 둔다 |
+| `WORD_MIN_FACE_RATIO` | `0.5` | 얼굴이 보인 프레임 비율이 이보다 낮으면 `word_out_of_frame` |
+| `WORD_MIN_HAND_RATIO` | `0.5` | 두 손 중 하나라도 보인 프레임 비율이 이보다 낮으면 `word_out_of_frame` |
 | `RECOGNITION_CONFIDENCE_THRESHOLD` | `0.5` | 이 아래면 단어를 주장하지 않는다 |
 | `RECOGNITION_MARGIN_THRESHOLD` | `0.15` | 2위와의 격차가 이 아래면 주장하지 않는다 |
 | `RECOGNITION_MODEL_FILENAME` | `model_fold0.keras` | `server/models/` 안의 파일명 |
@@ -539,3 +559,116 @@ half-pixel centers 다. 출력 i번째가 보는 원본 위치는
 타임스탬프가 함의하는 프레임레이트가 1~240 범위를 벗어나면(pts 32비트
 랩어라운드, 기기 시계 점프, 두 입력 경로의 시각이 섞인 경우) 시각을 버리고
 도착 순서를 쓴다. 그때 `resampled_on_time` 이 `false` 로 나간다.
+
+---
+
+## 7. 한국어 TTS (GET /v1/tts)
+
+**Purpose**: 미니앱이 읽는 음성을 폰 TTS 대신 서버가 합성한 Google
+Chirp 3 HD 한국어 음성으로 바꾼다.
+
+앱은 오디오 바이트를 받지 않는다. 이 URL 을 그대로 재생기에 넘기므로
+(`SpeakerModule.play({audioUrl})`) 서버는 mp3 를 본문으로만 돌려주면 된다.
+
+### Request
+
+```text
+GET /v1/tts?text=%EC%95%88%EB%85%95%ED%95%98%EC%84%B8%EC%9A%94
+```
+
+| 파라미터 | 필수 | 의미 |
+|---|---|---|
+| `text` | 사실상 필수 | 읽을 한국어 문장. `TTS_MAX_CHARS`(기본 200) 이하 |
+
+`text` 는 스키마상 선택이고 기본값이 빈 문자열이다. 필수로 두면 빠뜨렸을 때
+FastAPI 의 422 가 나가는데 앱이 분기하는 모양이 아니므로, 빠뜨린 것과 비워
+보낸 것을 아래 400 하나로 모은다.
+
+### Response
+
+200, 본문은 mp3 바이트다.
+
+| 헤더 | 값 |
+|---|---|
+| `Content-Type` | `audio/mpeg` |
+| `Cache-Control` | `public, max-age=86400` |
+
+### 오류
+
+본문은 `{"code": ..., "message": ...}` 다.
+
+| status | code | 언제 |
+|---|---|---|
+| 400 | `tts_invalid_text` | `text` 가 비었거나 `TTS_MAX_CHARS` 를 넘었다 |
+| 429 | `tts_rate_limited` | 캐시에 없는 문장 요청이 한도를 넘었다. `Retry-After` 헤더가 붙는다 |
+| 502 | `tts_upstream_error` | Google TTS 가 2xx 를 주지 않았거나 제때 답하지 않았다 |
+| 503 | `tts_unavailable` | 이 서버에 `GOOGLE_TTS_API_KEY` 가 없다 |
+
+**앱은 어떤 실패든 폰 TTS(`speaker.speak`)로 폴백한다.** 429 도 마찬가지다 —
+`play` 가 reject 되고 그 자리에서 폰 TTS 가 받는다. 그래서 서버는 실패를
+status 로 정직하게 내야 한다. 빈 200 을 주면 앱은 재생에 성공한 줄 알고
+폴백하지 않아, 착용자는 아무 소리도 듣지 못한다.
+
+503 과 502, 429 는 앱 입장에서 같다(전부 폰 TTS 로 간다). 구분은 서버를
+보는 쪽을 위한 것이다 — 503 은 키를 넣으면 되고, 502 는 Google 쪽이거나 그
+문장이 문제이고, 429 는 누군가 캐시에 없는 문장을 반복해 넣고 있다는 뜻이다.
+
+### 요청 제한
+
+**인증은 두지 않는다.** 토큰을 두어도 앱 번들에 그대로 들어가므로 가져다
+쓰는 것을 막지 못한다. 막아야 하는 것은 임의의 문장으로 유료 API 를 반복
+호출하는 것이고, 그래서 **Google 을 새로 부르는 요청만 센다.**
+
+- **캐시 hit 은 제한하지 않는다.** 앱이 실제로 읽는 문구는 기동 때 미리
+  합성돼 있으므로 정상 사용은 한도에 닿지 않는다.
+- 60초 슬라이딩 윈도로 IP 별 `TTS_RATE_LIMIT_PER_IP`, 전체
+  `TTS_RATE_LIMIT_GLOBAL` 을 센다. 거절한 요청은 세지 않는다 — 세면 한 번
+  막힌 클라이언트가 윈도 내내 못 들어온다.
+- 거절은 400 보다 뒤, 합성보다 앞이다. 빈 `text` 를 반복해 남의 몫을 깎을
+  수 없다.
+- 카운터는 프로세스 메모리에 있다. 재기동하면 비워지고, 인스턴스를 늘리면
+  한도도 인스턴스 수만큼 늘어난다.
+- IP 는 `request.client.host` 다. Caddy 뒤에서 돌 때는 uvicorn 을
+  `--proxy-headers --forwarded-allow-ips='*'` 로 띄워야 실제 IP 가 들어온다.
+  그게 없으면 모든 요청이 프록시 IP 하나로 묶여 전체 한도처럼 동작한다.
+
+### 캐시
+
+합성 결과는 디스크에 쌓는다(`TTS_CACHE_DIR`). 캐시 키는
+`sha256(음색|속도|텍스트)` 이고 파일명은 `<key>.mp3` 다. 같은 문장은 두 번
+합성하지 않으며, 음색이나 속도를 바꾸면 키가 달라져 자연히 새로 합성한다.
+
+같은 문장에 대한 동시 요청은 키별 락으로 묶어 Google 을 한 번만 부른다.
+쓰기는 임시 파일에 쓴 뒤 `os.replace` 로 갈아 끼운다 — 반만 쓰인 mp3 가
+캐시 hit 으로 잡히면 그 문장은 영구히 재생되지 않는다.
+
+파일 수에 상한이 있다(`TTS_CACHE_MAX_FILES`). 캐시 hit 때마다 `mtime` 을
+갱신해 최근 사용 순서를 남기고, 새 파일을 저장한 뒤 상한을 넘으면 `mtime`
+이 가장 오래된 것부터 지운다. 미리 합성한 문구는 실제로 자주 재생되므로
+`mtime` 이 계속 갱신돼 살아남는다. 삭제에 실패해도 요청은 성공한다 —
+지우지 못한 캐시는 디스크를 조금 더 쓸 뿐이고, 그것 때문에 방금 합성한
+음성을 버릴 이유가 없다.
+
+기동 때 **단어 50개와 안내 문구 3개를 미리 합성한다.** 모델 로딩이 끝난
+뒤 뒤에서 도므로 기동을 막지 않고, 개별 실패는 로그만 남긴다. 키가 없으면
+한 줄 남기고 건너뛴다. 안내 문구는 `server/app/api/tts.py` 의 상수이며
+`miniapp/src/background/tts.ts` 의 문구와 글자까지 같아야 한다 — 다르면
+미리 만든 음성이 캐시에서 한 번도 맞지 않는다.
+
+### 서버 설정
+
+| 환경변수 | 기본값 | 의미 |
+|---|---|---|
+| `GOOGLE_TTS_API_KEY` | (없음) | Google Cloud TTS API 키. 비어 있으면 합성하지 않고 503 을 낸다 |
+| `TTS_VOICE_NAME` | `ko-KR-Chirp3-HD-Algieba` | 합성에 쓰는 Chirp 3 HD 한국어 음색 |
+| `TTS_SPEAKING_RATE` | `1.0` | 말하기 속도. `0` 보다 커야 한다 |
+| `TTS_MAX_CHARS` | `200` | 이보다 긴 텍스트는 합성하지 않고 거절한다 |
+| `TTS_CACHE_DIR` | `server/data/tts_cache` | 합성한 mp3 를 쌓는 디렉터리. 이미지에서는 `/app/data/tts_cache` |
+| `TTS_REQUEST_TIMEOUT_SECONDS` | `5.0` | Google TTS 응답을 기다리는 한도 |
+| `TTS_RATE_LIMIT_PER_IP` | `20` | 60초 동안 한 IP 가 낼 수 있는 캐시 미스 요청 수 |
+| `TTS_RATE_LIMIT_GLOBAL` | `60` | 60초 동안 서버 전체가 받는 캐시 미스 요청 수 |
+| `TTS_CACHE_MAX_FILES` | `2000` | 캐시 파일 수 상한. 넘으면 오래 안 쓴 것부터 지운다 |
+
+인증은 API 키 헤더(`X-Goog-Api-Key`) 하나라서 `google-cloud-texttospeech` 를
+쓰지 않고 이미 있는 aiohttp 로 REST 를 직접 부른다. 키는 요청 헤더에만
+있고 로그와 응답에는 남지 않는다.

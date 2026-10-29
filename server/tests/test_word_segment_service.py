@@ -19,14 +19,21 @@ from app.services.word_segment_service import (
     OPENPOSE_FEATURE_DIM,
     WordAlreadyStarted,
     WordNotStarted,
+    WordOutOfFrame,
     WordSegmentStore,
     WordSessionClosed,
     WordTooShort,
     _effective_fps,
     build_model_input,
+    coverage_ratios,
     resample_index_half_pixel,
     resample_to_uniform_fps,
 )
+
+# 411 안의 부위 경계. 서비스가 쓰는 값과 같아야 한다.
+_LEFT_HAND = slice(75, 138)
+_RIGHT_HAND = slice(138, 201)
+_FACE = slice(201, 411)
 
 
 def _frame(value: float, confidence: float = 0.9) -> list[float]:
@@ -66,6 +73,24 @@ def _motion_frame(seconds: float, frequency: float = 0.5) -> list[float]:
         row[3 * point] = x
         row[3 * point + 1] = y
         row[3 * point + 2] = 0.9
+    return row
+
+
+def _partial_frame(
+    seconds: float,
+    face: bool = True,
+    left_hand: bool = True,
+    right_hand: bool = True,
+) -> list[float]:
+    """부위별로 검출 여부를 지정한 411 벡터. 화면 밖인 부위는 (0, 0, 0) 이다."""
+    row = _motion_frame(seconds)
+    for part, visible in (
+        (_LEFT_HAND, left_hand),
+        (_RIGHT_HAND, right_hand),
+        (_FACE, face),
+    ):
+        if not visible:
+            row[part] = [0.0] * (part.stop - part.start)
     return row
 
 
@@ -462,6 +487,148 @@ class WordSegmentStoreTest(unittest.TestCase):
 
         self.assertEqual(segment.frame_count, self.store.frame_cap)
         self.assertEqual(segment.dropped_after_cap, overflow)
+
+
+class CoverageRatioTest(unittest.TestCase):
+    """비율은 도착한 원본 프레임에서 센다.
+
+    build_features 의 파트별 검출률은 30fps 복원 뒤의 값이라 보간으로 생긴
+    프레임이 섞인다. 여기서 알아야 하는 것은 실제로 도착한 프레임 중 몇
+    장에서 보였는가다.
+    """
+
+    def test_everything_visible_is_one(self):
+        face, hand = coverage_ratios([_partial_frame(i / 12.7) for i in range(10)])
+
+        self.assertAlmostEqual(face, 1.0)
+        self.assertAlmostEqual(hand, 1.0)
+
+    def test_one_hand_counts_as_a_hand(self):
+        frames = [_partial_frame(i / 12.7, left_hand=False) for i in range(10)]
+
+        _, hand = coverage_ratios(frames)
+
+        self.assertAlmostEqual(hand, 1.0)
+
+    def test_ratios_are_per_frame(self):
+        frames = [_partial_frame(i / 12.7, face=i < 3) for i in range(10)]
+
+        face, hand = coverage_ratios(frames)
+
+        self.assertAlmostEqual(face, 0.3)
+        self.assertAlmostEqual(hand, 1.0)
+
+    def test_an_empty_segment_is_zero(self):
+        self.assertEqual(coverage_ratios([]), (0.0, 0.0))
+
+
+class OutOfFrameRejectionTest(unittest.TestCase):
+    """좌표가 비어도 추론은 돌아간다 - 그래서 거절하지 않으면 근거 없는
+    단어가 하나 나오고, 착용자는 왜 틀렸는지 알 수 없다."""
+
+    def setUp(self):
+        self.store = WordSegmentStore(
+            target_frames=60,
+            min_frames=8,
+            min_face_ratio=0.5,
+            min_hand_ratio=0.5,
+        )
+        self.generation = self.store.start_session("s1")
+
+    def _close(self, count: int, **visibility):
+        self.store.start_word("s1", self.generation)
+        for i in range(count):
+            self.store.append(
+                "s1",
+                _partial_frame(i / 12.7, **visibility),
+                i * 1000.0 / 12.7,
+                self.generation,
+            )
+        return self.store.end_word("s1", self.generation)
+
+    def _close_mixed(self, visible: int, hidden: int, **hidden_visibility):
+        self.store.start_word("s1", self.generation)
+        for i in range(visible + hidden):
+            frame = (
+                _partial_frame(i / 12.7)
+                if i < visible
+                else _partial_frame(i / 12.7, **hidden_visibility)
+            )
+            self.store.append("s1", frame, i * 1000.0 / 12.7, self.generation)
+        return self.store.end_word("s1", self.generation)
+
+    def test_a_segment_without_a_face_is_rejected(self):
+        with self.assertRaises(WordOutOfFrame) as caught:
+            self._close(20, face=False)
+
+        self.assertAlmostEqual(caught.exception.face_ratio, 0.0)
+        self.assertAlmostEqual(caught.exception.hand_ratio, 1.0)
+
+    def test_a_segment_without_hands_is_rejected(self):
+        with self.assertRaises(WordOutOfFrame) as caught:
+            self._close(20, left_hand=False, right_hand=False)
+
+        self.assertAlmostEqual(caught.exception.face_ratio, 1.0)
+        self.assertAlmostEqual(caught.exception.hand_ratio, 0.0)
+
+    def test_one_hand_is_enough(self):
+        """한 손 수어는 다른 손이 화면 밖인 것이 정상이다."""
+        segment = self._close(20, left_hand=False)
+
+        self.assertEqual(segment.word_index, 1)
+        self.assertAlmostEqual(segment.hand_ratio, 1.0)
+
+    def test_the_face_threshold_is_inclusive(self):
+        segment = self._close_mixed(10, 10, face=False)
+
+        self.assertAlmostEqual(segment.face_ratio, 0.5)
+
+    def test_just_below_the_face_threshold_is_rejected(self):
+        with self.assertRaises(WordOutOfFrame) as caught:
+            self._close_mixed(9, 11, face=False)
+
+        self.assertAlmostEqual(caught.exception.face_ratio, 0.45)
+
+    def test_the_hand_threshold_is_inclusive(self):
+        segment = self._close_mixed(10, 10, left_hand=False, right_hand=False)
+
+        self.assertAlmostEqual(segment.hand_ratio, 0.5)
+
+    def test_just_below_the_hand_threshold_is_rejected(self):
+        with self.assertRaises(WordOutOfFrame) as caught:
+            self._close_mixed(9, 11, left_hand=False, right_hand=False)
+
+        self.assertAlmostEqual(caught.exception.hand_ratio, 0.45)
+
+    def test_a_rejected_segment_is_closed(self):
+        with self.assertRaises(WordOutOfFrame):
+            self._close(20, face=False)
+
+        # 안 닫으면 다음 word_start 가 WordAlreadyStarted 로 막혀 세션을 못 쓴다.
+        self.assertFalse(self.store.is_word_open("s1"))
+        self.assertEqual(self._close(20).frame_count, 20)
+
+    def test_a_rejected_segment_does_not_consume_a_word_index(self):
+        with self.assertRaises(WordOutOfFrame):
+            self._close(20, face=False)
+
+        self.assertEqual(self._close(20).word_index, 1)
+
+    def test_too_short_is_judged_first(self):
+        """8프레임도 안 되면 비율을 따질 것이 없다."""
+        with self.assertRaises(WordTooShort):
+            self._close(7, face=False)
+
+    def test_metadata_carries_the_coverage(self):
+        metadata = self._close_mixed(15, 5, face=False).metadata()
+
+        self.assertEqual(metadata["coverage"], {"face": 0.75, "hand": 1.0})
+
+    def test_a_threshold_outside_the_unit_range_is_rejected(self):
+        for bad in ({"min_face_ratio": 0.0}, {"min_hand_ratio": 1.5}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    WordSegmentStore(target_frames=60, min_frames=8, **bad)
 
 
 class GenerationFencingTest(unittest.TestCase):

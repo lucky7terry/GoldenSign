@@ -48,6 +48,7 @@ from app.services.recognition_service import (
 from app.services.word_segment_service import (
     WordAlreadyStarted,
     WordNotStarted,
+    WordOutOfFrame,
     WordSessionClosed,
     WordTooShort,
     word_store,
@@ -405,7 +406,10 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         finalize_client_message_id: str | None,
         close_reason: str,
     ) -> str:
-        """구간을 닫고 결과를 보낸다. "closed" | "too_short" | "not_open"."""
+        """구간을 닫고 결과를 보낸다.
+
+        "closed" | "too_short" | "out_of_frame" | "not_open".
+        """
         loop = asyncio.get_running_loop()
 
         # 큐에 남은 프레임을 먼저 소진한다. dev-0.2 frame 경로는 ACK 를
@@ -463,6 +467,31 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                 activity,
             )
             return "too_short"
+        except WordOutOfFrame as exc:
+            # 모델에 넣으면 추론은 돌지만 근거 없는 단어가 나온다. 착용자가
+            # 고칠 수 있는 실패라, 틀린 답 대신 무엇을 고쳐야 하는지 알린다.
+            logger.warning(
+                "Rejected a word segment that was out of frame",
+                extra={
+                    "session_id": session_id,
+                    "face_ratio": round(exc.face_ratio, 3),
+                    "hand_ratio": round(exc.hand_ratio, 3),
+                },
+            )
+            await _send_json(
+                websocket,
+                send_lock,
+                error_message(
+                    WORD_SCHEMA_VERSION,
+                    session_id,
+                    "word_out_of_frame",
+                    str(exc),
+                    finalize_client_message_id,
+                    retryable=True,
+                ),
+                activity,
+            )
+            return "out_of_frame"
         except Exception:
             # 여기서 새면 예외가 수신 루프를 뚫고 나가 연결이 끊긴다.
             # 클라이언트는 result 도 error 도 못 받고, 로그에는 session_id

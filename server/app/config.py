@@ -122,6 +122,15 @@ RECOGNITION_MARGIN_THRESHOLD = _env_probability(
     0.15,
 )
 
+# 구간에서 얼굴과 손이 보여야 하는 최소 프레임 비율. 이 아래면 거절한다.
+#
+# 좌표가 없는 프레임도 모델에 넣을 수는 있다 - 미검출은 보간되거나 0 이 되고
+# 추론은 그대로 돌아간다. 그래서 화면 밖이라는 사실이 거절로 이어지지 않고,
+# 아무 근거 없는 단어가 하나 나온다. 착용자는 왜 틀렸는지 알 수 없다.
+# 판정하기 전에 "보이지 않았다"를 따로 알리는 쪽이 낫다.
+WORD_MIN_FACE_RATIO = _env_probability("WORD_MIN_FACE_RATIO", 0.5)
+WORD_MIN_HAND_RATIO = _env_probability("WORD_MIN_HAND_RATIO", 0.5)
+
 # 단어 구간을 닫기 전에 큐에 남은 프레임을 기다리는 최대 시간. 0 이면
 # 기다리지 않는다 - allow_disable 이 없으면 _env_float 가 0 을 거절해서
 # "기다리지 않는다"를 설정할 방법이 없다.
@@ -181,3 +190,25 @@ WHEP_ALLOWED_HOST_SUFFIXES = _env_csv(
     "WHEP_ALLOWED_HOST_SUFFIXES",
     "cloudflarestream.com,videodelivery.net",
 )
+
+# 서버 한국어 TTS. 키가 비어 있으면 합성하지 않고, 앱은 폰 TTS 로 폴백한다.
+GOOGLE_TTS_API_KEY = os.getenv("GOOGLE_TTS_API_KEY", "")
+TTS_VOICE_NAME = os.getenv("TTS_VOICE_NAME", "ko-KR-Chirp3-HD-Algieba")
+TTS_SPEAKING_RATE = _env_float("TTS_SPEAKING_RATE", 1.0)
+# 앱이 읽는 것은 안내 문구와 단어 하나뿐이라 그보다 긴 텍스트는 거절한다.
+TTS_MAX_CHARS = _env_int("TTS_MAX_CHARS", 200)
+# 기본 경로는 .gitignore 의 data/ 에 걸리고, 이미지에서는 /app/data/tts_cache 다.
+TTS_CACHE_DIR = os.getenv(
+    "TTS_CACHE_DIR",
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "data",
+        "tts_cache",
+    ),
+)
+TTS_REQUEST_TIMEOUT_SECONDS = _env_float("TTS_REQUEST_TIMEOUT_SECONDS", 5.0)
+# /v1/tts 는 인증이 없으므로 캐시 미스에만 요청 제한을 건다.
+TTS_RATE_LIMIT_PER_IP = _env_int("TTS_RATE_LIMIT_PER_IP", 20)
+TTS_RATE_LIMIT_GLOBAL = _env_int("TTS_RATE_LIMIT_GLOBAL", 60)
+# 캐시 파일 수 상한. 넘으면 오래 안 쓴 것부터 지운다.
+TTS_CACHE_MAX_FILES = _env_int("TTS_CACHE_MAX_FILES", 2000)

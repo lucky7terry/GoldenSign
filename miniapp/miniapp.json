@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/@mentra/miniapp-cli/schema/miniapp.schema.json",
   "packageName": "com.goldensign.miniapp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "Golden Sign",
   "description": "응급 상황 전용 수어-자연어 변환 앱",
   "icon": "icon.png",
