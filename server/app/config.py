@@ -207,3 +207,8 @@ TTS_CACHE_DIR = os.getenv(
     ),
 )
 TTS_REQUEST_TIMEOUT_SECONDS = _env_float("TTS_REQUEST_TIMEOUT_SECONDS", 5.0)
+# /v1/tts 는 인증이 없으므로 캐시 미스에만 요청 제한을 건다.
+TTS_RATE_LIMIT_PER_IP = _env_int("TTS_RATE_LIMIT_PER_IP", 20)
+TTS_RATE_LIMIT_GLOBAL = _env_int("TTS_RATE_LIMIT_GLOBAL", 60)
+# 캐시 파일 수 상한. 넘으면 오래 안 쓴 것부터 지운다.
+TTS_CACHE_MAX_FILES = _env_int("TTS_CACHE_MAX_FILES", 2000)

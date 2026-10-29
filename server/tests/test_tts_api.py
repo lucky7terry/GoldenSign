@@ -10,10 +10,12 @@ import ast
 import logging
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.rate_limit import RateLimitVerdict, SlidingWindowRateLimiter
 from app.services.label_service import LabelError, NUM_CLASSES, all_words
 from app.services.tts_service import (
     TtsInvalidText,
@@ -32,12 +34,19 @@ _AUDIO = b"fake-mp3-bytes"
 _WANTED_CONSTANTS = {
     "AUDIO_MEDIA_TYPE",
     "CACHE_CONTROL",
+    "_rate_limiter",
     "START_ANNOUNCEMENT",
     "RETRY_ANNOUNCEMENT",
     "FRAMING_ANNOUNCEMENT",
     "ANNOUNCEMENTS",
 }
-_WANTED_FUNCTIONS = {"prewarm_phrases", "_error", "get_tts_audio"}
+_WANTED_FUNCTIONS = {
+    "prewarm_phrases",
+    "_error",
+    "_client_host",
+    "get_tts_audio",
+    "_rate_limited",
+}
 
 
 class _FakeResponse:
@@ -51,9 +60,32 @@ class _FakeResponse:
 
 
 class _FakeJSONResponse:
-    def __init__(self, status_code, content):
+    def __init__(self, status_code, content, headers=None):
         self.status_code = status_code
         self.content = content
+        self.headers = headers or {}
+
+
+class _FakeRequest:
+    """fastapi.Request 대역. 라우터가 읽는 것은 client.host 뿐이다."""
+
+    def __init__(self, host="203.0.113.1"):
+        self.client = None if host is None else SimpleNamespace(host=host)
+
+
+class _FakeIsCached:
+    """캐시 조회 대역. 캐시 hit 이면 라우터가 요청 제한을 세지 않는다."""
+
+    def __init__(self, cached=True, error=None):
+        self.cached = cached
+        self.error = error
+        self.calls = []
+
+    async def __call__(self, text):
+        self.calls.append(text)
+        if self.error is not None:
+            raise self.error
+        return self.cached
 
 
 def _load(**overrides) -> dict:
@@ -82,11 +114,19 @@ def _load(**overrides) -> dict:
         "logger": logging.getLogger("app.api.tts"),
         "Response": _FakeResponse,
         "JSONResponse": _FakeJSONResponse,
+        # 라우터 시그니처의 애너테이션은 def 시점에 평가된다.
+        "Request": _FakeRequest,
+        "SlidingWindowRateLimiter": SlidingWindowRateLimiter,
+        "RateLimitVerdict": RateLimitVerdict,
+        # 실제 기본값(20 / 60)으로는 한도 테스트가 느려진다.
+        "TTS_RATE_LIMIT_PER_IP": 2,
+        "TTS_RATE_LIMIT_GLOBAL": 10,
         "all_words": all_words,
         "LabelError": LabelError,
         "TtsInvalidText": TtsInvalidText,
         "TtsUnavailable": TtsUnavailable,
         "TtsUpstreamError": TtsUpstreamError,
+        "is_cached": _FakeIsCached(cached=True),
     }
     namespace.update(overrides)
     exec(compile(ast.Module(nodes, []), "<tts_api>", "exec"), namespace)
@@ -111,7 +151,7 @@ class TtsEndpointSuccessTest(unittest.IsolatedAsyncioTestCase):
         synthesize = _RecordingSynthesize()
         api = _load(synthesize=synthesize)
 
-        response = await api["get_tts_audio"]("안녕하세요")
+        response = await api["get_tts_audio"](_FakeRequest(), "안녕하세요")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, _AUDIO)
@@ -121,7 +161,7 @@ class TtsEndpointSuccessTest(unittest.IsolatedAsyncioTestCase):
     async def test_the_response_can_be_cached_for_a_day(self):
         api = _load(synthesize=_RecordingSynthesize())
 
-        response = await api["get_tts_audio"]("안녕하세요")
+        response = await api["get_tts_audio"](_FakeRequest(), "안녕하세요")
 
         self.assertEqual(response.headers["Cache-Control"], "public, max-age=86400")
 
@@ -129,7 +169,7 @@ class TtsEndpointSuccessTest(unittest.IsolatedAsyncioTestCase):
         synthesize = _RecordingSynthesize()
         api = _load(synthesize=synthesize)
 
-        await api["get_tts_audio"]("  배  ")
+        await api["get_tts_audio"](_FakeRequest(), "  배  ")
 
         self.assertEqual(synthesize.calls, ["  배  "])
 
@@ -137,7 +177,7 @@ class TtsEndpointSuccessTest(unittest.IsolatedAsyncioTestCase):
 class TtsEndpointErrorTest(unittest.IsolatedAsyncioTestCase):
     async def _failing(self, error):
         api = _load(synthesize=_RecordingSynthesize(error=error))
-        return await api["get_tts_audio"]("안녕하세요")
+        return await api["get_tts_audio"](_FakeRequest(), "안녕하세요")
 
     async def test_invalid_text_is_400(self):
         response = await self._failing(TtsInvalidText("empty"))
@@ -170,10 +210,123 @@ class TtsEndpointErrorTest(unittest.IsolatedAsyncioTestCase):
         synthesize = _RecordingSynthesize(error=TtsInvalidText("empty"))
         api = _load(synthesize=synthesize)
 
-        response = await api["get_tts_audio"]()
+        response = await api["get_tts_audio"](_FakeRequest())
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(synthesize.calls, [""])
+
+
+class TtsRateLimitTest(unittest.IsolatedAsyncioTestCase):
+    """제한은 Google 을 새로 부르는 요청에만 걸린다.
+
+    인증은 두지 않는다 - 토큰을 두어도 앱 번들에 그대로 들어가므로 가져다
+    쓰는 것을 막지 못한다. 막아야 하는 것은 "임의의 문장으로 유료 API 를
+    반복 호출하는 것"이고, 캐시 hit 은 그 호출을 하지 않는다. 앱이 실제로
+    읽는 문구는 기동 때 미리 합성되므로 제한에 닿지 않는다.
+    """
+
+    def _api(self, cached: bool, **overrides):
+        self.synthesize = _RecordingSynthesize()
+        self.is_cached = _FakeIsCached(cached=cached)
+        return _load(
+            synthesize=self.synthesize,
+            is_cached=self.is_cached,
+            **overrides,
+        )
+
+    async def test_a_cache_hit_is_never_rate_limited(self):
+        api = self._api(cached=True)
+
+        for _ in range(5):
+            response = await api["get_tts_audio"](_FakeRequest(), "안녕하세요")
+            self.assertEqual(response.status_code, 200)
+
+        # 한도는 2 다. 캐시 hit 을 셌다면 세 번째에서 429 가 났다.
+        self.assertEqual(len(self.synthesize.calls), 5)
+
+    async def test_cache_misses_over_the_ip_limit_are_429(self):
+        api = self._api(cached=False)
+        request = _FakeRequest("198.51.100.7")
+
+        for _ in range(2):
+            self.assertEqual(
+                (await api["get_tts_audio"](request, "안녕하세요")).status_code,
+                200,
+            )
+        with self.assertLogs("app.api.tts", level="WARNING"):
+            response = await api["get_tts_audio"](request, "안녕하세요")
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.content["code"], "tts_rate_limited")
+        # 거절한 요청은 합성까지 가지 않는다.
+        self.assertEqual(len(self.synthesize.calls), 2)
+
+    async def test_a_rejected_request_carries_retry_after(self):
+        api = self._api(cached=False)
+        request = _FakeRequest("198.51.100.7")
+        for _ in range(2):
+            await api["get_tts_audio"](request, "안녕하세요")
+
+        with self.assertLogs("app.api.tts", level="WARNING"):
+            response = await api["get_tts_audio"](request, "안녕하세요")
+
+        self.assertGreaterEqual(int(response.headers["Retry-After"]), 1)
+
+    async def test_another_ip_is_not_affected(self):
+        api = self._api(cached=False)
+        exhausted = _FakeRequest("198.51.100.7")
+        for _ in range(3):
+            await api["get_tts_audio"](exhausted, "안녕하세요")
+
+        response = await api["get_tts_audio"](_FakeRequest("203.0.113.9"), "안녕하세요")
+
+        self.assertEqual(response.status_code, 200)
+
+    async def test_the_global_limit_applies_across_ips(self):
+        api = self._api(cached=False, TTS_RATE_LIMIT_PER_IP=5, TTS_RATE_LIMIT_GLOBAL=2)
+
+        for index in range(2):
+            response = await api["get_tts_audio"](
+                _FakeRequest(f"203.0.113.{index}"), "안녕하세요"
+            )
+            self.assertEqual(response.status_code, 200)
+
+        with self.assertLogs("app.api.tts", level="WARNING"):
+            response = await api["get_tts_audio"](_FakeRequest("203.0.113.99"), "안녕")
+
+        self.assertEqual(response.status_code, 429)
+
+    async def test_invalid_text_does_not_consume_the_limit(self):
+        """빈 text 를 반복해서 남의 몫을 깎을 수 있으면 안 된다."""
+        is_cached = _FakeIsCached(error=TtsInvalidText("empty"))
+        synthesize = _RecordingSynthesize()
+        api = _load(synthesize=synthesize, is_cached=is_cached)
+        request = _FakeRequest("198.51.100.7")
+
+        for _ in range(5):
+            response = await api["get_tts_audio"](request, "")
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.content["code"], "tts_invalid_text")
+
+        self.assertEqual(synthesize.calls, [])
+        # 한도가 깎이지 않았으므로 멀쩡한 요청은 통과한다.
+        api["is_cached"] = _FakeIsCached(cached=False)
+        self.assertEqual(
+            (await api["get_tts_audio"](request, "안녕하세요")).status_code,
+            200,
+        )
+
+    async def test_a_request_without_a_client_is_still_counted(self):
+        """client 가 None 인 전송(ASGI 테스트 클라이언트 등)도 한 키로 센다."""
+        api = self._api(cached=False)
+
+        self.assertEqual(api["_client_host"](_FakeRequest(None)), "unknown")
+        for _ in range(2):
+            await api["get_tts_audio"](_FakeRequest(None), "안녕하세요")
+        with self.assertLogs("app.api.tts", level="WARNING"):
+            response = await api["get_tts_audio"](_FakeRequest(None), "안녕하세요")
+
+        self.assertEqual(response.status_code, 429)
 
 
 class PrewarmPhrasesTest(unittest.TestCase):

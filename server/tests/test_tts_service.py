@@ -12,6 +12,7 @@ API 키가 로그에 남지 않는지도 여기서 지킨다. 키는 요청 헤�
 import asyncio
 import base64
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -166,6 +167,107 @@ class SynthesizeCacheTest(TtsServiceTestCase):
         )
 
         self.assertEqual(tts_service._key_locks, {})
+
+
+class CacheEvictionTest(TtsServiceTestCase):
+    """캐시는 무한히 자라지 않는다.
+
+    /v1/tts 는 인증이 없어 임의의 문장이 들어올 수 있다. 상한 없이 두면
+    디스크가 차고, 그러면 미리 합성해 둔 안내 문구까지 못 쓰게 된다.
+    """
+
+    async def _synthesize_at(self, text: str, post, mtime: float) -> str:
+        """합성한 뒤 그 파일의 mtime 을 고정한다. 정리 순서를 결정하는 값이다."""
+        before = set(self.cached_files())
+        await tts_service.synthesize(text, post)
+        created = sorted(set(self.cached_files()) - before)
+        self.assertEqual(len(created), 1)
+        os.utime(self.cache_dir / created[0], (mtime, mtime))
+        return created[0]
+
+    async def test_a_cache_hit_updates_the_mtime(self):
+        post = _FakePost()
+        name = await self._synthesize_at("안녕하세요", post, 1000.0)
+
+        await tts_service.synthesize("안녕하세요", post)
+
+        self.assertGreater((self.cache_dir / name).stat().st_mtime, 1000.0)
+        self.assertEqual(len(post.calls), 1)
+
+    async def test_the_cache_is_pruned_to_the_limit(self):
+        post = _FakePost()
+        with mock.patch.object(tts_service, "TTS_CACHE_MAX_FILES", 2):
+            oldest = await self._synthesize_at("첫 문장", post, 1000.0)
+            middle = await self._synthesize_at("둘째 문장", post, 2000.0)
+            await tts_service.synthesize("셋째 문장", post)
+
+        remaining = set(self.cached_files())
+        self.assertEqual(len(remaining), 2)
+        self.assertNotIn(oldest, remaining)
+        self.assertIn(middle, remaining)
+
+    async def test_a_recently_used_file_survives(self):
+        post = _FakePost()
+        with mock.patch.object(tts_service, "TTS_CACHE_MAX_FILES", 2):
+            kept = await self._synthesize_at("첫 문장", post, 1000.0)
+            evicted = await self._synthesize_at("둘째 문장", post, 2000.0)
+            # 캐시 hit 이 mtime 을 올려 가장 오래된 파일이 바뀐다.
+            await tts_service.synthesize("첫 문장", post)
+            await tts_service.synthesize("셋째 문장", post)
+
+        remaining = set(self.cached_files())
+        self.assertIn(kept, remaining)
+        self.assertNotIn(evicted, remaining)
+
+    async def test_nothing_is_pruned_under_the_limit(self):
+        post = _FakePost()
+        with mock.patch.object(tts_service, "TTS_CACHE_MAX_FILES", 5):
+            await tts_service.synthesize("첫 문장", post)
+            await tts_service.synthesize("둘째 문장", post)
+
+        self.assertEqual(len(self.cached_files()), 2)
+
+    async def test_a_failed_eviction_still_returns_the_audio(self):
+        post = _FakePost()
+        with mock.patch.object(tts_service, "TTS_CACHE_MAX_FILES", 1):
+            await self._synthesize_at("첫 문장", post, 1000.0)
+            with mock.patch.object(os, "remove", side_effect=OSError("보호된 파일")):
+                with self.assertLogs(_LOGGER_NAME, level="WARNING"):
+                    audio = await tts_service.synthesize("둘째 문장", post)
+
+        self.assertEqual(audio, _AUDIO)
+        self.assertEqual(len(self.cached_files()), 2)
+
+
+class IsCachedTest(TtsServiceTestCase):
+    """라우터가 요청 제한을 걸 자리를 고르는 데 쓴다."""
+
+    async def test_an_uncached_phrase_is_false(self):
+        self.assertFalse(await tts_service.is_cached("안녕하세요"))
+
+    async def test_a_synthesized_phrase_is_cached(self):
+        await tts_service.synthesize("안녕하세요", _FakePost())
+
+        self.assertTrue(await tts_service.is_cached("안녕하세요"))
+
+    async def test_whitespace_does_not_change_the_answer(self):
+        await tts_service.synthesize("안녕하세요", _FakePost())
+
+        self.assertTrue(await tts_service.is_cached("  안녕하세요  "))
+
+    async def test_invalid_text_is_rejected_before_the_lookup(self):
+        """라우터가 이 예외로 400 을 내고, 요청 제한은 세지 않는다."""
+        for text in ("", "   "):
+            with self.subTest(text=text):
+                with self.assertRaises(tts_service.TtsInvalidText):
+                    await tts_service.is_cached(text)
+
+    async def test_a_missing_api_key_does_not_hide_the_cache(self):
+        """키가 없어도 캐시 유무는 답할 수 있다. 503 은 synthesize 가 낸다."""
+        await tts_service.synthesize("안녕하세요", _FakePost())
+
+        with mock.patch.object(tts_service, "GOOGLE_TTS_API_KEY", ""):
+            self.assertTrue(await tts_service.is_cached("안녕하세요"))
 
 
 class SynthesizeRejectionTest(TtsServiceTestCase):

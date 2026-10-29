@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from app.config import (
     GOOGLE_TTS_API_KEY,
     TTS_CACHE_DIR,
+    TTS_CACHE_MAX_FILES,
     TTS_MAX_CHARS,
     TTS_REQUEST_TIMEOUT_SECONDS,
     TTS_SPEAKING_RATE,
@@ -101,12 +102,25 @@ def _cache_path(key: str) -> str:
 def _read_cache(path: str) -> bytes | None:
     try:
         with open(path, "rb") as cached:
-            return cached.read() or None
+            audio = cached.read()
     except FileNotFoundError:
         return None
     except OSError as exc:
         logger.warning("Could not read the TTS cache", extra={"error": str(exc)})
         return None
+
+    if not audio:
+        return None
+    _touch(path)
+    return audio
+
+
+def _touch(path: str) -> None:
+    """최근 사용 시각을 남긴다. mtime 은 정리 순서에만 쓰이므로 실패는 넘어간다."""
+    try:
+        os.utime(path)
+    except OSError:
+        pass
 
 
 def _write_cache(path: str, audio: bytes) -> None:
@@ -128,6 +142,47 @@ def _remove_quietly(path: str) -> None:
         os.remove(path)
     except OSError:
         pass
+
+
+def _prune_cache(directory: str, max_files: int) -> int:
+    """파일 수가 상한을 넘으면 mtime 이 오래된 것부터 지운다.
+
+    여기서 실패해도 요청은 성공시킨다. 지우지 못한 캐시는 디스크를 조금 더
+    쓸 뿐이고, 그것 때문에 방금 합성한 음성을 버릴 이유가 없다.
+    """
+    try:
+        with os.scandir(directory) as entries:
+            files = [
+                (entry.stat().st_mtime, entry.path)
+                for entry in entries
+                if entry.name.endswith(".mp3") and entry.is_file()
+            ]
+    except OSError as exc:
+        logger.warning("Could not scan the TTS cache", extra={"error": str(exc)})
+        return 0
+
+    excess = len(files) - max_files
+    if excess <= 0:
+        return 0
+
+    files.sort()
+    removed = 0
+    for _, path in files[:excess]:
+        try:
+            os.remove(path)
+        except OSError as exc:
+            logger.warning(
+                "Could not evict a TTS cache file",
+                extra={"error": str(exc)},
+            )
+            continue
+        removed += 1
+
+    logger.info(
+        "Evicted the least recently used TTS audio",
+        extra={"removed": removed, "max_files": max_files},
+    )
+    return removed
 
 
 def _request_payload(text: str) -> dict:
@@ -210,8 +265,8 @@ async def _synthesize_upstream(text: str, http_post: HttpPost) -> bytes:
     return _decode_audio(body)
 
 
-async def synthesize(text: str, http_post: HttpPost | None = None) -> bytes:
-    """한국어 문장을 mp3 바이트로. 캐시에 있으면 API 를 부르지 않는다."""
+def _clean_text(text: str) -> str:
+    """합성할 수 있는 텍스트인지 보고 다듬는다. 검증은 여기 한 곳이다."""
     cleaned = text.strip()
     if not cleaned:
         raise TtsInvalidText("TTS text must not be empty.")
@@ -219,6 +274,25 @@ async def synthesize(text: str, http_post: HttpPost | None = None) -> bytes:
         raise TtsInvalidText(
             f"TTS text must be at most {TTS_MAX_CHARS} characters; got {len(cleaned)}."
         )
+    return cleaned
+
+
+async def is_cached(text: str) -> bool:
+    """이 문장이 이미 디스크에 있는지. 없으면 synthesize 가 Google 을 부른다.
+
+    호출부가 요청 제한을 걸 자리를 고르는 데 쓴다. 캐시 hit 은 외부 호출이
+    아니므로 세지 않아야 하고, 그 판단에 필요한 캐시 키 규칙은 이 모듈만 안다.
+    """
+    cleaned = _clean_text(text)
+    return await asyncio.to_thread(
+        os.path.exists,
+        _cache_path(_cache_key(cleaned)),
+    )
+
+
+async def synthesize(text: str, http_post: HttpPost | None = None) -> bytes:
+    """한국어 문장을 mp3 바이트로. 캐시에 있으면 API 를 부르지 않는다."""
+    cleaned = _clean_text(text)
     if not GOOGLE_TTS_API_KEY:
         raise TtsUnavailable("GOOGLE_TTS_API_KEY is not set.")
 
@@ -241,6 +315,12 @@ async def synthesize(text: str, http_post: HttpPost | None = None) -> bytes:
             logger.warning(
                 "Could not cache the synthesized audio",
                 extra={"error": str(exc)},
+            )
+        else:
+            await asyncio.to_thread(
+                _prune_cache,
+                TTS_CACHE_DIR,
+                TTS_CACHE_MAX_FILES,
             )
         logger.info(
             "Synthesized Korean speech",
