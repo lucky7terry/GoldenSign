@@ -11,6 +11,9 @@ export const START_ANNOUNCEMENT =
 // 구간 인식이 실패했을 때 LED 대신 소리로 알린다.
 export const RETRY_ANNOUNCEMENT = "인식에 실패했습니다. 재시도해주세요"
 
+// 서버 app/api/tts.py 의 FRAMING_ANNOUNCEMENT 와 글자까지 같아야 미리 만든 음성 캐시가 맞는다.
+export const FRAMING_ANNOUNCEMENT = "상대방의 얼굴과 손이 함께 보이도록 바라보세요"
+
 // 폴백용 폰 TTS 설정. 넘기면 호스트 기본값이 통째로 교체되므로 속도만 바꿀 때도 네 값을 모두 넘긴다.
 const VOICE_SETTINGS = {speed: 1.0, stability: 0.68, similarity_boost: 0.75, style: 0}
 

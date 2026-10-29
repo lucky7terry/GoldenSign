@@ -208,8 +208,6 @@ class AnnouncementContractTest(unittest.TestCase):
 
     다르면 미리 만든 음성이 캐시에서 한 번도 맞지 않는다 - 캐시 키가 텍스트의
     sha256 이라, 마침표 하나만 달라도 착용자는 매번 합성을 기다린다.
-
-    FRAMING_ANNOUNCEMENT 는 앱이 아직 읽지 않으므로 앱 쪽 커밋에서 같이 고정한다.
     """
 
     def test_the_start_announcement_matches_the_miniapp(self):
@@ -217,6 +215,15 @@ class AnnouncementContractTest(unittest.TestCase):
 
     def test_the_retry_announcement_matches_the_miniapp(self):
         self.assertIn(_load()["RETRY_ANNOUNCEMENT"], _MINIAPP_TTS)
+
+    def test_the_framing_announcement_matches_the_miniapp(self):
+        self.assertIn(_load()["FRAMING_ANNOUNCEMENT"], _MINIAPP_TTS)
+
+    def test_every_announcement_is_read_by_the_miniapp(self):
+        """앱이 읽지 않는 문구를 미리 합성하면 그 왕복은 버려진다."""
+        for announcement in _load()["ANNOUNCEMENTS"]:
+            with self.subTest(announcement=announcement):
+                self.assertIn(announcement, _MINIAPP_TTS)
 
 
 class LifespanPrewarmTest(unittest.TestCase):
