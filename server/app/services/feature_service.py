@@ -21,9 +21,11 @@
 
 import numpy as np
 
+from app.config import WORD_TARGET_FRAMES
+
 RAW_DIM = 411
 FEATURE_DIM = 420
-SEQUENCE_LENGTH = 60
+SEQUENCE_LENGTH = WORD_TARGET_FRAMES
 
 # BODY_25 상반신 15점. 서버가 채우지 않는 하반신 관절과 겹치지 않는다.
 UPPER_POSE = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 15, 16, 17, 18)
