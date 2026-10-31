@@ -23,6 +23,7 @@ def _load_service_singleton():
         "preload_mediapipe_service",
         "keypoint_extraction_available",
         "keypoint_extraction_error",
+        "_create_service",
     }
     state_names = {"_mediapipe_service", "_initialization_error",
                    "_mediapipe_service_lock"}
@@ -43,6 +44,9 @@ def _load_service_singleton():
         "logger": __import__("logging").getLogger("test"),
         # 타입 주석이 런타임에 평가되므로 자리만 채워둔다. 각 테스트가 교체한다.
         "MediaPipeService": object,
+        "MediaPipeServicePool": object,
+        # 기존 테스트는 서비스 하나일 때의 동작을 본다.
+        "KEYPOINT_WORKERS": 1,
     })
     exec(compile(ast.Module(nodes, []), "<service>", "exec"), module.__dict__)
     return module
@@ -99,6 +103,34 @@ class ModelAvailabilityTest(unittest.TestCase):
 
         self.assertIs(first, second)
         self.assertEqual(len(created), 1)
+
+
+    def test_pool_creates_one_service_per_worker(self):
+        created = []
+        self.service.KEYPOINT_WORKERS = 3
+        self.service.MediaPipeService = lambda: created.append(1) or object()
+        self.service.MediaPipeServicePool = lambda services: ("pool", services)
+
+        pool = self.service.get_mediapipe_service()
+
+        self.assertEqual(pool[0], "pool")
+        self.assertEqual(len(pool[1]), 3)
+        self.assertEqual(len(created), 3)
+
+    def test_pool_loading_failure_is_remembered(self):
+        attempts = []
+
+        def _boom():
+            attempts.append(1)
+            raise FileNotFoundError("Hand model not found")
+
+        self.service.KEYPOINT_WORKERS = 2
+        self.service.MediaPipeService = _boom
+
+        for _ in range(3):
+            with self.assertRaises(self.service.MediaPipeUnavailableError):
+                self.service.get_mediapipe_service()
+        self.assertEqual(len(attempts), 1)
 
 
 if __name__ == "__main__":
