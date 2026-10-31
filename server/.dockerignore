@@ -1,0 +1,10 @@
+models/
+tests/
+venv/
+.venv/
+**/__pycache__/
+*.pyc
+*.keras
+*.task
+scripts/_*
+.env

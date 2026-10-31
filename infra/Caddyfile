@@ -1,0 +1,6 @@
+# DOMAIN 은 infra/.env 에서 온다(예: goldensign.duckdns.org).
+# Caddy 가 Let's Encrypt 인증서를 자동으로 받고 갱신한다.
+# WebSocket(wss://) 업그레이드도 reverse_proxy 가 그대로 넘긴다.
+{$DOMAIN} {
+	reverse_proxy server:8000
+}

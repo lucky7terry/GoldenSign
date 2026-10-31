@@ -33,3 +33,4 @@ server/venv/
 server/__pycache__/
 **/__pycache__/
 *.pyc
+infra/tts_cache/

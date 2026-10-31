@@ -8,4 +8,4 @@
 - `server/` — FastAPI + MediaPipe AI 서버. REST(`/health`, `/v1/sessions`)와 WebSocket 세션 엔드포인트를 제공한다.
 - `docs/` — API 계약, WebSocket 계약.
 - `fixtures/` — 문서에서 참조하는 응답 예시 JSON.
-- `infra/` — 배포·인프라 설정 자리. 현재는 `.gitkeep`만 있는 빈 디렉터리다.
+- `infra/` — 배포 설정(Docker Compose + Caddy HTTPS). 사용법은 `infra/README.md`.
