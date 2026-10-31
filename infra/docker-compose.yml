@@ -8,6 +8,8 @@ services:
     volumes:
       # 인식 모델(.keras)과 MediaPipe .task 파일을 둔다. 저장소에는 없다.
       - ./models:/app/models
+      # TTS 음성 캐시. 다시 빌드해도 지워지지 않게 밖에 둔다.
+      - ./tts_cache:/app/data/tts_cache
     expose:
       - "8000"
 
