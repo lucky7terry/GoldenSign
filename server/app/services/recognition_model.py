@@ -1,7 +1,9 @@
 """수어 단어 인식 모델 로딩.
 
 학습 노트북(transformer_tuning_얼굴포함_개선.ipynb)이 저장한 Keras 모델을
-읽는다. 모델은 (60, 420) 특징 시퀀스를 받아 50개 단어에 대한 확률을 낸다.
+읽는다. 모델은 (WORD_TARGET_FRAMES, 420) 특징 시퀀스를 받아 50개 단어에 대한
+확률을 낸다. 시퀀스 길이는 학습마다 다를 수 있어(fold0 은 60, 최종 모델은 75)
+설정에서 읽고, 로드한 모델의 입력 모양과 맞는지 확인한다.
 
 커스텀 레이어 3개가 `sign>` 패키지 이름으로 직렬화되어 있어, 같은 이름으로
 등록된 정의가 프로세스 안에 있어야 load_model 이 성공한다. 아래 클래스들은
@@ -13,9 +15,13 @@ import os
 import threading
 from pathlib import Path
 
+from app.config import WORD_TARGET_FRAMES
+
 logger = logging.getLogger(__name__)
 
-SEQUENCE_LENGTH = 60
+# 모델 입력 길이. 구간을 이 길이로 리샘플하므로 word_segment_service 와
+# 같은 값을 봐야 한다. 모델 파일이 다른 길이면 로드 시점에 거절한다.
+SEQUENCE_LENGTH = WORD_TARGET_FRAMES
 FEATURE_DIM = 420
 NUM_CLASSES = 50
 
@@ -121,7 +127,8 @@ def load_recognition_model(path: Path | None = None):
     actual = tuple(model.input_shape)
     if actual != expected:
         raise RecognitionModelUnavailableError(
-            f"Model input shape {actual} does not match the server contract {expected}."
+            f"Model input shape {actual} does not match the server contract {expected}. "
+            f"Set WORD_TARGET_FRAMES={actual[1]} if this model was trained with that length."
         )
     if model.output_shape[-1] != NUM_CLASSES:
         raise RecognitionModelUnavailableError(
@@ -252,16 +259,16 @@ def _warm_up() -> None:
     """
     import numpy as np
 
-    from app.config import WORD_TARGET_FRAMES
     from app.services.label_service import all_words
 
-    if WORD_TARGET_FRAMES != SEQUENCE_LENGTH:
-        # 환경변수로 바꿀 수 있는 값이라 오타가 그대로 통과한다. 그러면
-        # 서버는 멀쩡히 뜨고 /health 도 loaded: true 인데, 모든 word_end 가
-        # shape 불일치로 실패한다.
+    model_length = tuple(get_recognition_model().input_shape)[1]
+    if model_length != SEQUENCE_LENGTH:
+        # load_recognition_model 이 이미 거르지만, 테스트가 모델을 바꿔치기한
+        # 경우까지 포함해 워밍업에서 한 번 더 본다. 여기서 안 잡으면 서버는
+        # 멀쩡히 뜨고 /health 도 loaded: true 인데 모든 word_end 가 실패한다.
         raise RuntimeError(
-            f"WORD_TARGET_FRAMES={WORD_TARGET_FRAMES} but the model expects "
-            f"{SEQUENCE_LENGTH}."
+            f"WORD_TARGET_FRAMES={SEQUENCE_LENGTH} but the model expects "
+            f"{model_length}."
         )
 
     words = all_words()

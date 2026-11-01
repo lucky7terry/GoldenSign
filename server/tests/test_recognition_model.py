@@ -12,6 +12,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.config import WORD_TARGET_FRAMES  # noqa: E402
 from app.services.recognition_model import (  # noqa: E402
     FEATURE_DIM,
     NUM_CLASSES,
@@ -25,7 +26,7 @@ from app.services.recognition_model import (  # noqa: E402
 class RecognitionModelTest(unittest.TestCase):
     def test_contract_constants_match_the_trained_model(self):
         # 학습 노트북의 final_summary.json 과 같아야 한다.
-        self.assertEqual(SEQUENCE_LENGTH, 60)
+        self.assertEqual(SEQUENCE_LENGTH, WORD_TARGET_FRAMES)
         self.assertEqual(FEATURE_DIM, 420)
         self.assertEqual(NUM_CLASSES, 50)
 

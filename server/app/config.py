@@ -84,7 +84,8 @@ WS_IDLE_TIMEOUT_SECONDS = _env_float("WS_IDLE_TIMEOUT_SECONDS", 60.0)
 #   8~12프레임까지 떨어뜨려도 5/5 정답이었고 확신도 0.765~0.809 였다.
 #   낮출수록 짧은 단어를 덜 거절하므로, 정확도가 버티는 선까지 내린다.
 #   MediaPipe 가 5.8fps 까지 떨어지는 것을 감안하면 8장은 약 1.4초다.
-# WORD_TARGET_FRAMES: 모델 입력 길이. 학습이 60이다.
+# WORD_TARGET_FRAMES: 모델 입력 길이. 모델 파일마다 다르다(fold0·test_yewon 60, 최종 4-fold 75).
+# 로드한 모델의 입력 모양과 다르면 기동 시 거절한다.
 WORD_MAX_SECONDS = _env_float("WORD_MAX_SECONDS", 8.0)
 WORD_MIN_FRAMES = _env_int("WORD_MIN_FRAMES", 8)
 WORD_TARGET_FRAMES = _env_int("WORD_TARGET_FRAMES", 60)
