@@ -63,7 +63,12 @@ import {
   type AiServerError,
   type AiWordProgress,
 } from "./ai-client"
-import {speakSafe, START_ANNOUNCEMENT, RETRY_ANNOUNCEMENT} from "./tts"
+import {
+  speakSafe,
+  START_ANNOUNCEMENT,
+  RETRY_ANNOUNCEMENT,
+  FRAMING_ANNOUNCEMENT,
+} from "./tts"
 
 /**
  * background 엔트리는 `StreamModule` 은 re-export 하지만 옵션/결과 인터페이스는
@@ -1003,11 +1008,11 @@ registerMiniapp((session) => {
   }
 
   /**
-   * AiClient 가 서버 `error` 를 받을 때마다 부르는 곳. 구간 오류 넷은 앱 상태를
+   * AiClient 가 서버 `error` 를 받을 때마다 부르는 곳. 구간 오류 다섯은 앱 상태를
    * 서버에 맞춘 뒤, 나머지 code 와 똑같이 방송한다.
    */
   function handleAiError(err: AiServerError): void {
-    // 구간 오류는 스트림을 죽이지 않는다 — 넷 다 setState("error") 를 부르지
+    // 구간 오류는 스트림을 죽이지 않는다 — 다섯 다 setState("error") 를 부르지
     // 않는 이유다. 실패한 것은 구간 하나뿐이다.
     //
     // clearWordSegment() 는 open 이든 closing 이든 지운다. word_end 를 보낸 뒤
@@ -1016,15 +1021,24 @@ registerMiniapp((session) => {
     //
     // 거절 깜빡임은 switch 뒤에서 한 번만 얹는다. 구간 정리·복원이 끝난 뒤 flash 복귀가 그 시점에 맞는 불을 고른다.
     let rejected = false
-    // 구간이 닫혔고 다시 눌러야 하는 오류에서만 켠다.
-    let retryVoice = false
+    // 구간이 닫혔고 다시 눌러야 하는 오류에서만 채운다. 읽을 문구는 code 마다 다르다.
+    let announcement: string | undefined
     switch (err.code) {
       case "word_too_short":
         // 8프레임 미만. 서버는 이미 닫았으므로 앱도 닫는다.
         console.warn("[Word] 구간이 너무 짧습니다.")
         clearWordSegment()
         rejected = true
-        retryVoice = true
+        announcement = RETRY_ANNOUNCEMENT
+        break
+
+      case "word_out_of_frame":
+        // 얼굴이나 손이 화면 밖이라 서버가 판정하지 않았다. 다시 누르라는 말로는
+        // 고쳐지지 않으므로, 재시도 안내 대신 무엇을 고쳐야 하는지 읽는다.
+        console.warn(`[Word] 얼굴이나 손이 화면 밖입니다 — 구간을 닫습니다. ${err.message}`)
+        clearWordSegment()
+        rejected = true
+        announcement = FRAMING_ANNOUNCEMENT
         break
 
       case "word_not_started":
@@ -1057,7 +1071,7 @@ registerMiniapp((session) => {
         console.warn("[Word] 서버 판정에 실패했습니다. — 구간을 닫습니다.")
         clearWordSegment()
         rejected = true
-        retryVoice = true
+        announcement = RETRY_ANNOUNCEMENT
         break
 
       case "model_unavailable":
@@ -1068,8 +1082,9 @@ registerMiniapp((session) => {
     }
 
     if (rejected) flashLed(REJECT_LED, FLASH_MS)
-    // 불을 못 보는 착용자를 위해 같은 거절을 소리로도 알린다.
-    if (retryVoice) speakSafe(session.speaker, RETRY_ANNOUNCEMENT, "retry")
+    // 불을 못 보는 착용자를 위해 같은 거절을 소리로도 알린다. tag 를 code 로 두면
+    // 어느 거절이 소리를 냈는지 [TTS] 로그에서 바로 읽힌다.
+    if (announcement !== undefined) speakSafe(session.speaker, announcement, err.code)
 
     patch("error", {code: err.code, message: err.message, retryable: err.retryable})
   }

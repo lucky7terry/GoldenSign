@@ -6,18 +6,17 @@
  */
 
 /**
- * AI 서버 base URL.
+ * AI 서버 base URL. 배포 서버를 가리킨다.
  *
- * 반드시 Mac 의 LAN IP 여야 한다. background 번들은 *폰* 에서 도는 코드라
- * localhost/127.0.0.1 은 폰 자신을 가리킨다.
+ * ai-client.ts 가 이 값의 scheme 만 바꿔 WebSocket 주소를 만들므로
+ * (https -> wss) https 로 둔다. tts.ts 도 이 값으로 /v1/tts URL 을 만든다.
  *
- * Mac 의 네트워크가 바뀌면(카페 WiFi, 핫스팟, VPN) 재확인 필요:
- *   ipconfig getifaddr en0
- *
- * 사설 IP 로의 평문 http:// 는 iOS ATS 와 Android cleartext 정책이 각각
- * 차단할 수 있다. ai-client.ts 의 로그가 그 경우와 "서버 미기동" 을 구분한다.
+ * 로컬 서버로 돌릴 때는 Mac 의 LAN IP(http://192.168.0.24:8000 꼴)로 바꾼다 —
+ * background 번들은 *폰* 에서 도는 코드라 localhost/127.0.0.1 은 폰 자신을
+ * 가리키고, 사설 IP 로의 평문 http:// 는 iOS ATS 와 Android cleartext 정책이
+ * 차단할 수 있다.
  */
-export const AI_HTTP = "http://192.168.0.24:8000"
+export const AI_HTTP = "https://goldensign.duckdns.org"
 
 /**
  * 세션·핸드셰이크 메시지 계열(hello / ready / frame / result / ack / stop)의

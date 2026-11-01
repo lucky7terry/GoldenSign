@@ -75,12 +75,14 @@ import numpy as np
 
 from app.config import (
     WORD_MAX_SECONDS,
+    WORD_MIN_FACE_RATIO,
     WORD_MIN_FRAMES,
+    WORD_MIN_HAND_RATIO,
     WORD_SOURCE_FPS,
     WORD_TARGET_FRAMES,
 )
 from app.schemas.openpose import OpenPoseResult
-from app.services.feature_service import build_features
+from app.services.feature_service import CONF_THRESHOLD, build_features
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,14 @@ OPENPOSE_FEATURE_DIM = (
 
 # 411 = (x, y, 신뢰도) x 137. 신뢰도만 다른 규칙으로 리샘플한다.
 _CONFIDENCE_COLUMNS = np.arange(2, OPENPOSE_FEATURE_DIM, 3)
+
+# 411 안의 부위 경계. 순서는 build_openpose_feature_vector 와 같다.
+_LEFT_HAND_START = POSE_2D_FEATURE_COUNT
+_RIGHT_HAND_START = _LEFT_HAND_START + HAND_2D_FEATURE_COUNT
+_FACE_START = _RIGHT_HAND_START + HAND_2D_FEATURE_COUNT
+_LEFT_HAND_SLICE = slice(_LEFT_HAND_START, _RIGHT_HAND_START)
+_RIGHT_HAND_SLICE = slice(_RIGHT_HAND_START, _FACE_START)
+_FACE_SLICE = slice(_FACE_START, OPENPOSE_FEATURE_DIM)
 
 # 타임스탬프가 이 범위 밖의 프레임레이트를 함의하면 믿지 않는다.
 # pts 32비트 랩어라운드, 기기 시계 점프, WebSocket/WHEP 시각이 한 구간에
@@ -117,6 +127,15 @@ class WordNotStarted(RuntimeError):
 
 class WordTooShort(RuntimeError):
     """구간이 너무 짧아 60프레임으로 늘리는 것이 무의미할 때."""
+
+
+class WordOutOfFrame(RuntimeError):
+    """얼굴이나 손이 구간 대부분에서 화면 밖이었을 때."""
+
+    def __init__(self, message: str, face_ratio: float, hand_ratio: float) -> None:
+        super().__init__(message)
+        self.face_ratio = face_ratio
+        self.hand_ratio = hand_ratio
 
 
 def build_openpose_feature_vector(
@@ -335,6 +354,35 @@ def build_model_input(
 
 
 # ---------------------------------------------------------------------------
+# 검출 비율
+# ---------------------------------------------------------------------------
+
+
+def _part_detected(rows: np.ndarray, part: slice) -> np.ndarray:
+    """프레임마다 그 부위가 검출됐는지. 점 하나라도 임계값을 넘으면 검출이다."""
+    return np.any(rows[:, part][:, 2::3] > CONF_THRESHOLD, axis=1)
+
+
+def coverage_ratios(frames: list[list[float]]) -> tuple[float, float]:
+    """구간에서 얼굴과 손이 보인 프레임 비율.
+
+    build_features 의 파트별 검출률을 쓰지 않는다. 그쪽은 30fps 복원 뒤의
+    값이라 보간으로 생긴 프레임이 섞인다. 여기서 알아야 하는 것은 "실제로
+    도착한 프레임 중 몇 장에서 보였는가"다.
+    """
+    rows = np.asarray(frames, dtype=np.float64)
+    if rows.size == 0:
+        return 0.0, 0.0
+
+    face = _part_detected(rows, _FACE_SLICE)
+    # 손은 양손이 아니라 하나 이상이다 - 한 손 수어는 다른 손이 화면 밖인 게 정상이다.
+    hand = _part_detected(rows, _LEFT_HAND_SLICE) | _part_detected(
+        rows, _RIGHT_HAND_SLICE
+    )
+    return float(face.mean()), float(hand.mean())
+
+
+# ---------------------------------------------------------------------------
 # 구간 저장소
 # ---------------------------------------------------------------------------
 
@@ -372,6 +420,8 @@ class WordSegment:
     span_ms: float | None
     resampled_on_time: bool
     dropped_after_cap: int
+    face_ratio: float
+    hand_ratio: float
 
     def metadata(self) -> dict:
         """word_progress / result 에 실을 구간 요약."""
@@ -386,6 +436,11 @@ class WordSegment:
             ),
             "resampled_on_time": self.resampled_on_time,
             "dropped_after_cap": self.dropped_after_cap,
+            # 통과한 구간도 비율을 싣는다. 기준을 조정할 때 근거가 된다.
+            "coverage": {
+                "face": round(self.face_ratio, 3),
+                "hand": round(self.hand_ratio, 3),
+            },
         }
 
 
@@ -396,6 +451,8 @@ class WordSegmentStore:
         target_frames: int = WORD_TARGET_FRAMES,
         min_frames: int = WORD_MIN_FRAMES,
         max_seconds: float = WORD_MAX_SECONDS,
+        min_face_ratio: float = WORD_MIN_FACE_RATIO,
+        min_hand_ratio: float = WORD_MIN_HAND_RATIO,
     ) -> None:
         """구간 저장소를 만든다. 기본값은 app.config 를 따른다."""
         if target_frames <= 1:
@@ -404,10 +461,16 @@ class WordSegmentStore:
             raise ValueError("min_frames must be greater than 1.")
         if max_seconds <= 0:
             raise ValueError("max_seconds must be greater than 0.")
+        if not 0.0 < min_face_ratio <= 1.0:
+            raise ValueError("min_face_ratio must be in (0, 1].")
+        if not 0.0 < min_hand_ratio <= 1.0:
+            raise ValueError("min_hand_ratio must be in (0, 1].")
 
         self.target_frames = target_frames
         self.min_frames = min_frames
         self.max_seconds = max_seconds
+        self.min_face_ratio = min_face_ratio
+        self.min_hand_ratio = min_hand_ratio
         # 시간 상한(WORD_MAX_SECONDS)은 WebSocket 핸들러의 타이머가 건다.
         # 여기 상한은 그 타이머가 못 도는 상황에 대한 최후 방어라, 도달
         # 가능한 최대 프레임레이트를 넉넉히 잡아 유도한다.
@@ -569,6 +632,21 @@ class WordSegmentStore:
                     f"at least {self.min_frames} are required."
                 )
 
+            face_ratio, hand_ratio = coverage_ratios(word.frames)
+            if (
+                face_ratio < self.min_face_ratio
+                or hand_ratio < self.min_hand_ratio
+            ):
+                # word_count 는 올리지 않는다. 판정하지 않은 구간이다.
+                state.word = None
+                raise WordOutOfFrame(
+                    f"Face visible in {face_ratio:.0%} of frames "
+                    f"(at least {self.min_face_ratio:.0%} required) and hands "
+                    f"in {hand_ratio:.0%} (at least {self.min_hand_ratio:.0%}).",
+                    face_ratio,
+                    hand_ratio,
+                )
+
             state.word = None
             state.word_count += 1
             word_index = state.word_count
@@ -586,6 +664,8 @@ class WordSegmentStore:
             span_ms=_span_ms(timestamps),
             resampled_on_time=on_time,
             dropped_after_cap=dropped,
+            face_ratio=face_ratio,
+            hand_ratio=hand_ratio,
         )
         logger.info(
             "Closed word segment",
@@ -598,6 +678,8 @@ class WordSegmentStore:
                 "resampled_on_time": on_time,
                 "effective_fps": _effective_fps(frame_count, segment.span_ms),
                 "dropped_after_cap": dropped,
+                "face_ratio": round(face_ratio, 3),
+                "hand_ratio": round(hand_ratio, 3),
             },
         )
         return segment
