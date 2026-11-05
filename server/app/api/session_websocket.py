@@ -2,7 +2,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from time import monotonic
+from time import monotonic, perf_counter
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
@@ -284,7 +284,9 @@ def _close_word_and_recognize(session_id: str, word_generation: int):
     인식 모델이 없으면 recognition 이 None 이다 - 구간은 정상적으로
     닫히고 좌표 수집도 계속된다. 단어만 주장하지 않는다.
     """
+    started = perf_counter()
     segment = word_store.end_word(session_id, word_generation)
+    features_done = perf_counter()
     try:
         recognition = recognize_word_segment(segment.sequence)
     except RecognitionModelUnavailableError as exc:
@@ -293,7 +295,20 @@ def _close_word_and_recognize(session_id: str, word_generation: int):
             extra={"session_id": session_id, "error": str(exc)},
         )
         recognition = None
-    return segment, recognition
+    finished = perf_counter()
+    # features = 30fps 복원 + build_features + 목표 길이 리샘플,
+    # inference = 모델 한 번. started 는 executor 에 들어온 시각이라,
+    # 호출부가 그 앞의 대기(세마포어 + 스레드 배정)를 따로 잴 수 있다.
+    timings = {
+        "features_ms": _elapsed_ms(started, features_done),
+        "inference_ms": _elapsed_ms(features_done, finished),
+    }
+    return segment, recognition, timings, started
+
+
+def _elapsed_ms(start: float, end: float) -> float:
+    """perf_counter 두 값 사이의 밀리초. 소수 첫째 자리까지."""
+    return round((end - start) * 1000, 1)
 
 
 def _decode_frame_image_data(image_data: str) -> bytes:
@@ -411,6 +426,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         "closed" | "too_short" | "out_of_frame" | "not_open".
         """
         loop = asyncio.get_running_loop()
+        finalize_started = perf_counter()
 
         # 큐에 남은 프레임을 먼저 소진한다. dev-0.2 frame 경로는 ACK 를
         # 먼저 보내고 인식은 워커가 나중에 하므로, 여기서 바로 닫으면
@@ -443,12 +459,15 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
             # 프레임 경로와 같은 한도를 쓴다. 구간 마감은 특징 변환과 추론이
             # 붙어 있어 프레임 한 장보다 무겁고, 기본 executor 를 MediaPipe 와
             # 나눠 쓴다. 여기만 무제한이면 그 한도가 의미를 잃는다.
+            drain_done = perf_counter()
             async with _recognition_semaphore:
-                segment, recognition = await loop.run_in_executor(
-                    None,
-                    _close_word_and_recognize,
-                    session_id,
-                    word_generation,
+                segment, recognition, timings, executor_started = (
+                    await loop.run_in_executor(
+                        None,
+                        _close_word_and_recognize,
+                        session_id,
+                        word_generation,
+                    )
                 )
         except (WordNotStarted, WordSessionClosed):
             return "not_open"
@@ -523,7 +542,20 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
 
         metadata = segment.metadata()
         metadata["close_reason"] = close_reason
-
+        # 서버가 이 단어에 쓴 시간. 앱은 (결과 수신 - word_end 송신) 에서
+        # total_ms 를 빼 통신 왕복을 구한다 - 폰 시계 하나만 쓰므로 서버와
+        # 시계가 어긋나도 상관없다. total_ms 는 결과를 보내기 직전까지라,
+        # 소켓에 쓰는 시간(1ms 미만)은 통신 쪽으로 들어간다.
+        #   drain     처리 중이던 프레임을 기다린 시간
+        #   wait      세마포어와 스레드 배정을 기다린 시간
+        #   features  30fps 복원 + 특징 + 목표 길이 리샘플
+        #   inference 모델 한 번
+        metadata["timings"] = {
+            "drain_ms": _elapsed_ms(finalize_started, drain_done),
+            "wait_ms": _elapsed_ms(drain_done, executor_started),
+            **timings,
+            "total_ms": _elapsed_ms(finalize_started, perf_counter()),
+        }
 
         payload = {
             "type": "result",
@@ -540,16 +572,21 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
             # 이 값이 없으면 왜 안 나왔는지 알 수 없다.
             payload["recognition"] = recognition.detail()
 
+        await _send_json(websocket, send_lock, payload, activity)
+        # 앱에 보낸 timings 와 같은 값을 남기고, 소켓에 쓰기까지 끝난 시각을
+        # sent_ms 로 더한다. 둘의 차이가 송신에 든 시간이다.
         logger.info(
             "Word recognized" if recognition is not None else "Word closed",
             extra={
                 "session_id": session_id,
                 "word_index": segment.word_index,
                 "close_reason": close_reason,
+                "frame_count": segment.frame_count,
+                **metadata["timings"],
+                "sent_ms": _elapsed_ms(finalize_started, perf_counter()),
                 **(recognition.detail() if recognition is not None else {}),
             },
         )
-        await _send_json(websocket, send_lock, payload, activity)
         return "closed"
 
     async def auto_close_word(timer_client_message_id: str | None):
