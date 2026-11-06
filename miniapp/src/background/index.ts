@@ -67,6 +67,7 @@ import {
 } from "./ai-client"
 import {
   speakSafe,
+  handleSpeakerState,
   START_ANNOUNCEMENT,
   RETRY_ANNOUNCEMENT,
   FRAMING_ANNOUNCEMENT,
@@ -1196,6 +1197,21 @@ registerMiniapp((session) => {
         error_message: String(err.message),
         permission: String(err.permission),
       })
+    }),
+  )
+
+  // --- 음성 재생 상태 (측정 로그 전용) ---------------------------------------
+
+  // 세션당 한 번만 건다. 발화 한 건마다 걸면 구독이 쌓이고, 끊긴 재생의 구독을
+  // 해제할 자리도 없다. 첫 speakSafe 가 "ready" 안에서 불리므로 그 전에 건다.
+  unsubscribers.push(
+    session.speaker.onStateChange((event) => {
+      try {
+        handleSpeakerState(event)
+      } catch (err) {
+        // 측정 로그가 세션을 깨뜨리는 일은 없어야 한다.
+        console.error("[TTS] handleSpeakerState 예외:", err)
+      }
     }),
   )
 
