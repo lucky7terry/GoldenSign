@@ -246,6 +246,16 @@ const CLIENT_LOG_QUEUE_MAX = 20
  * 모아 둔 20건을 한꺼번에 보내면 뒤쪽이 통째로 버려진다.
  */
 const CLIENT_LOG_INTERVAL_MS = 250
+/**
+ * 구간이 `result` 없이 끝나는 서버 오류들. 이 오류가 오면 왕복 측정의 기준
+ * 시각(word_end 송신)을 버린다 — 남겨 두면 다음 구간의 왕복에 섞인다.
+ */
+const WORD_ABORTED_ERROR_CODES = new Set([
+  "word_too_short",
+  "word_out_of_frame",
+  "word_recognition_failed",
+  "word_not_started",
+])
 
 export class AiClient {
   /**
@@ -306,6 +316,14 @@ export class AiClient {
   private clientLogSentAt = 0
   /** client_message_id 가 같은 ms 안에서 겹치지 않게 하는 일련번호. */
   private clientLogSeq = 0
+  /**
+   * 마지막 `word_end` 를 보낸 시각. 통신 왕복 측정의 기준점이다.
+   *
+   * `pendingAcks` 를 쓸 수 없다 — 그 엔트리는 ack 가 오면 지워지고, ack 는
+   * `result` 보다 먼저 올 수 있다. 구간은 한 번에 하나뿐이라 단일 필드로
+   * 충분하되, 측정이 끝나거나 구간이 result 없이 끝나면 반드시 비운다.
+   */
+  private wordEndSentAt: number | undefined
 
   /**
    * @param userId  session.userId. POST /v1/sessions 의 `user_id` 로 나간다.
@@ -781,6 +799,8 @@ export class AiClient {
       }
 
       case "result": {
+        // 왕복 측정의 T1. 아래 파싱과 로그에 드는 시간이 섞이지 않게 맨 먼저 찍는다.
+        const receivedAt = Date.now()
         const r = asRecord(m?.result)
         // 인덱스 필드는 두 개고 층이 다르다. 창 번호는 result.sequence.
         // window_index (sequence_service.metadata()), 누적 처리 프레임 수는
@@ -803,6 +823,8 @@ export class AiClient {
               ` resampled_on_time=${String(word.resampled_on_time)}` +
               ` model_loaded=${String(model?.loaded)}`,
           )
+          const wordText = typeof r?.text === "string" ? r.text : null
+          this.logWordLatency(word, wordText, decision, receivedAt)
         }
         // 거절됐을 때 서버가 무엇을 1위로 봤는지 남긴다. 화면에도 LED 에도 쓰지 않는다.
         if (decision !== undefined) {
@@ -876,6 +898,12 @@ export class AiClient {
         console.error(`${this.tag} error retryable=`, m?.retryable)
         console.error(`${this.tag} error 전문:`, JSON.stringify(parsed))
 
+        // 이 오류들은 구간이 result 없이 끝났다는 뜻이다. 기준 시각을 버린다.
+        const errorCode = m?.code
+        if (typeof errorCode === "string" && WORD_ABORTED_ERROR_CODES.has(errorCode)) {
+          this.wordEndSentAt = undefined
+        }
+
         // 와이어에서 unknown 으로 온 값이라 필드마다 다시 검사한다.
         if (this.onError !== undefined) {
           const code = m?.code
@@ -902,6 +930,62 @@ export class AiClient {
         break
       }
     }
+  }
+
+  /**
+   * 단어 구간 하나의 통신 왕복을 로그로 남긴다. 화면에도 동작에도 쓰지 않는다.
+   *
+   *   왕복 = (결과 수신 - word_end 송신) - word.timings.total_ms
+   *
+   * 두 시각 모두 폰 시계로 찍으므로 서버와 시계가 어긋나도 상관없다.
+   * `total_ms` 는 서버가 결과를 보내기 직전까지 쓴 시간이다(api-contract.md
+   * word result). 올라가는 길과 내려오는 길의 합이며 한 방향은 구할 수 없다.
+   *
+   * `close_reason` 이 `"timeout"` 이면 앱이 `word_end` 를 보낸 적이 없어 식이
+   * 성립하지 않는다. `timings` 가 없는 서버에서는 왕복을 뺄 근거가 없다.
+   */
+  private logWordLatency(
+    word: UnknownRecord,
+    text: string | null,
+    decision: UnknownRecord | undefined,
+    receivedAt: number,
+  ): void {
+    const sentAt = this.wordEndSentAt
+    // 이 구간의 측정은 여기서 끝난다. 다음 구간이 남은 값을 주워 쓰면 안 된다.
+    this.wordEndSentAt = undefined
+
+    const closeReason = word.close_reason
+    if (closeReason === "timeout") {
+      console.log("[Latency] word close=timeout rtt=n/a")
+      return
+    }
+    if (closeReason !== "client" || sentAt === undefined) {
+      // 기준 시각이 없으면 숫자를 지어낼 수 없다. 측정이 빠진 사실만 남긴다.
+      console.log(`[Latency] word close=${String(closeReason)} rtt=n/a reason=no_word_end_time`)
+      return
+    }
+
+    // 모델이 없으면 recognition 블록이 통째로 빠지므로 text 유무로 대신한다.
+    const accepted =
+      typeof decision?.accepted === "boolean" ? decision.accepted : text !== null && text !== ""
+    const rttMs = receivedAt - sentAt
+    const head = `[Latency] word text=${String(text)} accepted=${String(accepted)} rtt_ms=${rttMs}`
+
+    const timings = asRecord(word.timings)
+    const totalMs = timings?.total_ms
+    if (typeof totalMs !== "number") {
+      // 서버가 timings 를 아직 안 싣는다. 왕복은 서버 처리 시간을 모르면 못 구한다.
+      console.log(`${head} server_total_ms=n/a comm_ms=n/a`)
+      return
+    }
+
+    // 소수점이 길게 늘어지지 않게 서버와 같은 소수 첫째 자리로 맞춘다.
+    const commMs = Math.round((rttMs - totalMs) * 10) / 10
+    console.log(
+      `${head} server_total_ms=${totalMs} comm_ms=${commMs}` +
+        ` drain_ms=${String(timings?.drain_ms)} wait_ms=${String(timings?.wait_ms)}` +
+        ` features_ms=${String(timings?.features_ms)} inference_ms=${String(timings?.inference_ms)}`,
+    )
   }
 
   // -------------------------------------------------------------------------
@@ -1070,6 +1154,8 @@ export class AiClient {
     )
     if (!sent) return false
 
+    // 새 구간이 시작됐다. 앞 구간의 기준 시각이 남아 있으면 여기서 버린다.
+    this.wordEndSentAt = undefined
     this.pendingAcks.set(clientMessageId, {label: "word_start", sentAt: Date.now()})
     console.log(`${this.tag} word_start 전송 시각=`, new Date().toISOString())
     return sent
@@ -1100,7 +1186,10 @@ export class AiClient {
     )
     if (!sent) return false
 
-    this.pendingAcks.set(clientMessageId, {label: "word_end", sentAt: Date.now()})
+    // 왕복 측정의 T0. 보내는 데 실패했으면 여기 오지 않으므로 기준이 틀어지지 않는다.
+    const sentAt = Date.now()
+    this.wordEndSentAt = sentAt
+    this.pendingAcks.set(clientMessageId, {label: "word_end", sentAt})
     console.log(`${this.tag} word_end 전송 시각=`, new Date().toISOString())
     return sent
   }
