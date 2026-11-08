@@ -427,11 +427,18 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 `word_too_short`, `word_out_of_frame`, `word_recognition_failed` 로 거절해도
 **구간은 닫힌다.** 앱은 다시 `word_start` 부터 보내면 된다.
 
-`word_out_of_frame` 은 얼굴이 보인 프레임 비율이 `WORD_MIN_FACE_RATIO`
-미만이거나, 두 손 중 하나라도 보인 프레임 비율이 `WORD_MIN_HAND_RATIO`
-미만일 때 나간다. 양손을 요구하지 않는 것은 한 손 수어에서 다른 손이 화면
-밖인 것이 정상이기 때문이다. `message` 에 두 비율이 담기고, 서버 로그에도
-`face_ratio` / `hand_ratio` 로 남는다.
+`word_out_of_frame` 은 얼굴이 보인 프레임 비율이 `WORD_MIN_FACE_RATIO`(0.5)
+미만이거나, 두 손 중 하나라도 보인 프레임 비율이
+`WORD_MIN_HAND_RATIO`(0.2) 미만일 때 나간다. 양손을 요구하지 않는 것은 한 손
+수어에서 다른 손이 화면 밖인 것이 정상이기 때문이다. `message` 에 두 비율이
+담기고, 서버 로그에도 `face_ratio` / `hand_ratio` 로 남는다.
+
+**손 기준이 얼굴 기준보다 낮은 것은 손 검출이 더 자주 놓치기 때문이다.**
+실기에서는 사람이 앞에 있고 얼굴이 보인 정상 구간도 손 비율이 0.22~0.48 로
+떨어져 0.5 기준에서는 거절됐다. 사람이 없거나 손이 거의 없는 구간은
+0~0.12 였으므로 0.2 로도 두 경우는 갈린다. 반대 방향으로는 여유가 있다 —
+녹화 영상 350개의 최저 손 비율이 0.8 이라 정상 수어는 이 기준에 걸리지
+않는다.
 
 좌표가 없어도 추론은 돌아간다 — 미검출은 보간되거나 0 이 되고 모델은
 무언가를 답한다. 그래서 거절하지 않으면 **근거 없는 단어가 하나 나오고**
@@ -483,7 +490,7 @@ ack 를 보내지 않는 이유: 앱은 `result` 를 받는 순간 구간을 닫
 | `WORD_TARGET_FRAMES` | `60` | 모델 입력 길이. 학습이 60이다 |
 | `WORD_SOURCE_FPS` | `30.0` | 되돌릴 격자의 프레임레이트. 원본 영상과 같게 둔다 |
 | `WORD_MIN_FACE_RATIO` | `0.5` | 얼굴이 보인 프레임 비율이 이보다 낮으면 `word_out_of_frame` |
-| `WORD_MIN_HAND_RATIO` | `0.5` | 두 손 중 하나라도 보인 프레임 비율이 이보다 낮으면 `word_out_of_frame` |
+| `WORD_MIN_HAND_RATIO` | `0.2` | 두 손 중 하나라도 보인 프레임 비율이 이보다 낮으면 `word_out_of_frame`. 얼굴 기준보다 낮다 — 아래 `word_out_of_frame` 설명 참고 |
 | `RECOGNITION_CONFIDENCE_THRESHOLD` | `0.5` | 이 아래면 단어를 주장하지 않는다 |
 | `RECOGNITION_MARGIN_THRESHOLD` | `0.15` | 2위와의 격차가 이 아래면 주장하지 않는다 |
 | `RECOGNITION_MODEL_FILENAME` | `model_fold0.keras` | `server/models/` 안의 파일명 |
