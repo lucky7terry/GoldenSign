@@ -184,6 +184,19 @@ export interface AiServerError {
   retryable: boolean | null
 }
 
+/** `client_log` 의 level. 서버가 그대로 로그 레벨로 쓴다. */
+export type ClientLogLevel = "info" | "warn" | "error"
+
+/**
+ * `client_log` 의 `fields`. 평평한 한 겹이고 값은 스칼라만이다 — 서버가
+ * 문자열·숫자·불리언만 로그에 옮기고 나머지는 버린다.
+ *
+ * 키는 영문·숫자·밑줄만 쓰는 snake_case 로 적는다(`error_code`, `elapsed_ms`).
+ * 서버가 그 모양이 아닌 키를 버리는 것은 이 값들이 로그 한 줄에 그대로
+ * 들어가기 때문이다.
+ */
+export type ClientLogFields = Record<string, string | number | boolean>
+
 export type AiClientState =
   | "idle"
   | "creating_session"
@@ -215,6 +228,24 @@ const PING_INTERVAL_MS = 20_000
  * 거기는 UI 번들과 공유하는 값들의 자리다.
  */
 const RESULT_VERBOSE = false
+
+/**
+ * 아직 보내지 못한 `client_log` 를 모아 두는 한도. 넘으면 가장 오래된 것을
+ * 버린다.
+ *
+ * 스트리밍 중에는 폰이 안경 핫스팟으로 넘어가 서버 연결이 끊겼다 붙는다.
+ * 그 사이의 이벤트가 사라지면 이 통로를 만든 이유가 없어지므로 모아 두고,
+ * 끝없이 쌓이지도 않게 상한을 둔다. 버릴 때 오래된 쪽을 버리는 이유는
+ * 끊긴 직후보다 다시 붙기 직전의 사건이 보통 더 중요해서다.
+ */
+const CLIENT_LOG_QUEUE_MAX = 20
+
+/**
+ * `client_log` 를 흘리는 간격. 서버가 세션당 초당 5건까지 받고 넘긴 것은
+ * 조용히 버리므로(`CLIENT_LOG_MAX_PER_SECOND`), 그보다 느린 4건/초로 둔다.
+ * 모아 둔 20건을 한꺼번에 보내면 뒤쪽이 통째로 버려진다.
+ */
+const CLIENT_LOG_INTERVAL_MS = 250
 
 export class AiClient {
   /**
@@ -256,6 +287,25 @@ export class AiClient {
 
   /** client_message_id → 전송 시각. ack 왕복 시간 측정용. */
   private readonly pendingAcks = new Map<string, {label: string; sentAt: number}>()
+
+  /**
+   * 아직 서버로 나가지 못한 client_log. 오래된 것이 앞이다.
+   *
+   * `session_id` 를 담아 두지 않는 것은 의도다. 재연결은 새 세션을 발급받고
+   * 서버는 메시지의 session_id 가 경로와 다르면 거절하므로, 보내는 순간의
+   * 세션으로 조립해야 한다. 발생 시각(`at`)만 그때 찍어 둔다.
+   */
+  private readonly clientLogQueue: Array<{
+    event: string
+    level: ClientLogLevel
+    at: string
+    fields: ClientLogFields
+  }> = []
+  private clientLogTimer: ReturnType<typeof setTimeout> | undefined
+  /** 마지막으로 client_log 를 보낸 시각. 서버 초당 한도를 넘지 않게 쓴다. */
+  private clientLogSentAt = 0
+  /** client_message_id 가 같은 ms 안에서 겹치지 않게 하는 일련번호. */
+  private clientLogSeq = 0
 
   /**
    * @param userId  session.userId. POST /v1/sessions 의 `user_id` 로 나간다.
@@ -657,6 +707,9 @@ export class AiClient {
         }
         // 핸드셰이크가 끝난 여기서 시작한다.
         this.startPingLoop()
+        // 끊긴 동안 모아 둔 앱 이벤트를 흘린다. onReady 보다 먼저 두는 것은
+        // 의도다 — 콜백이 스트림을 다시 붙이며 새 이벤트를 쌓기 시작한다.
+        this.flushClientLogs()
         // 재연결 때도 다시 불리므로 호출부가 ai_ready 로 복귀할 수 있다.
         try {
           this.onReady?.()
@@ -1052,6 +1105,89 @@ export class AiClient {
     return sent
   }
 
+  // -------------------------------------------------------------------------
+  // 앱 이벤트 로그
+  // -------------------------------------------------------------------------
+
+  /**
+   * 앱만 아는 사건 하나를 서버 로그에 남긴다. 서버는 응답하지 않는다.
+   *
+   * 스트리밍 중에는 폰이 안경 핫스팟으로 넘어가 `bun dev` 콘솔 로그가 늦게
+   * 오거나 잘린다. 그 통로가 막혀도 남아야 하는 것만 이쪽으로 보낸다 —
+   * 서버가 이미 아는 값(단어 결과, 확신도, 얼굴·손 비율)은 보내지 않는다.
+   *
+   * 동기 함수이고 ack 를 기다리지 않는다. 지금 보낼 수 없으면 큐에 담아
+   * 두었다가 ready 이후에 오래된 것부터 흘린다. 어떤 경우에도 throw 하지
+   * 않는다 — 보고가 실패해서 앱 동작이 바뀌면 안 된다.
+   */
+  sendClientLog(event: string, level: ClientLogLevel, fields: ClientLogFields = {}): void {
+    this.clientLogQueue.push({event, level, at: new Date().toISOString(), fields})
+    while (this.clientLogQueue.length > CLIENT_LOG_QUEUE_MAX) {
+      const dropped = this.clientLogQueue.shift()
+      console.warn(`${this.tag} client_log 큐가 꽉 차 가장 오래된 것을 버린다:`, dropped?.event)
+    }
+    this.flushClientLogs()
+  }
+
+  /**
+   * 큐 맨 앞의 한 건을 보내고, 남아 있으면 간격을 두고 다시 자신을 부른다.
+   *
+   * 전송이 실패하면 큐에서 빼지 않는다. 소켓이 죽은 것이므로 다음 ready 가
+   * 같은 큐를 다시 흘린다 — 끊긴 동안의 사건이 보고되는 경로가 이것뿐이다.
+   */
+  private flushClientLogs(): void {
+    if (this.clientLogTimer !== undefined) return
+    if (this.clientLogQueue.length === 0) return
+    if (this.shuttingDown || !this.isReady()) return
+
+    // 같은 틱에 이벤트가 몰려도 서버 한도를 넘지 않게 간격을 지킨다.
+    const waitMs = CLIENT_LOG_INTERVAL_MS - (Date.now() - this.clientLogSentAt)
+    if (waitMs > 0) {
+      this.scheduleClientLogFlush(waitMs)
+      return
+    }
+
+    const entry = this.clientLogQueue[0]
+    const sessionId = this.sessionId
+    if (sessionId === undefined) return
+
+    this.clientLogSeq += 1
+    const sent = this.sendJson(
+      {
+        type: "client_log",
+        schema_version: HELLO_SCHEMA,
+        session_id: sessionId,
+        client_message_id: `client-log-${Date.now()}-${this.clientLogSeq}`,
+        event: entry.event,
+        level: entry.level,
+        at: entry.at,
+        fields: entry.fields,
+      },
+      "client_log",
+    )
+    if (!sent) return
+
+    this.clientLogQueue.shift()
+    this.clientLogSentAt = Date.now()
+    if (this.clientLogQueue.length > 0) {
+      this.scheduleClientLogFlush(CLIENT_LOG_INTERVAL_MS)
+    }
+  }
+
+  private scheduleClientLogFlush(delayMs: number): void {
+    this.clientLogTimer = setTimeout(() => {
+      this.clientLogTimer = undefined
+      this.flushClientLogs()
+    }, delayMs)
+  }
+
+  private clearClientLogTimer(): void {
+    if (this.clientLogTimer !== undefined) {
+      clearTimeout(this.clientLogTimer)
+      this.clientLogTimer = undefined
+    }
+  }
+
   /**
    * 종료 절차 중 동기 부분만 담당한다. `session.on("beforeDisconnect")` 에서는
    * 동기 코드만 완료가 보장되므로(호스트가 기다려 주지 않고 소켓을 닫는다)
@@ -1081,6 +1217,7 @@ export class AiClient {
     this.shuttingDown = true
     this.clearHandshakeTimer()
     this.clearPingTimer()
+    this.clearClientLogTimer()
     if (this.reconnectTimer !== undefined) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = undefined
