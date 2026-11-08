@@ -9,7 +9,9 @@ import json
 import logging
 import re
 
-_RESERVED_RECORD_KEYS = set(
+# client_log 도 쓴다. 앱이 보낸 필드가 이 이름을 쓰면 logging 이 KeyError 를
+# 던지므로 그쪽에서 미리 걸러야 한다.
+RESERVED_RECORD_KEYS = set(
     logging.LogRecord("", 0, "", 0, "", (), None).__dict__
 ) | {"asctime", "message", "taskName"}
 
@@ -36,7 +38,7 @@ class ExtraFieldFormatter(logging.Formatter):
         extra_fields = {
             key: value
             for key, value in record.__dict__.items()
-            if key not in _RESERVED_RECORD_KEYS
+            if key not in RESERVED_RECORD_KEYS
         }
         if not extra_fields:
             return formatted
