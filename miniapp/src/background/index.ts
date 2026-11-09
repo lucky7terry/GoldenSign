@@ -67,6 +67,7 @@ import {
 } from "./ai-client"
 import {
   speakSafe,
+  handleSpeakerState,
   START_ANNOUNCEMENT,
   RETRY_ANNOUNCEMENT,
   FRAMING_ANNOUNCEMENT,
@@ -580,6 +581,9 @@ registerMiniapp((session) => {
 
   /** speakSafe 가 받는 보고 함수. tts.ts 는 AI 소켓을 모른다. */
   const reportTts: TtsReporter = (level, fields) => report("tts", level, fields)
+
+  /** handleSpeakerState 가 받는 보고 함수. 재생 시작·끝 측정값을 서버 로그로 보낸다. */
+  const reportTtsLatency: TtsReporter = (level, fields) => report("latency_tts", level, fields)
 
   // --- UI 브리지 -------------------------------------------------------------
 
@@ -1196,6 +1200,21 @@ registerMiniapp((session) => {
         error_message: String(err.message),
         permission: String(err.permission),
       })
+    }),
+  )
+
+  // --- 음성 재생 상태 (측정 로그 전용) ---------------------------------------
+
+  // 세션당 한 번만 건다. 발화 한 건마다 걸면 구독이 쌓이고, 끊긴 재생의 구독을
+  // 해제할 자리도 없다. 첫 speakSafe 가 "ready" 안에서 불리므로 그 전에 건다.
+  unsubscribers.push(
+    session.speaker.onStateChange((event) => {
+      try {
+        handleSpeakerState(event, reportTtsLatency)
+      } catch (err) {
+        // 측정 로그가 세션을 깨뜨리는 일은 없어야 한다.
+        console.error("[TTS] handleSpeakerState 예외:", err)
+      }
     }),
   )
 

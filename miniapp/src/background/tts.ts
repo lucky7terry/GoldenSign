@@ -1,7 +1,7 @@
 // 음성 출력 헬퍼. 서버가 합성한 한국어 음성을 먼저 재생하고 실패하면 폰 TTS 로 폴백한다.
 // 문구에 기호를 쓰지 않는다 — 폴백의 폰 TTS 가 %, /, + 를 영어 단어로 읽는다.
 
-import type {SpeakerModule} from "@mentra/miniapp/background"
+import type {SpeakerModule, SpeakerStateEvent} from "@mentra/miniapp/background"
 import {AI_HTTP} from "../shared/config"
 
 // 기동 시 한 번 출력. 인식 결과는 서버 text 를 그대로 읽으므로 상수가 없다.
@@ -59,6 +59,77 @@ function ttsAudioUrl(text: string): string {
   return `${AI_HTTP}${TTS_PATH}?text=${encodeURIComponent(text)}`
 }
 
+// ---------------------------------------------------------------------------
+// 재생 시작·끝 측정
+// ---------------------------------------------------------------------------
+
+/** 음성이 서버 합성에서 났는지 폰 TTS 폴백에서 났는지. 로그에만 쓴다. */
+type SpeechSource = "server" | "fallback"
+
+/**
+ * 마지막 음성 요청. 재생 시작·끝까지 걸린 시간을 재는 기준점이다.
+ *
+ * 하나로 충분하다 — `stopOtherAudio` 때문에 새 요청이 이전 재생을 끊으므로
+ * 동시에 두 개가 나지 않고, 끊긴 이전 요청은 덮어쓰면서 자연히 버려진다.
+ * background 런타임에는 performance 가 없어 시각은 Date.now() 를 쓴다.
+ */
+let pendingSpeech:
+  | {requestedAt: number; tag: string; source: SpeechSource; startMs?: number; errorCode?: string}
+  | undefined
+
+function beginSpeech(tag: string, source: SpeechSource): void {
+  pendingSpeech = {requestedAt: Date.now(), tag, source}
+}
+
+/**
+ * `speaker.onStateChange` 에 걸어 재생 시작·끝을 로그로 남긴다. 측정 전용이며
+ * 화면도 동작도 바꾸지 않는다.
+ *
+ * `play()` 의 promise 는 재생이 *끝날* 때 풀리므로(modules/speaker.d.ts) 소리가
+ * 나기 시작한 시각은 이 이벤트로만 알 수 있다. `loading` 과 `idle` 은 남길 것이
+ * 없어 무시한다. `error` 는 과도 상태라 곧 `stopped` 가 따라오고, 요청 상태는
+ * 거기서 비운다.
+ */
+export function handleSpeakerState(event: SpeakerStateEvent, report?: TtsReporter): void {
+  const pending = pendingSpeech
+  // 우리가 요청하지 않은 재생이거나, 이미 끝낸 요청의 뒤늦은 이벤트다.
+  if (pending === undefined) return
+
+  const elapsedMs = Date.now() - pending.requestedAt
+  const head = `[Latency] tts tag=${pending.tag} source=${pending.source}`
+
+  if (event.state === "playing") {
+    // 재생 중 상태 변화가 여러 번 와도 시작은 한 번만 남긴다.
+    if (pending.startMs !== undefined) return
+    pending.startMs = elapsedMs
+    console.log(`${head} start_ms=${elapsedMs}`)
+    return
+  }
+  if (event.state === "stopped") {
+    console.log(`${head} end_ms=${elapsedMs} duration_ms=${String(event.durationMs)}`)
+    // 재생 한 건의 측정을 stopped 에서 한 번에 보낸다. 못 잰 숫자 자리에는 사유 문자열이 들어간다.
+    const fields: Record<string, string | number | boolean> = {
+      tag: pending.tag,
+      source: pending.source,
+      start_ms: pending.startMs ?? "not_started",
+      end_ms: elapsedMs,
+      duration_ms: typeof event.durationMs === "number" ? event.durationMs : "unknown",
+    }
+    if (pending.errorCode !== undefined) fields.error_code = pending.errorCode
+    report?.("info", fields)
+    pendingSpeech = undefined
+    return
+  }
+  if (event.state === "error") {
+    console.log(
+      `${head} error_ms=${elapsedMs} error_code=${String(event.errorCode)}` +
+        ` error_message=${String(event.errorMessage)}`,
+    )
+    // error 는 과도 상태라 보고는 뒤따르는 stopped 에서 하고 코드만 담아 둔다.
+    pending.errorCode = String(event.errorCode)
+  }
+}
+
 /**
  * 서버 재생이 실패한 자리. 폰 TTS 는 클라우드가 안 되면 오프라인 음성으로라도 읽으므로,
  * 서버가 죽었거나 키가 없어도 착용자는 무언가를 듣는다.
@@ -79,6 +150,9 @@ function speakOnPhone(
 
   // voice_id 금지 — "ko" 를 넣으면 클라우드가 실패하고 오프라인으로 조용히 넘어간다.
   try {
+    // 폴백은 새 요청이다. 측정 기준을 서버 재생 시도 시각에 두면 실패에 쓴
+    // 시간이 재생 시작까지의 시간에 섞인다.
+    beginSpeech(tag, "fallback")
     void speaker
       .speak(text, {voice_settings: VOICE_SETTINGS, stopOtherAudio: true})
       .then((result) => {
@@ -133,6 +207,7 @@ export function speakSafe(
   }
 
   try {
+    beginSpeech(tag, "server")
     void speaker
       .play({audioUrl: ttsAudioUrl(text), stopOtherAudio: true})
       .then(() => {
