@@ -582,6 +582,9 @@ registerMiniapp((session) => {
   /** speakSafe 가 받는 보고 함수. tts.ts 는 AI 소켓을 모른다. */
   const reportTts: TtsReporter = (level, fields) => report("tts", level, fields)
 
+  /** handleSpeakerState 가 받는 보고 함수. 재생 시작·끝 측정값을 서버 로그로 보낸다. */
+  const reportTtsLatency: TtsReporter = (level, fields) => report("latency_tts", level, fields)
+
   // --- UI 브리지 -------------------------------------------------------------
 
   // session.d.ts:161 이 `readonly ui: UIModule` 로 제네릭 인자 없이 선언돼 있어
@@ -1207,7 +1210,7 @@ registerMiniapp((session) => {
   unsubscribers.push(
     session.speaker.onStateChange((event) => {
       try {
-        handleSpeakerState(event)
+        handleSpeakerState(event, reportTtsLatency)
       } catch (err) {
         // 측정 로그가 세션을 깨뜨리는 일은 없어야 한다.
         console.error("[TTS] handleSpeakerState 예외:", err)

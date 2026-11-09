@@ -954,20 +954,39 @@ export class AiClient {
     // 이 구간의 측정은 여기서 끝난다. 다음 구간이 남은 값을 주워 쓰면 안 된다.
     this.wordEndSentAt = undefined
 
+    // 모델이 없으면 recognition 블록이 통째로 빠지므로 text 유무로 대신한다.
+    const accepted =
+      typeof decision?.accepted === "boolean" ? decision.accepted : text !== null && text !== ""
     const closeReason = word.close_reason
+    // 서버 로그 공통 필드. 못 잰 숫자 자리에는 숫자 대신 사유 문자열이 들어간다.
+    const base: ClientLogFields = {
+      text: String(text),
+      accepted,
+      close_reason: String(closeReason),
+    }
+
     if (closeReason === "timeout") {
       console.log("[Latency] word close=timeout rtt=n/a")
+      this.sendClientLog("latency_word", "info", {
+        ...base,
+        rtt_ms: "timeout",
+        server_total_ms: "timeout",
+        comm_ms: "timeout",
+      })
       return
     }
     if (closeReason !== "client" || sentAt === undefined) {
       // 기준 시각이 없으면 숫자를 지어낼 수 없다. 측정이 빠진 사실만 남긴다.
       console.log(`[Latency] word close=${String(closeReason)} rtt=n/a reason=no_word_end_time`)
+      this.sendClientLog("latency_word", "info", {
+        ...base,
+        rtt_ms: "no_word_end_time",
+        server_total_ms: "no_word_end_time",
+        comm_ms: "no_word_end_time",
+      })
       return
     }
 
-    // 모델이 없으면 recognition 블록이 통째로 빠지므로 text 유무로 대신한다.
-    const accepted =
-      typeof decision?.accepted === "boolean" ? decision.accepted : text !== null && text !== ""
     const rttMs = receivedAt - sentAt
     const head = `[Latency] word text=${String(text)} accepted=${String(accepted)} rtt_ms=${rttMs}`
 
@@ -976,6 +995,12 @@ export class AiClient {
     if (typeof totalMs !== "number") {
       // 서버가 timings 를 아직 안 싣는다. 왕복은 서버 처리 시간을 모르면 못 구한다.
       console.log(`${head} server_total_ms=n/a comm_ms=n/a`)
+      this.sendClientLog("latency_word", "info", {
+        ...base,
+        rtt_ms: rttMs,
+        server_total_ms: "no_timings",
+        comm_ms: "no_timings",
+      })
       return
     }
 
@@ -986,6 +1011,12 @@ export class AiClient {
         ` drain_ms=${String(timings?.drain_ms)} wait_ms=${String(timings?.wait_ms)}` +
         ` features_ms=${String(timings?.features_ms)} inference_ms=${String(timings?.inference_ms)}`,
     )
+    this.sendClientLog("latency_word", "info", {
+      ...base,
+      rtt_ms: rttMs,
+      server_total_ms: totalMs,
+      comm_ms: commMs,
+    })
   }
 
   // -------------------------------------------------------------------------

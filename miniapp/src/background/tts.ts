@@ -74,11 +74,11 @@ type SpeechSource = "server" | "fallback"
  * background 런타임에는 performance 가 없어 시각은 Date.now() 를 쓴다.
  */
 let pendingSpeech:
-  | {requestedAt: number; tag: string; source: SpeechSource; started: boolean}
+  | {requestedAt: number; tag: string; source: SpeechSource; startMs?: number; errorCode?: string}
   | undefined
 
 function beginSpeech(tag: string, source: SpeechSource): void {
-  pendingSpeech = {requestedAt: Date.now(), tag, source, started: false}
+  pendingSpeech = {requestedAt: Date.now(), tag, source}
 }
 
 /**
@@ -90,7 +90,7 @@ function beginSpeech(tag: string, source: SpeechSource): void {
  * 없어 무시한다. `error` 는 과도 상태라 곧 `stopped` 가 따라오고, 요청 상태는
  * 거기서 비운다.
  */
-export function handleSpeakerState(event: SpeakerStateEvent): void {
+export function handleSpeakerState(event: SpeakerStateEvent, report?: TtsReporter): void {
   const pending = pendingSpeech
   // 우리가 요청하지 않은 재생이거나, 이미 끝낸 요청의 뒤늦은 이벤트다.
   if (pending === undefined) return
@@ -100,13 +100,23 @@ export function handleSpeakerState(event: SpeakerStateEvent): void {
 
   if (event.state === "playing") {
     // 재생 중 상태 변화가 여러 번 와도 시작은 한 번만 남긴다.
-    if (pending.started) return
-    pending.started = true
+    if (pending.startMs !== undefined) return
+    pending.startMs = elapsedMs
     console.log(`${head} start_ms=${elapsedMs}`)
     return
   }
   if (event.state === "stopped") {
     console.log(`${head} end_ms=${elapsedMs} duration_ms=${String(event.durationMs)}`)
+    // 재생 한 건의 측정을 stopped 에서 한 번에 보낸다. 못 잰 숫자 자리에는 사유 문자열이 들어간다.
+    const fields: Record<string, string | number | boolean> = {
+      tag: pending.tag,
+      source: pending.source,
+      start_ms: pending.startMs ?? "not_started",
+      end_ms: elapsedMs,
+      duration_ms: typeof event.durationMs === "number" ? event.durationMs : "unknown",
+    }
+    if (pending.errorCode !== undefined) fields.error_code = pending.errorCode
+    report?.("info", fields)
     pendingSpeech = undefined
     return
   }
@@ -115,6 +125,8 @@ export function handleSpeakerState(event: SpeakerStateEvent): void {
       `${head} error_ms=${elapsedMs} error_code=${String(event.errorCode)}` +
         ` error_message=${String(event.errorMessage)}`,
     )
+    // error 는 과도 상태라 보고는 뒤따르는 stopped 에서 하고 코드만 담아 둔다.
+    pending.errorCode = String(event.errorCode)
   }
 }
 
