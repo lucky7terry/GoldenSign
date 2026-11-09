@@ -134,8 +134,10 @@ RECOGNITION_MARGIN_THRESHOLD = _env_probability(
 # 추론은 그대로 돌아간다. 그래서 화면 밖이라는 사실이 거절로 이어지지 않고,
 # 아무 근거 없는 단어가 하나 나온다. 착용자는 왜 틀렸는지 알 수 없다.
 # 판정하기 전에 "보이지 않았다"를 따로 알리는 쪽이 낫다.
+#
+# 실기에서 얼굴이 보인 정상 구간도 손 비율이 0.22~0.48 이라 손 기준을 낮게 둔다.
 WORD_MIN_FACE_RATIO = _env_probability("WORD_MIN_FACE_RATIO", 0.5)
-WORD_MIN_HAND_RATIO = _env_probability("WORD_MIN_HAND_RATIO", 0.5)
+WORD_MIN_HAND_RATIO = _env_probability("WORD_MIN_HAND_RATIO", 0.2)
 
 # 단어 구간을 닫기 전에 큐에 남은 프레임을 기다리는 최대 시간. 0 이면
 # 기다리지 않는다 - allow_disable 이 없으면 _env_float 가 0 을 거절해서
@@ -169,6 +171,18 @@ WORD_RESULT_DEADLINE_SECONDS = (
 # 확인해야 할 때만 켠다.
 INCLUDE_KEYPOINTS_IN_RESULT = _env_bool("INCLUDE_KEYPOINTS_IN_RESULT", False)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# 앱이 client_log 로 보내는 이벤트를 서버 로그에 남길 때의 한도.
+#
+# 스트리밍 중에는 폰이 안경 핫스팟으로 넘어가 앱 콘솔 로그가 늦게 오거나
+# 잘린다. 그 통로가 막혀도 앱만 아는 사건은 남아야 해서 받는다.
+#
+# 값은 앱이 보낸 것이므로 그대로 믿지 않는다. 키 수와 문자열 길이를 자르고,
+# 초당 건수를 넘기면 버린다 - 이 경로가 서버 로그를 채우면 정작 찾아야 하는
+# 줄이 그 사이에 묻힌다.
+CLIENT_LOG_MAX_FIELDS = _env_int("CLIENT_LOG_MAX_FIELDS", 20)
+CLIENT_LOG_MAX_VALUE_CHARS = _env_int("CLIENT_LOG_MAX_VALUE_CHARS", 200)
+CLIENT_LOG_MAX_PER_SECOND = _env_int("CLIENT_LOG_MAX_PER_SECOND", 5)
 
 # 키포인트 추출 지연 요약 로그 주기. 0 이하면 요약 로그를 끈다.
 KEYPOINT_TIMING_INTERVAL_SECONDS = _env_float(

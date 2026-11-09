@@ -62,12 +62,15 @@ import {
   type AiRecognitionResult,
   type AiServerError,
   type AiWordProgress,
+  type ClientLogFields,
+  type ClientLogLevel,
 } from "./ai-client"
 import {
   speakSafe,
   START_ANNOUNCEMENT,
   RETRY_ANNOUNCEMENT,
   FRAMING_ANNOUNCEMENT,
+  type TtsReporter,
 } from "./tts"
 
 /**
@@ -165,6 +168,25 @@ function logRequestError(label: string, err: unknown): void {
   } else {
     console.error(`${label} err JSON:`, JSON.stringify(err))
   }
+}
+
+/**
+ * 서버 로그에 실을 짧은 오류 식별자. `session.*` 는 Error 가 아니라
+ * `{code, message}` 객체로 reject 하므로 code 를 먼저 본다.
+ */
+function errorCodeOf(err: unknown): string {
+  const code = asRecord(err)?.code
+  if (typeof code === "string" && code !== "") return code
+  if (err instanceof Error && err.name !== "") return err.name
+  return "unknown"
+}
+
+/** 서버 로그에 실을 오류 문구. 객체로 온 실패도 읽히게 직렬화한다. */
+function errorMessageOf(err: unknown): string {
+  const message = asRecord(err)?.message
+  if (typeof message === "string") return message
+  const serialized = JSON.stringify(err)
+  return typeof serialized === "string" ? serialized : String(err)
 }
 
 /**
@@ -542,6 +564,23 @@ registerMiniapp((session) => {
   // 때문이다. 런타임 확인에 실패하면 undefined 로 남는다.
   let ai: AiClient | undefined
 
+  // --- 서버 보고 -------------------------------------------------------------
+
+  /**
+   * 앱만 아는 사건을 서버 로그에 남긴다. console.log 를 대체하지 않고 더한다 —
+   * 스트리밍 중에는 폰이 안경 핫스팟으로 넘어가 콘솔 로그가 늦게 오거나 잘린다.
+   *
+   * 끊겨 있으면 AiClient 가 모아 두었다가 ready 이후에 흘린다. `ai` 가 아직
+   * 없는 동안(= "ready" 이전)의 사건은 버린다 — 담아 둘 곳이 없고, 그 구간은
+   * 폰이 아직 핫스팟으로 넘어가지 않아 콘솔 로그가 멀쩡히 도착한다.
+   */
+  function report(event: string, level: ClientLogLevel, fields: ClientLogFields = {}): void {
+    ai?.sendClientLog(event, level, fields)
+  }
+
+  /** speakSafe 가 받는 보고 함수. tts.ts 는 AI 소켓을 모른다. */
+  const reportTts: TtsReporter = (level, fields) => report("tts", level, fields)
+
   // --- UI 브리지 -------------------------------------------------------------
 
   // session.d.ts:161 이 `readonly ui: UIModule` 로 제네릭 인자 없이 선언돼 있어
@@ -894,8 +933,9 @@ registerMiniapp((session) => {
       const hasText = next.text !== null && next.text !== ""
       flashLed(hasText ? RESULT_HIGH_LED : RESULT_LOW_LED, FLASH_MS)
       // 텍스트가 있으면 그 텍스트를 읽고 없으면 재시도 안내를 읽는다.
-      if (next.text !== null && next.text !== "") speakSafe(session.speaker, next.text, "result")
-      else speakSafe(session.speaker, RETRY_ANNOUNCEMENT, "retry")
+      if (next.text !== null && next.text !== "")
+        speakSafe(session.speaker, next.text, "result", reportTts)
+      else speakSafe(session.speaker, RETRY_ANNOUNCEMENT, "retry", reportTts)
     }
     // 채널에 선언된 필드만 골라 담는다. next 를 통째로 넘기면 UI 가 쓰지 않기로
     // 한 recognition(임계값 조정용)까지 스냅샷에 실려 간다. text 는 null 그대로
@@ -946,6 +986,9 @@ registerMiniapp((session) => {
       // word_end 를 보낸다. true 를 받았을 때만 연다.
       if (!client.sendWordStart()) {
         console.warn("[Word] word_start 전송 실패 — 구간을 열지 않는다")
+        // 서버에는 아무것도 도착하지 않았으므로 "구간이 없다"로만 보인다.
+        // 사용자가 버튼을 눌렀다는 사실은 앱만 안다.
+        report("app_error", "warn", {where: "word_start_send"})
         return
       }
       wordSegment = {phase: "open", startedAt: Date.now(), timer: undefined}
@@ -963,6 +1006,7 @@ registerMiniapp((session) => {
     // 타이머가 열린 상태를 걷어낸다.
     if (!client.sendWordEnd()) {
       console.warn("[Word] word_end 전송 실패 — 안전망 타이머에 맡긴다")
+      report("app_error", "warn", {where: "word_end_send"})
       return
     }
     wordSegment.phase = "closing"
@@ -1003,6 +1047,9 @@ registerMiniapp((session) => {
       // 남은 것이라 걷어낸다. word_end 는 다시 보내지 않는다 — 서버에 열린
       // 구간이 없다.
       console.warn("[Word] result 가 안 왔다 — 상태 강제 정리")
+      // 서버는 result 를 보냈다고 믿고 있다. 그것이 앱에 닿지 않았다는 사실은
+      // 이 타이머만 안다.
+      report("app_error", "warn", {where: "word_timer", max_seconds: maxSeconds})
       clearWordSegment()
     }, maxSeconds * 1000 + WORD_TIMER_GRACE_MS)
   }
@@ -1084,7 +1131,8 @@ registerMiniapp((session) => {
     if (rejected) flashLed(REJECT_LED, FLASH_MS)
     // 불을 못 보는 착용자를 위해 같은 거절을 소리로도 알린다. tag 를 code 로 두면
     // 어느 거절이 소리를 냈는지 [TTS] 로그에서 바로 읽힌다.
-    if (announcement !== undefined) speakSafe(session.speaker, announcement, err.code)
+    if (announcement !== undefined)
+      speakSafe(session.speaker, announcement, err.code, reportTts)
 
     patch("error", {code: err.code, message: err.message, retryable: err.retryable})
   }
@@ -1140,6 +1188,14 @@ registerMiniapp((session) => {
       console.log("[PERM] error permission=", String(err.permission))
       console.log("[PERM] error subscription=", String(err.subscription))
       console.log("[PERM] error operation=", String(err.operation))
+      // 카메라나 마이크가 걸리면 스트림이 서지 않는다. 서버에는 세션만 열린
+      // 채로 프레임이 오지 않는 모습으로 보인다.
+      report("app_error", "warn", {
+        where: "permission",
+        error_code: String(err.code),
+        error_message: String(err.message),
+        permission: String(err.permission),
+      })
     }),
   )
 
@@ -1198,7 +1254,7 @@ registerMiniapp((session) => {
             // 읽을 수 있게 된 첫 순간에 안내한다.
             if (!startAnnounced) {
               startAnnounced = true
-              speakSafe(session.speaker, START_ANNOUNCEMENT, "start")
+              speakSafe(session.speaker, START_ANNOUNCEMENT, "start", reportTts)
             }
           } else {
             // 스트리밍 중 재연결로 온 ready의 경우는 읽지 않는다.
@@ -1485,12 +1541,17 @@ registerMiniapp((session) => {
 
   /**
    * STREAM_ATTEMPTS 를 하나가 성공할 때까지 훑는다. 이긴 결과와 그 단이 실제로
-   * 요청한 fps 를 돌려주고, 전부 실패하면 undefined 를 돌려준다.
+   * 요청한 fps 를 돌려주고, 전부 실패하면 마지막 실패의 code/message 를
+   * 돌려준다 — 서버 보고가 "무엇 때문에 못 섰는지"를 실어야 하기 때문이다.
    *
    * STREAM_ATTEMPTS 가 한 항목뿐이어도 루프를 남겨 둔다. 단을 되살릴 때 무엇이
    * 필요한지는 그 상수의 주석 참고.
    */
-  async function runStreamLadder(): Promise<{result: StreamResult; requestedFps: number} | undefined> {
+  async function runStreamLadder(): Promise<
+    | {ok: true; result: StreamResult; requestedFps: number}
+    | {ok: false; errorCode: string; errorMessage: string}
+  > {
+    let lastError: unknown
     for (let i = 0; i < STREAM_ATTEMPTS.length; i += 1) {
       const attempt = STREAM_ATTEMPTS[i]
       console.log(`[Stream] 시도 ${attempt.name} 시작`, JSON.stringify(attempt.options), `(${attempt.note})`)
@@ -1500,7 +1561,7 @@ registerMiniapp((session) => {
         const result = await session.stream.startStream(attempt.options)
         console.log(`[Stream] 시도 ${attempt.name} 성공 (${Date.now() - startedAt}ms)`)
         logStreamResult(result)
-        return {result, requestedFps: attempt.options.video?.fps ?? REQUESTED_FPS}
+        return {ok: true, result, requestedFps: attempt.options.video?.fps ?? REQUESTED_FPS}
       } catch (err) {
         console.error(`[Stream] 시도 ${attempt.name} 실패 (${Date.now() - startedAt}ms)`)
         // logRequestError 가 err.code 와 err.message 를 각각 다른 줄에 찍는다.
@@ -1508,12 +1569,32 @@ registerMiniapp((session) => {
         // INTERNAL 로 오고 상세는 `message` 에 담기므로, code 로 매칭하지 말고
         // 그 줄을 읽어야 한다.
         logRequestError(`[Stream] 시도 ${attempt.name}`, err)
+        lastError = err
       }
     }
-    return undefined
+    return {
+      ok: false,
+      errorCode: errorCodeOf(lastError),
+      errorMessage: errorMessageOf(lastError),
+    }
   }
 
   // --- 시작 시퀀스 -------------------------------------------------------------
+
+  /**
+   * 스트림이 서지 못한 자리를 서버 로그에 남긴다. `step` 이 어디서 멈췄는지다.
+   *
+   * 서버 쪽에서는 어느 실패든 "stream_start 가 오지 않았다" 하나로 보인다.
+   * 카메라가 잡혀 있는 것과 WiFi 가 없는 것은 고칠 사람이 다르다.
+   */
+  function reportStreamStartFailure(step: string, code: string, message: string): void {
+    report("stream_start", "error", {
+      result: "fail",
+      step,
+      error_code: code,
+      error_message: message,
+    })
+  }
 
   async function runStartSequence(): Promise<void> {
     if (startInFlight) {
@@ -1521,10 +1602,12 @@ registerMiniapp((session) => {
       return
     }
     if (!hasCameraOrLog()) {
+      reportStreamStartFailure("camera", "camera_unavailable", "hasCamera !== true")
       setState("error")
       return
     }
     startInFlight = true
+    const sequenceStartedAt = Date.now()
     try {
       // 0. AI 세션. 한 번 보고 포기하지 않고 잠깐 기다린다 — 소켓이 죽어도
       // AiClient 가 1s→2s→4s… 로 알아서 재연결하고, 그 사이 누른 롱프레스는
@@ -1536,6 +1619,13 @@ registerMiniapp((session) => {
       // 대기 중 두 번째 롱프레스가 병렬 진입하는 일은 없다.
       if (!(await waitForAi())) {
         console.error("[Stream] AI 세션이 준비되지 않았다 — 스트림 시작 불가. 다시 누르면 재시도 가능")
+        // 소켓이 끊긴 자리라 지금은 못 나간다. AiClient 가 모아 두고 다음
+        // ready 에서 흘린다 — 재연결 직후에 이 줄이 보이는 것이 정상이다.
+        reportStreamStartFailure(
+          "wait_ai",
+          "ai_not_ready",
+          `aiState=${String(ai?.getState())}`,
+        )
         return
       }
 
@@ -1549,15 +1639,21 @@ registerMiniapp((session) => {
           .then(() => console.log("[Stream] requestWifiSetup 호출됨"))
           .catch((err) => logRequestError("[Stream] requestWifiSetup", err))
         console.warn("[Stream] WiFi 설정 유도 후 대기 — 연결 뒤 롱프레스로 재시도 가능")
+        reportStreamStartFailure(
+          "wifi",
+          "wifi_not_connected",
+          `connected=${String(latestWifi?.connected)}`,
+        )
         return
       }
 
       // 2. Mentra 스트림 시작. 실측 약 6~7초.
       setState("starting_stream")
       const attempt = await runStreamLadder()
-      if (attempt === undefined) {
+      if (!attempt.ok) {
         setState("error")
         console.error("[Stream] 스트림 시작 실패 (rung A) — error 상태")
+        reportStreamStartFailure("start_stream", attempt.errorCode, attempt.errorMessage)
         return
       }
       const {result, requestedFps} = attempt
@@ -1599,12 +1695,24 @@ registerMiniapp((session) => {
       // 당길 수 없다.
       if (typeof webrtcUrl !== "string" || webrtcUrl.length === 0) {
         console.error("[Stream] webrtcUrl 이 없다 — 롤백한다. result.mode=", result?.mode)
+        reportStreamStartFailure(
+          "webrtc_url",
+          "webrtc_url_missing",
+          `mode=${String(result?.mode)}`,
+        )
         await rollback("webrtcUrl 없음")
         return
       }
       const parts = parseUrlParts(webrtcUrl)
       if (parts === undefined) {
         console.error("[Stream] webrtcUrl 정규식 파싱 실패 — 롤백한다. 원본:", webrtcUrl)
+        // URL 원문은 보내지 않는다. 쿼리에 스트림 토큰이 붙어 있고 서버 로그는
+        // 오래 남는다. 길이만으로도 "빈 값인가 모양이 다른가"는 가려진다.
+        reportStreamStartFailure(
+          "webrtc_url",
+          "webrtc_url_unparsable",
+          `length=${webrtcUrl.length}`,
+        )
         await rollback("webrtcUrl 파싱 실패")
         return
       }
@@ -1613,6 +1721,11 @@ registerMiniapp((session) => {
       )
       if (typeof streamId !== "string" || streamId.length === 0) {
         console.error("[Stream] streamId 가 없다 — stream_start 를 보낼 수 없다. 롤백한다")
+        reportStreamStartFailure(
+          "stream_id",
+          "stream_id_missing",
+          `typeof=${typeof streamId}`,
+        )
         await rollback("streamId 없음")
         return
       }
@@ -1628,6 +1741,11 @@ registerMiniapp((session) => {
       // 온다 해도 `!undefined` 가 롤백으로 보내므로 그것이 옳은 답이다.
       if (!ai?.sendStreamStart(streamId, webrtcUrl)) {
         console.error("[Stream] stream_start 전송 실패 — 롤백한다")
+        reportStreamStartFailure(
+          "stream_start_send",
+          "send_failed",
+          `aiState=${String(ai?.getState())}`,
+        )
         await rollback("stream_start 전송 실패")
         return
       }
@@ -1635,6 +1753,25 @@ registerMiniapp((session) => {
       // 5. 완료.
       setState("streaming")
       console.log("[Stream] streaming. streamId=", streamId)
+
+      // 협상 결과는 앱만 안다. 서버는 webrtcUrl 하나만 받으므로, 프레임이 적게
+      // 들어올 때 그것이 인코더 설정 탓인지 여기서만 가려진다. resolvedConfig
+      // 는 Optional 이라 실제로 받은 값만 싣는다.
+      const resolved = result?.resolvedConfig
+      const startedFields: ClientLogFields = {
+        result: "ok",
+        elapsed_ms: Date.now() - sequenceStartedAt,
+      }
+      if (typeof resolved?.transport === "string") startedFields.transport = resolved.transport
+      if (typeof resolved?.video?.fps === "number") startedFields.fps = resolved.video.fps
+      if (typeof resolved?.video?.width === "number") startedFields.width = resolved.video.width
+      if (typeof resolved?.video?.height === "number") startedFields.height = resolved.video.height
+      report("stream_start", "info", startedFields)
+    } catch (err) {
+      // 호출부의 catch 는 setState("error") 만 하고 끝난다. 예외로 끝난 시작을
+      // 서버에서 "stream_start 가 안 왔다"로만 보이게 두지 않는다.
+      reportStreamStartFailure("exception", errorCodeOf(err), errorMessageOf(err))
+      throw err
     } finally {
       startInFlight = false
     }
@@ -1655,9 +1792,16 @@ registerMiniapp((session) => {
     console.warn("[Stream] 롤백:", why)
     try {
       await cleanupStream(`rollback: ${why}`, {notifyAi: false})
-    } catch {
+    } catch (err) {
       // cleanupStream 이 두 번의 stop 시도를 이미 로그로 남겼다.
       console.error("[Stream] 롤백 중 stop 실패 — 카메라가 잡혀있을 수 있다")
+      // 카메라를 쥔 스트림이 남으면 이후의 모든 start 가 busy 로 실패한다.
+      // 서버에서는 그 뒤의 실패들이 원인 없이 반복되는 모습으로만 보인다.
+      report("app_error", "error", {
+        where: "rollback_cleanup",
+        error_code: errorCodeOf(err),
+        error_message: errorMessageOf(err),
+      })
     }
     setState(ai?.isReady() === true ? "ai_ready" : "error")
   }
@@ -1670,10 +1814,18 @@ registerMiniapp((session) => {
       // stream_stop 이 아직 열려 있는 WebSocket 으로 먼저 나간다. 이전 빌드는
       // 이보다 먼저 소켓을 닫아 stream_stop 이 끝내 나가지 못했다.
       await cleanupStream(reason, {notifyAi: true})
+      // stream_stop 메시지는 서버가 이미 받았지만, 안경 쪽 스트림이 실제로
+      // 멈췄는지는 앱만 안다.
+      report("stream_stop", "info", {result: "ok", reason})
       setState(ai?.isReady() === true ? "ai_ready" : "error")
-    } catch {
+    } catch (err) {
       setState("error")
       console.error("[Stream] 정지 실패 — error 상태. 롱프레스로 재시도 가능")
+      report("stream_stop", "error", {
+        result: "fail",
+        reason,
+        error_code: errorCodeOf(err),
+      })
     }
   }
 

@@ -208,7 +208,7 @@ Actual aiortc/WHEP frame pulling is implemented in a follow-up issue.
 
 | 버전 | 담당 | 상태 |
 |---|---|---|
-| `dev-0.2` | `hello` / `frame` / `ping` / `stop` | 유지 |
+| `dev-0.2` | `hello` / `frame` / `ping` / `stop` / `client_log` | 유지 |
 | `dev-0.3` | `stream_start` / `stream_stop` / WHEP result | 유지 |
 | `dev-0.4` | `word_start` / `word_end` / `word_progress` | 이번에 추가 (이슈 [#42](https://github.com/mentraconsulting/golden-sign/issues/42)) |
 
@@ -427,11 +427,18 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 `word_too_short`, `word_out_of_frame`, `word_recognition_failed` 로 거절해도
 **구간은 닫힌다.** 앱은 다시 `word_start` 부터 보내면 된다.
 
-`word_out_of_frame` 은 얼굴이 보인 프레임 비율이 `WORD_MIN_FACE_RATIO`
-미만이거나, 두 손 중 하나라도 보인 프레임 비율이 `WORD_MIN_HAND_RATIO`
-미만일 때 나간다. 양손을 요구하지 않는 것은 한 손 수어에서 다른 손이 화면
-밖인 것이 정상이기 때문이다. `message` 에 두 비율이 담기고, 서버 로그에도
-`face_ratio` / `hand_ratio` 로 남는다.
+`word_out_of_frame` 은 얼굴이 보인 프레임 비율이 `WORD_MIN_FACE_RATIO`(0.5)
+미만이거나, 두 손 중 하나라도 보인 프레임 비율이
+`WORD_MIN_HAND_RATIO`(0.2) 미만일 때 나간다. 양손을 요구하지 않는 것은 한 손
+수어에서 다른 손이 화면 밖인 것이 정상이기 때문이다. `message` 에 두 비율이
+담기고, 서버 로그에도 `face_ratio` / `hand_ratio` 로 남는다.
+
+**손 기준이 얼굴 기준보다 낮은 것은 손 검출이 더 자주 놓치기 때문이다.**
+실기에서는 사람이 앞에 있고 얼굴이 보인 정상 구간도 손 비율이 0.22~0.48 로
+떨어져 0.5 기준에서는 거절됐다. 사람이 없거나 손이 거의 없는 구간은
+0~0.12 였으므로 0.2 로도 두 경우는 갈린다. 반대 방향으로는 여유가 있다 —
+녹화 영상 350개의 최저 손 비율이 0.8 이라 정상 수어는 이 기준에 걸리지
+않는다.
 
 좌표가 없어도 추론은 돌아간다 — 미검출은 보간되거나 0 이 되고 모델은
 무언가를 답한다. 그래서 거절하지 않으면 **근거 없는 단어가 하나 나오고**
@@ -483,7 +490,7 @@ ack 를 보내지 않는 이유: 앱은 `result` 를 받는 순간 구간을 닫
 | `WORD_TARGET_FRAMES` | `60` | 모델 입력 길이. 학습이 60이다 |
 | `WORD_SOURCE_FPS` | `30.0` | 되돌릴 격자의 프레임레이트. 원본 영상과 같게 둔다 |
 | `WORD_MIN_FACE_RATIO` | `0.5` | 얼굴이 보인 프레임 비율이 이보다 낮으면 `word_out_of_frame` |
-| `WORD_MIN_HAND_RATIO` | `0.5` | 두 손 중 하나라도 보인 프레임 비율이 이보다 낮으면 `word_out_of_frame` |
+| `WORD_MIN_HAND_RATIO` | `0.2` | 두 손 중 하나라도 보인 프레임 비율이 이보다 낮으면 `word_out_of_frame`. 얼굴 기준보다 낮다 — 아래 `word_out_of_frame` 설명 참고 |
 | `RECOGNITION_CONFIDENCE_THRESHOLD` | `0.5` | 이 아래면 단어를 주장하지 않는다 |
 | `RECOGNITION_MARGIN_THRESHOLD` | `0.15` | 2위와의 격차가 이 아래면 주장하지 않는다 |
 | `RECOGNITION_MODEL_FILENAME` | `model_fold0.keras` | `server/models/` 안의 파일명 |
@@ -672,3 +679,85 @@ status 로 정직하게 내야 한다. 빈 200 을 주면 앱은 재생에 성�
 인증은 API 키 헤더(`X-Goog-Api-Key`) 하나라서 `google-cloud-texttospeech` 를
 쓰지 않고 이미 있는 aiohttp 로 REST 를 직접 부른다. 키는 요청 헤더에만
 있고 로그와 응답에는 남지 않는다.
+
+---
+
+## 8. 앱 이벤트 로그 (client_log, dev-0.2)
+
+**용도**: 앱만 아는 사건을 서버 로그에 남긴다.
+
+스트리밍 중에는 폰이 안경 핫스팟으로 넘어가 `bun dev` 콘솔 로그가 늦게
+오거나 잘린다. 그 통로가 막혀도 남아야 하는 것(스트림 협상 결과, 시작 실패
+사유, TTS 폴백, 앱 쪽 타이머 발화)을 AI WebSocket 으로 보낸다.
+
+**서버가 이미 아는 것은 보내지 않는다.** 단어 결과, 확신도, 얼굴·손 비율,
+처리 fps 는 전부 서버가 만들어 보낸 값이라 다시 받을 이유가 없다.
+
+### Client -> Server: client_log
+
+```json
+{
+  "type": "client_log",
+  "schema_version": "dev-0.2",
+  "session_id": "abc-123",
+  "client_message_id": "log-001",
+  "event": "stream_start",
+  "level": "info",
+  "at": "2026-11-08T12:00:00.000Z",
+  "fields": {"transport": "whip", "fps": 30, "width": 1280, "elapsed_ms": 6400}
+}
+```
+
+| 필드 | 필수 | 의미 |
+|---|---|---|
+| `event` | 예 | 짧은 이벤트 이름. `tts` / `stream_start` / `stream_stop` / `app_error` |
+| `level` | 예 | `info` \| `warn` \| `error`. 서버 로그 레벨이 된다 |
+| `at` | 예 | 앱이 그 사건을 기록한 시각(ISO 문자열) |
+| `fields` | 아니오 | 문자열·숫자·불리언 값만 담은 평평한 객체 |
+
+`at` 을 꼭 받는 이유는 **서버 수신 시각으로 대신할 수 없기** 때문이다.
+스트리밍 중에는 폰이 안경 핫스팟에 있어 서버 연결이 끊겼다 붙으므로, 앱이
+모아 둔 이벤트가 한참 뒤에 도착한다. 서버는 이 문자열을 해석하지 않고 그대로
+로그에 남긴다 - 형식이 틀려도 그 사실이 로그에 보이는 편이 낫다.
+
+### Server -> Client: 없음
+
+**서버는 이 메시지에 아무것도 돌려주지 않는다.** ack 도 error 도 없다. 로그가
+목적이라 앱이 기다릴 답이 없고, 모양이 틀렸다고 연결을 끊지도 않는다.
+
+서버는 `logger` 로 `Client event` 한 줄을 남긴다. `event` / `at` / `fields`
+는 기존 `ExtraFieldFormatter` 형식(`key=value`)으로 붙는다.
+
+```text
+12:00:01 INFO    app.api.session_websocket | Client event | at=2026-11-08T12:00:00.000Z elapsed_ms=6400 event=stream_start fps=30 session_id=abc-123 transport=whip width=1280
+```
+
+### 한도
+
+값은 앱이 보낸 것이라 그대로 믿지 않는다. 넘긴 부분은 조용히 버린다.
+
+| 한도 | 기본값 | 넘기면 |
+|---|---|---|
+| `fields` 키 수 | 20 | 21번째부터 버린다 |
+| 문자열 길이 | 200자 | 자른다 (`event` / `at` / `fields` 값 모두) |
+| 세션당 초당 건수 | 5 | 그 초의 나머지를 버린다. 로그도 남기지 않는다 |
+
+버린 것을 로그로 알리지 않는 것은 의도다 - 그 경고가 같은 속도로 쏟아져
+막으려던 폭주를 그대로 재현한다. 한도는 모양 검사보다 먼저 보므로 모양이
+틀린 메시지가 쏟아질 때도 막힌다.
+
+`fields` 의 키는 `[A-Za-z0-9_]` 1~40자만 받는다. 로그 한 줄에 그대로 들어가는
+값이라, 공백이나 제어 문자가 섞이면 한 줄을 쪼개 가짜 이벤트를 끼워 넣을 수
+있다. 로그 레코드의 예약 이름(`message`, `name`, ...)과 `session_id` /
+`event` / `at` 도 버린다 - 덮으면 어느 세션의 어떤 이벤트인지가 사라진다.
+
+모양이 틀린 메시지(`level` 이 셋 중 하나가 아니거나 `event` / `at` 이 없는
+경우)는 `Ignored a malformed client_log` 경고 한 줄만 남기고 버린다.
+
+### 서버 설정
+
+| 환경변수 | 기본값 | 의미 |
+|---|---|---|
+| `CLIENT_LOG_MAX_FIELDS` | `20` | `fields` 에서 로그로 옮기는 키 수 상한 |
+| `CLIENT_LOG_MAX_VALUE_CHARS` | `200` | 문자열 값을 자르는 길이 |
+| `CLIENT_LOG_MAX_PER_SECOND` | `5` | 한 세션이 1초에 남길 수 있는 건수 |

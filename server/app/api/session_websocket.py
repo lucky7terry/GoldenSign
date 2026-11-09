@@ -22,6 +22,7 @@ from app.constants import (
     WEBRTC_SCHEMA_VERSION,
     WORD_SCHEMA_VERSION,
 )
+from app.client_log import log_client_event, new_client_log_limiter
 from app.error import error_message
 from app.schemas.websocket import (
     FrameMessage,
@@ -318,6 +319,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         - frame: Base64 프레임 전송 (dev-0.2)
         - stream_start/stream_stop: WHEP 스트림 제어 (dev-0.3)
         - word_start/word_end: 단어 구간 표시 (dev-0.4)
+        - client_log: 앱만 아는 사건을 서버 로그에 남긴다 (응답 없음)
         - ping: 연결 유지
         - stop: 세션 종료
 
@@ -348,6 +350,9 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         },
     )
     send_lock = asyncio.Lock()
+    # 연결마다 따로 둔다. 한도가 연결 하나를 겨냥한 것이고, 이렇게 두면
+    # 소켓이 닫힐 때 카운터도 함께 사라진다.
+    client_log_limiter = new_client_log_limiter()
     word_generation = word_store.start_session(session_id)
     # 이 연결이 연 스트림. 종료할 때 이것만 닫는다 - session_id 만으로
     # 닫으면 재접속한 다른 연결의 스트림을 끊는다.
@@ -1087,6 +1092,15 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                                 retryable=False,
                             )
                         )
+            elif message_type == "client_log":
+                # 앱만 아는 사건을 서버 로그에 남긴다. 응답은 보내지 않는다 -
+                # 로그가 목적이라 앱이 기다릴 답이 없다.
+                log_client_event(
+                    logger,
+                    session_id,
+                    raw_message,
+                    client_log_limiter,
+                )
             elif message_type == "stop":
                 close_reason = "client_stop"
                 cancel_word_timer()
