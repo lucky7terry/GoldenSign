@@ -569,9 +569,17 @@ registerMiniapp((session) => {
   /**
    * 열려 있는 단어 구간. 닫혀 있으면 undefined 다. `phase` 가 "closing" 인 구간은
    * word_end 를 보내고 result 를 기다리는 중이다 — 진짜 닫힘은 result 도착이다.
+   * questionIndex 와 session 은 구간을 시작한 자리다 — 결과는 그 질문에 넣고,
+   * 구간이 이미 걷혔거나 세션이 바뀌었으면 버린다.
    */
   let wordSegment:
-    | {phase: "open" | "closing"; startedAt: number; timer: ReturnType<typeof setTimeout> | undefined}
+    | {
+        phase: "open" | "closing"
+        startedAt: number
+        timer: ReturnType<typeof setTimeout> | undefined
+        questionIndex: number
+        session: SessionRecord | undefined
+      }
     | undefined
 
   // "ready" 안에서 만든다. session.userId 는 CONNECT_ACK 이후에야 채워지기
@@ -960,6 +968,8 @@ registerMiniapp((session) => {
       if (next.resampledOnTime === false) {
         console.warn("[Word] resampled_on_time=false — 입력에 촬영 시각이 안 붙었다")
       }
+      // 걷어내기 전에 구간이 시작된 자리를 붙잡아 둔다. 답 귀속의 근거다.
+      const segment = wordSegment
       clearWordSegment()
       // 구간을 닫은 뒤에 얹는다. 순서가 반대면 flash 복귀가 아직 살아 있는
       // 구간을 보고 주황으로 돌아가 결과 색이 묻힌다.
@@ -973,10 +983,16 @@ registerMiniapp((session) => {
         speakSafe(session.speaker, next.text, "result", reportTts)
       else speakSafe(session.speaker, RETRY_ANNOUNCEMENT, "retry", reportTts)
 
-      // text 가 있을 때만 현재 질문의 답에 쌓는다. 자유 모드는 questions[0] 뿐이다.
-      if (hasText && screen === "active" && currentSession !== undefined) {
-        const qi = currentSession.mode === "questionnaire" ? questionIndex : 0
-        currentSession.questions[qi]?.words.push({
+      // text 가 있을 때만, 구간을 시작한 질문의 답에 쌓는다. 구간이 이미
+      // 걷혔거나(안전망 뒤 늦은 결과) 세션이 바뀌었으면 버린다.
+      if (
+        hasText &&
+        screen === "active" &&
+        segment !== undefined &&
+        currentSession !== undefined &&
+        segment.session === currentSession
+      ) {
+        currentSession.questions[segment.questionIndex]?.words.push({
           id: nextWordId++,
           text: next.text ?? "",
           confidence: next.confidence,
@@ -1043,7 +1059,13 @@ registerMiniapp((session) => {
         report("app_error", "warn", {where: "word_start_send"})
         return
       }
-      wordSegment = {phase: "open", startedAt: Date.now(), timer: undefined}
+      wordSegment = {
+        phase: "open",
+        startedAt: Date.now(),
+        timer: undefined,
+        questionIndex: currentSession?.mode === "questionnaire" ? questionIndex : 0,
+        session: currentSession,
+      }
       setWordLed(true)
       publishSessionState()
       console.log("[Word] 구간 시작")
@@ -1155,7 +1177,13 @@ registerMiniapp((session) => {
         console.warn("[Word] 서버에 구간이 이미 열려 있습니다 — 앱 상태를 열림으로 맞춥니다")
         const startedAt = wordSegment?.startedAt ?? Date.now()
         clearWordSegment()
-        wordSegment = {phase: "open", startedAt, timer: undefined}
+        wordSegment = {
+          phase: "open",
+          startedAt,
+          timer: undefined,
+          questionIndex: currentSession?.mode === "questionnaire" ? questionIndex : 0,
+          session: currentSession,
+        }
         // 서버 기준으로는 열린 구간이라 불도 열림으로 되돌린다.
         setWordLed(true)
         publishSessionState()
