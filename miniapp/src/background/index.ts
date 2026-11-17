@@ -53,7 +53,9 @@ import {
   type UIModule,
   type WifiData,
 } from "@mentra/miniapp/background"
-import type {Channels, Snapshot} from "../shared/channels"
+import type {Channels, Mode, Screen, SessionRecord, Snapshot} from "../shared/channels"
+import {QUESTION_COUNT} from "../shared/questions"
+import {buildCandidates} from "../shared/sentence"
 import {
   AiClient,
   probeRuntime,
@@ -521,6 +523,18 @@ function isLedTimeoutError(err: unknown): boolean {
   return text.includes("timeout") || text.includes("timed out") || text.includes("etimedout")
 }
 
+/** 요약 화면에서 입력이 없을 때 스트림만 자동 종료하기까지의 시간. */
+const SUMMARY_IDLE_TIMEOUT_MS = 5 * 60_000
+
+// 모듈 레벨에 두어 Mentra 세션이 끝나도 JSContext 가 살아 있는 동안 유지된다.
+// 영구 저장은 하지 않는다 — 의료 정보 성격이라 폰에 남기지 않는다.
+/** 대기 화면에서 마지막으로 고른 진행 방식. */
+let savedMode: Mode = "questionnaire"
+/** 직전 세션 1건. 새 세션을 시작할 때 교체된다. */
+let savedLastSession: SessionRecord | null = null
+/** 답 단어 id 발급기. windowIndex 는 -1 센티널이 있어 식별자로 못 쓴다. */
+let nextWordId = 1
+
 registerMiniapp((session) => {
   /**
    * 모든 구독의 해제 함수가 여기 모이고 "disconnect" 에서 한 번에 비운다.
@@ -563,6 +577,17 @@ registerMiniapp((session) => {
   // "ready" 안에서 만든다. session.userId 는 CONNECT_ACK 이후에야 채워지기
   // 때문이다. 런타임 확인에 실패하면 undefined 로 남는다.
   let ai: AiClient | undefined
+
+  // --- 화면·기록 세션 상태 ---------------------------------------------------
+  // 스트림 상태(appState)와 별개의 축이다. 오류·재연결은 화면과 기록을 건드리지
+  // 않고, 기록 세션의 경계는 스트림이 아니라 "모드 시작~종료"다.
+  let screen: Screen = "idle"
+  /** 문진 모드의 현재 질문(0~3). 자유 모드에서는 늘 0 이다. */
+  let questionIndex = 0
+  /** 진행 중인 기록 세션. 없으면 undefined. */
+  let currentSession: SessionRecord | undefined
+  /** 요약 화면의 무입력 자동 종료 타이머. */
+  let summaryTimer: ReturnType<typeof setTimeout> | undefined
 
   // --- 서버 보고 -------------------------------------------------------------
 
@@ -628,12 +653,12 @@ registerMiniapp((session) => {
     results: [],
     error: null,
     session: {
-      mode: "questionnaire",
+      mode: savedMode,
       screen: "idle",
       questionIndex: 0,
       segmentOpen: false,
       session: null,
-      lastSession: null,
+      lastSession: savedLastSession,
     },
   }
 
@@ -827,6 +852,9 @@ registerMiniapp((session) => {
         // 에러를 볼 수 있어야 한다.
         snapshot.error = next as Channels["error"]
         break
+      case "session:state":
+        snapshot.session = next as Channels["session:state"]
+        break
       default:
         break
     }
@@ -944,6 +972,18 @@ registerMiniapp((session) => {
       if (next.text !== null && next.text !== "")
         speakSafe(session.speaker, next.text, "result", reportTts)
       else speakSafe(session.speaker, RETRY_ANNOUNCEMENT, "retry", reportTts)
+
+      // text 가 있을 때만 현재 질문의 답에 쌓는다. 자유 모드는 questions[0] 뿐이다.
+      if (hasText && screen === "active" && currentSession !== undefined) {
+        const qi = currentSession.mode === "questionnaire" ? questionIndex : 0
+        currentSession.questions[qi]?.words.push({
+          id: nextWordId++,
+          text: next.text ?? "",
+          confidence: next.confidence,
+          windowIndex: next.windowIndex,
+        })
+        publishSessionState()
+      }
     }
     // 채널에 선언된 필드만 골라 담는다. next 를 통째로 넘기면 UI 가 쓰지 않기로
     // 한 recognition(임계값 조정용)까지 스냅샷에 실려 간다. text 는 null 그대로
@@ -973,6 +1013,8 @@ registerMiniapp((session) => {
     if (wordSegment.timer !== undefined) clearTimeout(wordSegment.timer)
     wordSegment = undefined
     setWordLed(false)
+    // UI 의 진행 중 점선 칩이 여기서 꺼진다.
+    publishSessionState()
   }
 
   /**
@@ -1001,6 +1043,7 @@ registerMiniapp((session) => {
       }
       wordSegment = {phase: "open", startedAt: Date.now(), timer: undefined}
       setWordLed(true)
+      publishSessionState()
       console.log("[Word] 구간 시작")
       return
     }
@@ -1113,6 +1156,7 @@ registerMiniapp((session) => {
         wordSegment = {phase: "open", startedAt, timer: undefined}
         // 서버 기준으로는 열린 구간이라 불도 열림으로 되돌린다.
         setWordLed(true)
+        publishSessionState()
         armWordTimer(WORD_MAX_SECONDS_FALLBACK)
         rejected = true
         break
@@ -1145,10 +1189,194 @@ registerMiniapp((session) => {
     patch("error", {code: err.code, message: err.message, retryable: err.retryable})
   }
 
+  // --- 화면·기록 세션 ----------------------------------------------------------
+
+  /** 화면·기록 상태를 한 덩어리로 방송한다. 이 축의 모든 변경이 여기를 지난다. */
+  function publishSessionState(): void {
+    patch("session:state", {
+      mode: savedMode,
+      screen,
+      questionIndex,
+      segmentOpen: wordSegment !== undefined,
+      session: currentSession ?? null,
+      lastSession: savedLastSession,
+    })
+  }
+
+  /** 새 기록 세션을 열고 active 화면으로 간다. */
+  function startSession(mode: Mode): void {
+    const count = mode === "questionnaire" ? QUESTION_COUNT : 1
+    const questions: SessionRecord["questions"] = []
+    for (let i = 0; i < count; i += 1) questions.push({words: [], adopted: null})
+    currentSession = {mode, startedAt: Date.now(), endedAt: null, questions}
+    questionIndex = 0
+    screen = "active"
+    publishSessionState()
+  }
+
+  /** 진행 중 세션을 끝내 lastSession 으로 옮긴다. 화면 전이는 호출부 몫이다. */
+  function archiveSession(): void {
+    if (currentSession === undefined) return
+    currentSession.endedAt = Date.now()
+    savedLastSession = currentSession
+    currentSession = undefined
+  }
+
+  function clearSummaryTimer(): void {
+    if (summaryTimer !== undefined) {
+      clearTimeout(summaryTimer)
+      summaryTimer = undefined
+    }
+  }
+
+  /**
+   * 요약 화면의 무입력 타이머를 (다시) 건다. 만료되면 스트림만 끄고 화면은
+   * summary 에 남긴다 — 이후 "자유 모드로 계속" 은 재시작 경로를 탄다.
+   */
+  function armSummaryTimer(): void {
+    clearSummaryTimer()
+    summaryTimer = setTimeout(() => {
+      summaryTimer = undefined
+      if (appState === "streaming") {
+        console.log("[Session] 요약 5분 무입력 — 스트림 자동 종료")
+        void runStopSequence("요약 무입력 자동 종료").catch((err) => {
+          setState("error")
+          logRequestError("[Stream] 요약 자동 종료 예외", err)
+        })
+      }
+    }, SUMMARY_IDLE_TIMEOUT_MS)
+  }
+
+  /** 요약 화면에서의 입력(버튼·RPC)마다 불러 타이머를 되돌린다. */
+  function touchSummaryTimer(): void {
+    if (screen === "summary" && summaryTimer !== undefined) armSummaryTimer()
+  }
+
+  /** 요약 화면으로 간다. 스트림은 건드리지 않는다 — 끄는 쪽은 호출부가 정한다. */
+  function enterSummary(): void {
+    screen = "summary"
+    armSummaryTimer()
+    publishSessionState()
+  }
+
   // 정확히 한 번만 등록한다. 같은 채널에 두 번째로 등록하면 ui.handle 이 동기적
   // 으로 throw 한다(채널당 핸들러 하나). 두 번 실행될 수 있는 자리로 옮기면
   // 안 된다. 반환값은 해제 함수다.
   unsubscribers.push(ui.handle("getSnapshot", async () => snapshot))
+
+  unsubscribers.push(
+    ui.handle("setMode", async ({mode}) => {
+      // idle 밖에서는 모드를 바꿀 수 없다. 진행 중 세션의 모드가 어긋난다.
+      if (screen === "idle" && savedMode !== mode) {
+        savedMode = mode
+        publishSessionState()
+      }
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("nextQuestion", async () => {
+      if (screen === "active" && currentSession?.mode === "questionnaire") {
+        if (questionIndex < QUESTION_COUNT - 1) {
+          questionIndex += 1
+          publishSessionState()
+        } else {
+          // 마지막 질문의 "다음 질문". 스트림은 유지한 채 요약으로 간다.
+          enterSummary()
+        }
+      }
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("prevQuestion", async () => {
+      if (screen === "active" && currentSession?.mode === "questionnaire" && questionIndex > 0) {
+        questionIndex -= 1
+        publishSessionState()
+      }
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("removeWord", async ({wordId}) => {
+      touchSummaryTimer()
+      const record = currentSession
+      if (record !== undefined) {
+        for (const question of record.questions) {
+          const i = question.words.findIndex((w) => w.id === wordId)
+          if (i >= 0) {
+            question.words.splice(i, 1)
+            publishSessionState()
+            break
+          }
+        }
+      }
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("adoptCandidate", async ({questionIndex: qi, candidateIndex}) => {
+      touchSummaryTimer()
+      // UI 와 같은 입력으로 후보를 다시 만들어 인덱스를 푼다. 지금은
+      // buildCandidates 가 스텁이라 늘 빈 배열이고, 이 핸들러는 무동작이다.
+      const question = currentSession?.questions[qi]
+      if (question !== undefined) {
+        const candidate = buildCandidates(question.words, qi)[candidateIndex]
+        if (candidate !== undefined) {
+          question.adopted = candidate.text
+          publishSessionState()
+        }
+      }
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("continueFree", async () => {
+      if (screen !== "summary") return {}
+      clearSummaryTimer()
+      archiveSession()
+      startSession("free")
+      // 조기 종료나 무입력 자동 종료로 스트림이 죽어 있으면 다시 시작한다.
+      if (appState !== "streaming") {
+        void runStartSequence().catch((err) => {
+          setState("error")
+          logRequestError("[Stream] 자유 모드 재시작 예외", err)
+        })
+      }
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("goHome", async () => {
+      if (screen !== "summary") return {}
+      clearSummaryTimer()
+      if (appState === "streaming") {
+        void runStopSequence("요약에서 처음으로").catch((err) => {
+          setState("error")
+          logRequestError("[Stream] 처음으로 종료 예외", err)
+        })
+      }
+      archiveSession()
+      screen = "idle"
+      questionIndex = 0
+      publishSessionState()
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("speakText", async ({text}) => {
+      touchSummaryTimer()
+      speakSafe(session.speaker, text, "candidate", reportTts)
+      return {}
+    }),
+  )
 
   function setState(next: AppState): void {
     if (appState === next) return
@@ -1392,6 +1620,13 @@ registerMiniapp((session) => {
       activeStream = undefined
       publishStreamState(`disconnect: ${r}`)
       setState("idle")
+
+      // 진행 중이던 세션은 모듈 레벨 lastSession 으로 남겨, 미니앱을 다시 열면
+      // "지난 기록 보기"에서 찾을 수 있게 한다.
+      clearSummaryTimer()
+      archiveSession()
+      screen = "idle"
+      questionIndex = 0
 
       for (const unsubscribe of unsubscribers) {
         unsubscribe()
@@ -1762,6 +1997,10 @@ registerMiniapp((session) => {
       setState("streaming")
       console.log("[Stream] streaming. streamId=", streamId)
 
+      // 대기 화면에서 시작한 경우에만 새 세션을 연다. "자유 모드로 계속" 의
+      // 재시작은 continueFree 가 이미 세션을 열고 active 로 옮겨 두었다.
+      if (screen === "idle") startSession(savedMode)
+
       // 협상 결과는 앱만 안다. 서버는 webrtcUrl 하나만 받으므로, 프레임이 적게
       // 들어올 때 그것이 인코더 설정 탓인지 여기서만 가려진다. resolvedConfig
       // 는 Optional 이라 실제로 받은 값만 싣는다.
@@ -1862,6 +2101,14 @@ registerMiniapp((session) => {
             //
             // waiting_wifi 는 재시도 진입점이다. 사용자가 설정 흐름으로 WiFi 를
             // 연결하고 돌아와 다시 누르는 자리다.
+            //
+            // 요약 화면에서는 시작하지 않는다. 재시작은 "자유 모드로 계속" 이
+            // 유일한 경로이고, 여기서 열면 세션 없는 스트림이 생긴다.
+            if (screen === "summary") {
+              touchSummaryTimer()
+              console.log("[Stream] 요약 화면 — 롱프레스 시작 무시")
+              return
+            }
             void runStartSequence().catch((err) => {
               setState("error")
               logRequestError("[Stream] 시작 시퀀스 예외", err)
@@ -1869,6 +2116,17 @@ registerMiniapp((session) => {
             return
 
           case "streaming":
+            // 화면 축이 종료의 의미를 정한다. 문진 중이면 조기 종료 → 요약,
+            // 자유 모드면 세션을 lastSession 으로 옮기고 대기로, 요약에서는
+            // 무입력 타이머와 같은 효과(스트림만 종료)다.
+            if (screen === "active" && currentSession?.mode === "questionnaire") {
+              enterSummary()
+            } else if (screen === "active") {
+              archiveSession()
+              screen = "idle"
+              questionIndex = 0
+              publishSessionState()
+            }
             void runStopSequence(`long press (buttonId=${press.buttonId})`).catch((err) => {
               setState("error")
               logRequestError("[Stream] 정지 시퀀스 예외", err)
@@ -1894,8 +2152,10 @@ registerMiniapp((session) => {
         }
       } else {
         // 짧게 누르면 단어 구간을 토글한다. 예전 빌드의 사진 촬영은 이어받지 않았다.
-        console.log("[Input] SHORT state=", appState)
-        handleWordPress()
+        console.log("[Input] SHORT state=", appState, "screen=", screen)
+        touchSummaryTimer()
+        // 단어 구간은 인식 화면에서만 연다. 요약에서 열면 답이 갈 곳이 없다.
+        if (screen === "active") handleWordPress()
       }
     }),
   )
