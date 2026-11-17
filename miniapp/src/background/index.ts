@@ -526,12 +526,15 @@ function isLedTimeoutError(err: unknown): boolean {
 /** 요약 화면에서 입력이 없을 때 스트림만 자동 종료하기까지의 시간. */
 const SUMMARY_IDLE_TIMEOUT_MS = 5 * 60_000
 
+/** 끝난 세션을 보관하는 상한. 넘으면 가장 오래된 것부터 버린다. */
+const MAX_PAST_SESSIONS = 10
+
 // 모듈 레벨에 두어 Mentra 세션이 끝나도 JSContext 가 살아 있는 동안 유지된다.
 // 영구 저장은 하지 않는다 — 의료 정보 성격이라 폰에 남기지 않는다.
 /** 대기 화면에서 마지막으로 고른 진행 방식. */
 let savedMode: Mode = "questionnaire"
-/** 직전 세션 1건. 새 세션을 시작할 때 교체된다. */
-let savedLastSession: SessionRecord | null = null
+/** 끝난 세션 목록. 최신이 앞이다. */
+let savedPastSessions: SessionRecord[] = []
 /** 답 단어 id 발급기. windowIndex 는 -1 센티널이 있어 식별자로 못 쓴다. */
 let nextWordId = 1
 
@@ -666,7 +669,7 @@ registerMiniapp((session) => {
       questionIndex: 0,
       segmentOpen: false,
       session: null,
-      lastSession: savedLastSession,
+      pastSessions: savedPastSessions,
     },
   }
 
@@ -1239,7 +1242,7 @@ registerMiniapp((session) => {
       questionIndex,
       segmentOpen: wordSegment !== undefined,
       session: currentSession ?? null,
-      lastSession: savedLastSession,
+      pastSessions: savedPastSessions,
     })
   }
 
@@ -1254,11 +1257,17 @@ registerMiniapp((session) => {
     publishSessionState()
   }
 
-  /** 진행 중 세션을 끝내 lastSession 으로 옮긴다. 화면 전이는 호출부 몫이다. */
+  /** 진행 중 세션을 끝내 기록 목록 맨 앞에 넣는다. 화면 전이는 호출부 몫이다. */
   function archiveSession(): void {
     if (currentSession === undefined) return
     currentSession.endedAt = Date.now()
-    savedLastSession = currentSession
+    let wordCount = 0
+    for (const q of currentSession.questions) wordCount += q.words.length
+    // 단어가 하나도 없는 세션은 기록으로 남길 내용이 없어 버린다.
+    if (wordCount > 0) {
+      savedPastSessions.unshift(currentSession)
+      if (savedPastSessions.length > MAX_PAST_SESSIONS) savedPastSessions.length = MAX_PAST_SESSIONS
+    }
     currentSession = undefined
   }
 
@@ -1423,6 +1432,16 @@ registerMiniapp((session) => {
     ui.handle("speakText", async ({text}) => {
       touchSummaryTimer()
       speakSafe(session.speaker, text, "candidate", reportTts)
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("clearHistory", async () => {
+      if (savedPastSessions.length > 0) {
+        savedPastSessions = []
+        publishSessionState()
+      }
       return {}
     }),
   )
@@ -1670,7 +1689,7 @@ registerMiniapp((session) => {
       publishStreamState(`disconnect: ${r}`)
       setState("idle")
 
-      // 진행 중이던 세션은 모듈 레벨 lastSession 으로 남겨, 미니앱을 다시 열면
+      // 진행 중이던 세션은 모듈 레벨 기록 목록에 남겨, 미니앱을 다시 열면
       // "지난 기록 보기"에서 찾을 수 있게 한다.
       clearSummaryTimer()
       archiveSession()

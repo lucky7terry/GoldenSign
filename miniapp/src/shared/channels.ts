@@ -203,8 +203,8 @@ export interface Channels {
     segmentOpen: boolean
     /** 진행 중인 기록 세션. 없으면 null. */
     session: SessionRecord | null
-    /** 직전 세션 1건. 영구 저장은 하지 않는다. */
-    lastSession: SessionRecord | null
+    /** 끝난 세션 목록. 최신순 최대 10건이며 영구 저장은 하지 않는다. */
+    pastSessions: SessionRecord[]
   }
 
   // ---------------------------------------------------------------------
@@ -240,6 +240,9 @@ export interface Channels {
 
   /** 문장 후보의 듣기 버튼. 넘긴 문장을 안경 스피커로 읽는다. */
   "speakText": Rpc<{text: string}, {}>
+
+  /** 지난 기록 목록을 전부 비운다. */
+  "clearHistory": Rpc<{}, {}>
 }
 
 declare global {

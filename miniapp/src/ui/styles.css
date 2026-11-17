@@ -467,6 +467,85 @@ button {
 }
 
 /* --------------------------------------------------------------------------
+   지난 기록 — 목록과 상세
+   -------------------------------------------------------------------------- */
+
+.gs-histhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gs-histtitle {
+  margin: 0;
+  flex: 1;
+  font-size: 1.3125rem;
+  font-weight: 700;
+}
+
+.gs-histback {
+  flex: none;
+  margin-left: auto;
+  min-height: 40px;
+  padding: 8px 16px;
+  border: 1px solid var(--gs-accent-strong);
+  border-radius: var(--gs-r-pill);
+  background: var(--gs-surface);
+  color: var(--gs-accent-text);
+  font-size: 0.8125rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.gs-histrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 56px;
+  padding: 12px 16px;
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-card);
+  background: var(--gs-surface);
+  color: var(--gs-fg);
+  text-align: left;
+  cursor: pointer;
+}
+
+.gs-histtag {
+  flex: none;
+  padding: 4px 10px;
+  border-radius: var(--gs-r-pill);
+  background: var(--gs-accent-tint);
+  color: var(--gs-accent-text);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.gs-histmeta {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--gs-muted);
+}
+
+.gs-histchev {
+  flex: none;
+  font-size: 1.25rem;
+  color: var(--gs-subtle);
+}
+
+.gs-btn-danger {
+  border: 1px solid var(--gs-error);
+  background: var(--gs-error-tint);
+  color: var(--gs-error);
+}
+
+/* --------------------------------------------------------------------------
    질문 카드 (문진)
    -------------------------------------------------------------------------- */
 

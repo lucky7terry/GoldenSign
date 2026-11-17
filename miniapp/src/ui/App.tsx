@@ -56,7 +56,7 @@ const EMPTY_SNAPSHOT: Snapshot = {
     questionIndex: 0,
     segmentOpen: false,
     session: null,
-    lastSession: null,
+    pastSessions: [],
   },
 }
 
@@ -89,6 +89,20 @@ function fmtPercent(confidence: number): string {
 function fmtElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000))
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`
+}
+
+/** 시작 시각. 오늘이면 HH:mm, 아니면 M/D HH:mm 로 줄인다. */
+function fmtStartTime(ts: number, now: number): string {
+  const d = new Date(ts)
+  const n = new Date(now)
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+  const sameDay =
+    d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate()
+  return sameDay ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`
+}
+
+function durationOf(record: SessionRecord): number {
+  return (record.endedAt ?? record.startedAt) - record.startedAt
 }
 
 function wordCountOf(record: SessionRecord): number {
@@ -580,8 +594,12 @@ export function App() {
   const [phase, setPhase] = useState<Phase>({kind: "loading"})
   /** 결과 카드가 그릴 마지막 단어 사건. 방송에서만 쌓인다. */
   const [wordEvent, setWordEvent] = useState<WordEvent | null>(null)
-  /** 지난 기록 보기는 UI 로컬 화면이다. background 의 screen 과 무관하다. */
-  const [view, setView] = useState<"main" | "last">("main")
+  /** 지난 기록 목록·상세는 UI 로컬 화면이다. 데이터는 background 목록에서 읽는다. */
+  const [view, setView] = useState<{kind: "main"} | {kind: "list"} | {kind: "detail"; index: number}>({
+    kind: "main",
+  })
+  /** "기록 모두 지우기"의 화면 내 확인 단계. */
+  const [confirmClear, setConfirmClear] = useState(false)
   /** 경과 시간 표시용 1초 틱. */
   const [now, setNow] = useState(() => Date.now())
 
@@ -600,6 +618,7 @@ export function App() {
   const continueFree = useRpc<Channels, "continueFree">("continueFree")
   const goHome = useRpc<Channels, "goHome">("goHome")
   const speakText = useRpc<Channels, "speakText">("speakText")
+  const clearHistory = useRpc<Channels, "clearHistory">("clearHistory")
 
   /** 조작 RPC 는 결과를 기다리지 않는다. 화면은 session:state 방송으로 갱신된다. */
   function fire(p: Promise<unknown>): void {
@@ -706,10 +725,19 @@ export function App() {
   const streamView = describeStream(snap)
   const hasStreamError = snap.stream.state === "error"
 
-  // 지난 기록 보기로 들어가 있는데 안경 버튼으로 새 세션이 시작되면 돌아온다.
+  // 지난 기록을 보는 중에 안경 버튼으로 새 세션이 시작되면 돌아온다.
   useEffect(() => {
-    if (ss.screen !== "idle") setView("main")
+    if (ss.screen !== "idle") {
+      setView({kind: "main"})
+      setConfirmClear(false)
+    }
   }, [ss.screen])
+
+  /** 기록 화면 사이 이동. 확인 단계는 이동할 때마다 접는다. */
+  function goView(next: typeof view): void {
+    setConfirmClear(false)
+    setView(next)
+  }
 
   // -------------------------------------------------------------------------
   // 화면별 본문
@@ -768,13 +796,10 @@ export function App() {
 
         <p className="gs-hint">{FRAMING_ANNOUNCEMENT}</p>
 
-        {ss.lastSession === null ? null : (
-          <button className="gs-lastrow" onClick={() => setView("last")}>
+        {ss.pastSessions.length === 0 ? null : (
+          <button className="gs-lastrow" onClick={() => goView({kind: "list"})}>
             지난 기록 보기
-            <span className="gs-lastrow-sub">
-              {ss.lastSession.mode === "questionnaire" ? "문진" : "자유 인식"} · 단어{" "}
-              {wordCountOf(ss.lastSession)}개
-            </span>
+            <span className="gs-lastrow-sub">{ss.pastSessions.length}건</span>
           </button>
         )}
 
@@ -920,43 +945,114 @@ export function App() {
     )
   }
 
-  function renderLastSession(lastRecord: SessionRecord) {
-    const elapsed = (lastRecord.endedAt ?? lastRecord.startedAt) - lastRecord.startedAt
+  function renderHistoryList() {
     return (
       <>
-        <div className="gs-sumhead">
-          <span className="gs-sumchip">
-            {lastRecord.mode === "questionnaire" ? "지난 문진 기록" : "지난 자유 인식 기록"}
-          </span>
-          <span className="gs-sumstats">
-            단어 {wordCountOf(lastRecord)}개 · {fmtElapsed(elapsed)}
-          </span>
-        </div>
-
-        {lastRecord.questions.map((_, i) => (
-          <SummaryQuestionCard key={i} record={lastRecord} index={i} />
-        ))}
-
-        <p className="gs-caption">
-          단어 옆 숫자는 모델 확신도입니다. 기록은 폰에 저장되지 않고 다음 세션에서 지워집니다.
-        </p>
-
-        <div className="gs-nav">
-          <button className="gs-btn gs-btn-filled" onClick={() => setView("main")}>
+        <div className="gs-histhead">
+          <h2 className="gs-histtitle">지난 기록</h2>
+          <button className="gs-histback" onClick={() => goView({kind: "main"})}>
             돌아가기
           </button>
         </div>
+
+        {ss.pastSessions.map((rec, i) => (
+          <button
+            key={`${rec.startedAt}-${i}`}
+            className="gs-histrow"
+            onClick={() => goView({kind: "detail", index: i})}
+          >
+            <span className="gs-histtag">{rec.mode === "questionnaire" ? "문진" : "자유"}</span>
+            <span className="gs-histmeta">
+              {fmtStartTime(rec.startedAt, now)} · {fmtElapsed(durationOf(rec))} · 단어{" "}
+              {wordCountOf(rec)}개
+            </span>
+            <span className="gs-histchev" aria-hidden="true">
+              ›
+            </span>
+          </button>
+        ))}
+
+        <p className="gs-caption">기록은 폰에 저장되지 않으며 최근 10건만 남습니다.</p>
+
+        {confirmClear ? (
+          <div className="gs-nav">
+            <button className="gs-btn gs-btn-outline" onClick={() => setConfirmClear(false)}>
+              취소
+            </button>
+            <button
+              className="gs-btn gs-btn-danger"
+              onClick={() => {
+                fire(clearHistory({}, {timeout: RPC_TIMEOUT_MS}))
+                goView({kind: "main"})
+              }}
+            >
+              정말 모두 지우기
+            </button>
+          </div>
+        ) : (
+          <div className="gs-nav">
+            <button className="gs-btn gs-btn-outline" onClick={() => setConfirmClear(true)}>
+              기록 모두 지우기
+            </button>
+          </div>
+        )}
+      </>
+    )
+  }
+
+  function renderHistoryDetail(detailRecord: SessionRecord) {
+    return (
+      <>
+        <div className="gs-histhead">
+          <span className="gs-histtag">
+            {detailRecord.mode === "questionnaire" ? "문진" : "자유"}
+          </span>
+          <span className="gs-histmeta">
+            {fmtStartTime(detailRecord.startedAt, now)} · {fmtElapsed(durationOf(detailRecord))}
+          </span>
+          <button className="gs-histback" onClick={() => goView({kind: "list"})}>
+            돌아가기
+          </button>
+        </div>
+
+        {detailRecord.mode === "questionnaire" ? (
+          detailRecord.questions.map((_, i) => (
+            <SummaryQuestionCard key={i} record={detailRecord} index={i} />
+          ))
+        ) : (
+          <section className="gs-card">
+            <h2 className="gs-card-title">인식 단어</h2>
+            {detailRecord.questions[0] === undefined ||
+            detailRecord.questions[0].words.length === 0 ? (
+              <p className="gs-empty">답 없음</p>
+            ) : (
+              <div className="gs-chips">
+                {detailRecord.questions[0].words.map((w) => (
+                  <span key={w.id} className="gs-wordchip gs-wordchip-ro">
+                    {w.text}
+                    <span className="gs-wordchip-pct">{fmtPercent(w.confidence)}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        <p className="gs-caption">단어 옆 숫자는 모델 확신도입니다.</p>
       </>
     )
   }
 
   let body: React.ReactNode
-  if (view === "last" && ss.screen === "idle" && ss.lastSession !== null) {
-    body = renderLastSession(ss.lastSession)
-  } else if (ss.screen === "summary" && record !== null) {
+  const detailRecord = view.kind === "detail" ? ss.pastSessions[view.index] : undefined
+  if (ss.screen === "summary" && record !== null) {
     body = renderSummary(record)
   } else if (ss.screen === "active" && record !== null) {
     body = renderActive(record)
+  } else if (detailRecord !== undefined) {
+    body = renderHistoryDetail(detailRecord)
+  } else if (view.kind !== "main" && ss.pastSessions.length > 0) {
+    body = renderHistoryList()
   } else {
     body = renderIdle()
   }
