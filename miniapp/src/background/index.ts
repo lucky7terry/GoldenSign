@@ -985,9 +985,9 @@ registerMiniapp((session) => {
         publishSessionState()
       }
     }
-    // 채널에 선언된 필드만 골라 담는다. next 를 통째로 넘기면 UI 가 쓰지 않기로
-    // 한 recognition(임계값 조정용)까지 스냅샷에 실려 간다. text 는 null 그대로
-    // 올린다 — UI 가 null 과 빈 문자열을 구분해 문구를 고른다.
+    // 채널에 선언된 필드만 골라 담는다. recognition 블록은 UI 가 쓰는 두 값만
+    // 꺼내 싣는다. text 는 null 그대로 올린다 — UI 가 null 과 빈 문자열을
+    // 구분해 문구를 고른다.
     publishResult({
       text: next.text,
       confidence: next.confidence,
@@ -999,6 +999,8 @@ registerMiniapp((session) => {
       wordFrameCount: next.wordFrameCount,
       spanMs: next.spanMs,
       modelLoaded: next.modelLoaded,
+      confidenceThreshold: next.recognition?.confidenceThreshold ?? null,
+      candidate: next.recognition?.candidate ?? null,
     })
   }
 
@@ -1259,6 +1261,25 @@ registerMiniapp((session) => {
     publishSessionState()
   }
 
+  /**
+   * 요약을 끝내고 대기로 간다. 스트림이 살아 있으면 종료하고, 세션을
+   * lastSession 으로 옮긴다. "처음으로" 버튼과 요약 화면의 길게 누르기가 같이 쓴다.
+   */
+  function goHomeFromSummary(reason: string): void {
+    if (screen !== "summary") return
+    clearSummaryTimer()
+    if (appState === "streaming") {
+      void runStopSequence(reason).catch((err) => {
+        setState("error")
+        logRequestError("[Stream] 요약 종료 예외", err)
+      })
+    }
+    archiveSession()
+    screen = "idle"
+    questionIndex = 0
+    publishSessionState()
+  }
+
   // 정확히 한 번만 등록한다. 같은 채널에 두 번째로 등록하면 ui.handle 이 동기적
   // 으로 throw 한다(채널당 핸들러 하나). 두 번 실행될 수 있는 자리로 옮기면
   // 안 된다. 반환값은 해제 함수다.
@@ -1277,7 +1298,8 @@ registerMiniapp((session) => {
 
   unsubscribers.push(
     ui.handle("nextQuestion", async () => {
-      if (screen === "active" && currentSession?.mode === "questionnaire") {
+      // 열린 단어 구간은 현재 질문에 묶여 있어, 닫히기 전에는 옮기지 않는다.
+      if (wordSegment === undefined && screen === "active" && currentSession?.mode === "questionnaire") {
         if (questionIndex < QUESTION_COUNT - 1) {
           questionIndex += 1
           publishSessionState()
@@ -1292,7 +1314,7 @@ registerMiniapp((session) => {
 
   unsubscribers.push(
     ui.handle("prevQuestion", async () => {
-      if (screen === "active" && currentSession?.mode === "questionnaire" && questionIndex > 0) {
+      if (wordSegment === undefined && screen === "active" && currentSession?.mode === "questionnaire" && questionIndex > 0) {
         questionIndex -= 1
         publishSessionState()
       }
@@ -1354,18 +1376,7 @@ registerMiniapp((session) => {
 
   unsubscribers.push(
     ui.handle("goHome", async () => {
-      if (screen !== "summary") return {}
-      clearSummaryTimer()
-      if (appState === "streaming") {
-        void runStopSequence("요약에서 처음으로").catch((err) => {
-          setState("error")
-          logRequestError("[Stream] 처음으로 종료 예외", err)
-        })
-      }
-      archiveSession()
-      screen = "idle"
-      questionIndex = 0
-      publishSessionState()
+      goHomeFromSummary("요약에서 처음으로")
       return {}
     }),
   )
@@ -2102,11 +2113,10 @@ registerMiniapp((session) => {
             // waiting_wifi 는 재시도 진입점이다. 사용자가 설정 흐름으로 WiFi 를
             // 연결하고 돌아와 다시 누르는 자리다.
             //
-            // 요약 화면에서는 시작하지 않는다. 재시작은 "자유 모드로 계속" 이
-            // 유일한 경로이고, 여기서 열면 세션 없는 스트림이 생긴다.
+            // 요약 화면에서는 시작하지 않는다. 스트림이 꺼진 요약에서의 길게
+            // 누르기는 "처음으로"와 같다 — 세션을 넘기고 대기로 간다.
             if (screen === "summary") {
-              touchSummaryTimer()
-              console.log("[Stream] 요약 화면 — 롱프레스 시작 무시")
+              goHomeFromSummary(`long press (buttonId=${press.buttonId})`)
               return
             }
             void runStartSequence().catch((err) => {
@@ -2118,7 +2128,11 @@ registerMiniapp((session) => {
           case "streaming":
             // 화면 축이 종료의 의미를 정한다. 문진 중이면 조기 종료 → 요약,
             // 자유 모드면 세션을 lastSession 으로 옮기고 대기로, 요약에서는
-            // 무입력 타이머와 같은 효과(스트림만 종료)다.
+            // "처음으로"와 같다(스트림 종료 + 세션을 넘기고 대기로).
+            if (screen === "summary") {
+              goHomeFromSummary(`long press (buttonId=${press.buttonId})`)
+              return
+            }
             if (screen === "active" && currentSession?.mode === "questionnaire") {
               enterSummary()
             } else if (screen === "active") {
@@ -2136,6 +2150,8 @@ registerMiniapp((session) => {
           case "error":
             // 복구: 잡혀 있는 것을 정리하고, AI 소켓이 살아 있으면 ai_ready 로
             // 돌아간다. 핫 리로드 탈출구이기도 하다.
+            // 요약 화면이었다면 "처음으로"처럼 세션을 넘기고 대기로도 간다.
+            if (screen === "summary") goHomeFromSummary("요약에서 길게 누르기 (error)")
             console.warn("[Stream] error 상태 — 복구 정지 시도")
             void runStopSequence("error 복구").catch((err) => {
               setState("error")

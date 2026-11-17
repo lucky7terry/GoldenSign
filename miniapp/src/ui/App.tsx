@@ -29,9 +29,6 @@ const RPC_TIMEOUT_MS = 3000
 /** background 쪽 상한과 같은 값. 두 버퍼가 어긋나지 않게 한다. */
 const MAX_RESULTS = 20
 
-/** 확신도 막대의 기준선 틱 위치. 판정은 서버 몫이라 표시용 참고선일 뿐이다. */
-const CONFIDENCE_BASELINE = 0.5
-
 type Tone = "idle" | "connecting" | "waiting" | "streaming" | "error"
 
 type Phase = {kind: "loading"} | {kind: "error"; message: string} | {kind: "ready"}
@@ -351,11 +348,16 @@ function ResultCard({event}: {event: WordEvent | null}) {
   }
 
   const recognized = r.text !== null && r.text !== ""
+  // 기준선은 서버가 result.recognition 에 실어 보낸 채택 임계값이다. 없으면 긋지 않는다.
+  const threshold = r.confidenceThreshold
   return (
     <section className="gs-card">
       <h2 className="gs-card-title">방금 인식된 단어</h2>
       <p className="gs-result-word">{recognized ? r.text : "확신 부족"}</p>
       {recognized ? null : <p className="gs-result-sub">같은 수어를 한 번 더 보여 주세요.</p>}
+      {recognized || r.candidate === null || r.candidate === undefined || r.candidate === "" ? null : (
+        <p className="gs-result-sub">1위 후보 {r.candidate}</p>
+      )}
       <div className="gs-result-conf">
         <span className="gs-result-pct">{fmtPercent(r.confidence)}</span>
         <span className="gs-confbar" aria-hidden="true">
@@ -363,7 +365,12 @@ function ResultCard({event}: {event: WordEvent | null}) {
             className="gs-confbar-fill"
             style={{width: `${Math.min(100, Math.max(0, r.confidence * 100))}%`}}
           />
-          <span className="gs-confbar-tick" style={{left: `${CONFIDENCE_BASELINE * 100}%`}} />
+          {typeof threshold === "number" ? (
+            <span
+              className="gs-confbar-tick"
+              style={{left: `${Math.min(100, Math.max(0, threshold * 100))}%`}}
+            />
+          ) : null}
         </span>
       </div>
     </section>
@@ -840,15 +847,17 @@ export function App() {
 
         {isQuestionnaire ? (
           <div className="gs-nav">
+            {/* 단어 구간이 열려 있는 동안에는 질문을 옮길 수 없다. */}
             <button
               className="gs-btn gs-btn-outline"
-              disabled={qi === 0}
+              disabled={qi === 0 || ss.segmentOpen}
               onClick={() => fire(prevQuestion({}, {timeout: RPC_TIMEOUT_MS}))}
             >
               이전 질문
             </button>
             <button
               className="gs-btn gs-btn-filled"
+              disabled={ss.segmentOpen}
               onClick={() => fire(nextQuestion({}, {timeout: RPC_TIMEOUT_MS}))}
             >
               다음 질문

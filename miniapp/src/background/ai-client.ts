@@ -140,8 +140,8 @@ export interface AiRecognitionResult {
 }
 
 /**
- * `result.recognition` 블록. 화면에도 LED 에도 쓰지 않는다 — 앱 동작은 이 값에
- * 의존하지 않고, 서버가 왜 그렇게 판정했는지 로그로 남기기 위한 것이다.
+ * `result.recognition` 블록. candidate 와 confidenceThreshold 는 화면 표시에
+ * 쓰고, 나머지는 서버가 왜 그렇게 판정했는지 로그로 남기기 위한 것이다.
  */
 export interface AiRecognitionDecision {
   /** 1위 후보. 서버가 문자열로 주지 않으면 null. */
@@ -151,6 +151,8 @@ export interface AiRecognitionDecision {
   margin: number | null
   /** 임계값을 넘겨 채택됐는지. */
   accepted: boolean | null
+  /** 서버의 채택 임계값. UI 가 확신도 막대의 기준선으로 그린다. */
+  confidenceThreshold: number | null
 }
 
 /**
@@ -804,7 +806,7 @@ export class AiClient {
               ` model_loaded=${String(model?.loaded)}`,
           )
         }
-        // 거절됐을 때 서버가 무엇을 1위로 봤는지 남긴다. 화면에도 LED 에도 쓰지 않는다.
+        // 거절됐을 때 서버가 무엇을 1위로 봤는지 남긴다.
         if (decision !== undefined) {
           console.log(
             `${this.tag} result.recognition candidate=${JSON.stringify(decision.candidate)}` +
@@ -851,6 +853,10 @@ export class AiClient {
                         typeof decision.confidence === "number" ? decision.confidence : null,
                       margin: typeof decision.margin === "number" ? decision.margin : null,
                       accepted: typeof decision.accepted === "boolean" ? decision.accepted : null,
+                      confidenceThreshold:
+                        typeof decision.confidence_threshold === "number"
+                          ? decision.confidence_threshold
+                          : null,
                     },
             })
           } catch (err) {

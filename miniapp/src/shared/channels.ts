@@ -157,6 +157,10 @@ export interface Channels {
     spanMs?: number
     /** 결과 생성 시점의 모델 로드 여부. false 면 confidence 는 의미가 없다. */
     modelLoaded?: boolean
+    /** 서버의 채택 임계값. 확신도 막대의 기준선이다. 안 실려 오면 null. */
+    confidenceThreshold?: number | null
+    /** 서버가 1위로 본 후보. 확신 부족 카드에 보여 준다. */
+    candidate?: string | null
   }
 
   "glasses:state": {
