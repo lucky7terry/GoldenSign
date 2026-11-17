@@ -969,8 +969,10 @@ registerMiniapp((session) => {
         console.warn("[Word] resampled_on_time=false — 입력에 촬영 시각이 안 붙었다")
       }
       // 걷어내기 전에 구간이 시작된 자리를 붙잡아 둔다. 답 귀속의 근거다.
+      // 방송은 아래에서 단어 추가까지 끝난 뒤 한 번만 한다 — 중간에 단어 없는
+      // 기록이 나가면 화면이 그 낡은 상태에 머물 수 있다.
       const segment = wordSegment
-      clearWordSegment()
+      dropWordSegment()
       // 구간을 닫은 뒤에 얹는다. 순서가 반대면 flash 복귀가 아직 살아 있는
       // 구간을 보고 주황으로 돌아가 결과 색이 묻힌다.
       //
@@ -998,8 +1000,9 @@ registerMiniapp((session) => {
           confidence: next.confidence,
           windowIndex: next.windowIndex,
         })
-        publishSessionState()
       }
+      // 구간 닫힘과 단어 추가를 한 방송에 싣는다.
+      publishSessionState()
     }
     // 채널에 선언된 필드만 골라 담는다. recognition 블록은 UI 가 쓰는 두 값만
     // 꺼내 싣는다. text 는 null 그대로 올린다 — UI 가 null 과 빈 문자열을
@@ -1023,16 +1026,23 @@ registerMiniapp((session) => {
   // --- 단어 구간 --------------------------------------------------------------
 
   /**
-   * 구간 상태와 안전망 타이머를 함께 비운다. 닫는 경로 넷(result / 안전망 /
-   * 오류 / 스트림 종료)이 전부 여기를 지나므로 불도 여기서 되돌린다.
+   * 구간 상태와 안전망 타이머만 비우고 불을 되돌린다. 방송은 호출부 책임이다 —
+   * 결과 경로가 단어 추가까지 끝낸 뒤 한 번만 방송할 수 있게 분리해 두었다.
    */
-  function clearWordSegment(): void {
-    if (wordSegment === undefined) return
+  function dropWordSegment(): boolean {
+    if (wordSegment === undefined) return false
     if (wordSegment.timer !== undefined) clearTimeout(wordSegment.timer)
     wordSegment = undefined
     setWordLed(false)
-    // UI 의 진행 중 점선 칩이 여기서 꺼진다.
-    publishSessionState()
+    return true
+  }
+
+  /**
+   * 구간을 비우고 즉시 방송한다. 결과 경로를 제외한 닫는 경로(안전망 / 오류 /
+   * 스트림 종료)가 전부 여기를 지난다. UI 의 진행 중 점선 칩이 여기서 꺼진다.
+   */
+  function clearWordSegment(): void {
+    if (dropWordSegment()) publishSessionState()
   }
 
   /**
