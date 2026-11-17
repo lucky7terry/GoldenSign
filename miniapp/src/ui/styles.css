@@ -988,3 +988,60 @@ button {
   /* 값이 바뀔 때 숫자가 세로로 정렬된다 — fps, 배터리, window index. */
   font-variant-numeric: tabular-nums;
 }
+
+/* --------------------------------------------------------------------------
+   진단 — 최근 단어 구간 표
+   -------------------------------------------------------------------------- */
+
+.gs-wdiag-title {
+  margin: 0;
+  padding: 10px 14px 4px;
+  border-top: 1px solid var(--gs-border);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--gs-muted);
+}
+
+.gs-wdiag-empty {
+  margin: 0;
+  padding: 0 14px 12px;
+  font-size: 0.75rem;
+  color: var(--gs-subtle);
+}
+
+.gs-wdiag-wrap {
+  overflow-x: auto;
+  padding: 0 14px 12px;
+}
+
+.gs-wdiag {
+  border-collapse: collapse;
+  font-family: var(--gs-font-mono);
+  font-size: 0.625rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.gs-wdiag th,
+.gs-wdiag td {
+  padding: 3px 6px;
+  border-top: 1px solid var(--gs-border);
+  text-align: right;
+}
+
+.gs-wdiag th {
+  font-weight: 400;
+  color: var(--gs-muted);
+}
+
+.gs-wdiag-left {
+  text-align: left;
+}
+
+.gs-wdiag-msg {
+  max-width: 60vw;
+  text-align: left;
+  white-space: normal;
+  color: var(--gs-muted);
+}

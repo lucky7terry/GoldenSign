@@ -71,6 +71,32 @@ export interface SessionRecord {
 }
 
 /**
+ * 진단 패널의 "최근 단어 구간" 한 줄. 단어 result 와 구간을 닫는 서버
+ * 오류(화면 이탈·너무 짧음 등)에서 background 가 만든다.
+ */
+export interface WordDiagEntry {
+  /** 기록 시각(epoch ms). */
+  at: number
+  /** recognized / low_confidence / out_of_frame / too_short / 그 외 오류 코드. */
+  kind: string
+  candidate?: string | null
+  confidence?: number | null
+  margin?: number | null
+  confidenceThreshold?: number | null
+  marginThreshold?: number | null
+  frameCount?: number | null
+  uniformFrameCount?: number | null
+  targetFrames?: number | null
+  spanMs?: number | null
+  coverageFace?: number | null
+  coverageHand?: number | null
+  closeReason?: string | null
+  resampledOnTime?: boolean | null
+  /** 오류 원문. 비율을 message 에서 못 뽑았을 때 그대로 보여 준다. */
+  message?: string | null
+}
+
+/**
  * 갓 마운트된 UI 가 다음 브로드캐스트를 기다리지 않고 바로 그릴 수 있는 만큼의
  * 상태. background 의 단일 `patch()` 가 브로드캐스트와 같은 값을 여기에도
  * 기록하므로, 모든 필드는 해당 채널로 마지막에 보낸 값과 일치한다.
@@ -86,6 +112,8 @@ export interface Snapshot {
   error: Channels["error"] | null
   /** 화면·기록 상태. 한 덩어리로 다뤄 스냅샷 병합이 슬롯 하나로 끝난다. */
   session: Channels["session:state"]
+  /** 최근 단어 구간 진단. 최신이 앞이고 상한은 background 가 건다. */
+  wordDiags: WordDiagEntry[]
 }
 
 export interface Channels {
@@ -206,6 +234,9 @@ export interface Channels {
     /** 끝난 세션 목록. 최신순 최대 10건이며 영구 저장은 하지 않는다. */
     pastSessions: SessionRecord[]
   }
+
+  /** 단어 구간 진단 한 줄. 결과나 구간 오류가 올 때마다 나간다. */
+  "word:diag": WordDiagEntry
 
   // ---------------------------------------------------------------------
   // WebView → background (RPC)

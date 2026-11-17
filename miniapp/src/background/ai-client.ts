@@ -133,6 +133,14 @@ export interface AiRecognitionResult {
   spanMs?: number
   /** 시간축 리샘플이 제때 끝났는지. */
   resampledOnTime?: boolean
+  /** 30fps 격자로 편 뒤의 프레임 수. */
+  uniformFrameCount?: number
+  /** 모델 입력 길이. 서버의 WORD_TARGET_FRAMES 를 그대로 보여 준다. */
+  targetFrames?: number
+  /** 구간에서 얼굴이 보인 프레임 비율. */
+  coverageFace?: number
+  /** 구간에서 손이 보인 프레임 비율. */
+  coverageHand?: number
   /** 결과 생성 시점의 모델 로드 여부. */
   modelLoaded?: boolean
   /** 서버의 판정 근거. 거절됐을 때 무엇을 1위로 봤는지 로그로 남기는 용도다. */
@@ -153,6 +161,8 @@ export interface AiRecognitionDecision {
   accepted: boolean | null
   /** 서버의 채택 임계값. UI 가 확신도 막대의 기준선으로 그린다. */
   confidenceThreshold: number | null
+  /** 서버의 격차 임계값. 진단 표에만 쓴다. */
+  marginThreshold: number | null
 }
 
 /**
@@ -825,6 +835,7 @@ export class AiClient {
         // windowIndex 가 -1 이면 서버가 값을 주지 않았다는 뜻이다(60프레임 미만
         // 구간에서 null 로 온다). 소비자가 던지는 예외로 소켓이 죽으면 안 된다.
         if (this.onResult !== undefined) {
+          const coverage = asRecord(word?.coverage)
           const windowIndex = asRecord(r?.sequence)?.window_index
           // r 이 아니라 m 에서 읽는다 — 최상위 형제 필드다.
           const sequenceIndex = m?.sequence_index
@@ -843,6 +854,12 @@ export class AiClient {
               spanMs: typeof spanMs === "number" ? spanMs : undefined,
               resampledOnTime:
                 typeof word?.resampled_on_time === "boolean" ? word.resampled_on_time : undefined,
+              uniformFrameCount:
+                typeof word?.uniform_frame_count === "number" ? word.uniform_frame_count : undefined,
+              targetFrames:
+                typeof word?.target_frames === "number" ? word.target_frames : undefined,
+              coverageFace: typeof coverage?.face === "number" ? coverage.face : undefined,
+              coverageHand: typeof coverage?.hand === "number" ? coverage.hand : undefined,
               modelLoaded: typeof model?.loaded === "boolean" ? model.loaded : undefined,
               recognition:
                 decision === undefined
@@ -856,6 +873,10 @@ export class AiClient {
                       confidenceThreshold:
                         typeof decision.confidence_threshold === "number"
                           ? decision.confidence_threshold
+                          : null,
+                      marginThreshold:
+                        typeof decision.margin_threshold === "number"
+                          ? decision.margin_threshold
                           : null,
                     },
             })

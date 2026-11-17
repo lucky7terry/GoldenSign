@@ -529,6 +529,30 @@ const SUMMARY_IDLE_TIMEOUT_MS = 5 * 60_000
 /** 끝난 세션을 보관하는 상한. 넘으면 가장 오래된 것부터 버린다. */
 const MAX_PAST_SESSIONS = 10
 
+/** 진단 패널의 최근 단어 구간 보관 상한. */
+const MAX_WORD_DIAGS = 10
+
+/** 구간을 닫는 서버 오류. 이 코드들만 진단 표에 한 줄로 남긴다. */
+const WORD_DIAG_ERROR_CODES = new Set([
+  "word_too_short",
+  "word_out_of_frame",
+  "word_not_started",
+  "word_recognition_failed",
+])
+
+/**
+ * word_out_of_frame 오류 message 의 "NN%" 에서 얼굴·손 비율을 뽑는다.
+ * 형식: "Face visible in 37% of frames (at least 50% required) and hands in 10% (at least 20%)."
+ */
+function parseCoverageMessage(message: string): {face: number | null; hand: number | null} {
+  const face = /Face visible in (\d+)%/.exec(message)
+  const hand = /hands in (\d+)%/.exec(message)
+  return {
+    face: face === null ? null : Number(face[1]) / 100,
+    hand: hand === null ? null : Number(hand[1]) / 100,
+  }
+}
+
 // 모듈 레벨에 두어 Mentra 세션이 끝나도 JSContext 가 살아 있는 동안 유지된다.
 // 영구 저장은 하지 않는다 — 의료 정보 성격이라 폰에 남기지 않는다.
 /** 대기 화면에서 마지막으로 고른 진행 방식. */
@@ -671,6 +695,7 @@ registerMiniapp((session) => {
       session: null,
       pastSessions: savedPastSessions,
     },
+    wordDiags: [],
   }
 
   // --- LED ------------------------------------------------------------------
@@ -866,6 +891,12 @@ registerMiniapp((session) => {
       case "session:state":
         snapshot.session = next as Channels["session:state"]
         break
+      case "word:diag":
+        snapshot.wordDiags.unshift(next as Channels["word:diag"])
+        if (snapshot.wordDiags.length > MAX_WORD_DIAGS) {
+          snapshot.wordDiags.length = MAX_WORD_DIAGS
+        }
+        break
       default:
         break
     }
@@ -958,6 +989,20 @@ registerMiniapp((session) => {
     })
   }
 
+  /** 진단 표 한 줄을 보관·방송하고 같은 내용을 콘솔에도 남긴다. */
+  function pushWordDiag(entry: Channels["word:diag"]): void {
+    console.log(
+      `[Diag] ${entry.kind} cand=${String(entry.candidate)}` +
+        ` conf=${String(entry.confidence)}/${String(entry.confidenceThreshold)}` +
+        ` margin=${String(entry.margin)}/${String(entry.marginThreshold)}` +
+        ` frames=${String(entry.frameCount)}->${String(entry.uniformFrameCount)}` +
+        `/${String(entry.targetFrames)} span=${String(entry.spanMs)}ms` +
+        ` face=${String(entry.coverageFace)} hand=${String(entry.coverageHand)}` +
+        ` close=${String(entry.closeReason)} ontime=${String(entry.resampledOnTime)}`,
+    )
+    patch("word:diag", entry)
+  }
+
   /** AiClient 가 result 를 받을 때마다 부르는 곳. */
   function handleResult(next: AiRecognitionResult): void {
     // word 블록이 실려 있으면 구간 결과다. close_reason 이 비어도 구간은 닫아야 한다
@@ -1006,6 +1051,29 @@ registerMiniapp((session) => {
       }
       // 구간 닫힘과 단어 추가를 한 방송에 싣는다.
       publishSessionState()
+
+      pushWordDiag({
+        at: Date.now(),
+        kind: hasText
+          ? "recognized"
+          : next.modelLoaded === false
+            ? "model_unavailable"
+            : "low_confidence",
+        candidate: next.recognition?.candidate ?? null,
+        confidence: next.confidence,
+        margin: next.recognition?.margin ?? null,
+        confidenceThreshold: next.recognition?.confidenceThreshold ?? null,
+        marginThreshold: next.recognition?.marginThreshold ?? null,
+        frameCount: next.wordFrameCount ?? null,
+        uniformFrameCount: next.uniformFrameCount ?? null,
+        targetFrames: next.targetFrames ?? null,
+        spanMs: next.spanMs ?? null,
+        coverageFace: next.coverageFace ?? null,
+        coverageHand: next.coverageHand ?? null,
+        closeReason: next.closeReason ?? null,
+        resampledOnTime: next.resampledOnTime ?? null,
+        message: null,
+      })
     }
     // 채널에 선언된 필드만 골라 담는다. recognition 블록은 UI 가 쓰는 두 값만
     // 꺼내 싣는다. text 는 null 그대로 올린다 — UI 가 null 과 빈 문자열을
@@ -1228,6 +1296,25 @@ registerMiniapp((session) => {
     // 어느 거절이 소리를 냈는지 [TTS] 로그에서 바로 읽힌다.
     if (announcement !== undefined)
       speakSafe(session.speaker, announcement, err.code, reportTts)
+
+    if (WORD_DIAG_ERROR_CODES.has(err.code)) {
+      const coverage =
+        err.code === "word_out_of_frame"
+          ? parseCoverageMessage(err.message)
+          : {face: null, hand: null}
+      pushWordDiag({
+        at: Date.now(),
+        kind:
+          err.code === "word_too_short"
+            ? "too_short"
+            : err.code === "word_out_of_frame"
+              ? "out_of_frame"
+              : err.code,
+        coverageFace: coverage.face,
+        coverageHand: coverage.hand,
+        message: err.message,
+      })
+    }
 
     patch("error", {code: err.code, message: err.message, retryable: err.retryable})
   }

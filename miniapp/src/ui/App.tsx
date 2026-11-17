@@ -13,9 +13,9 @@
  * 따라잡을 방법이 없다.
  */
 
-import {useEffect, useState} from "react"
+import {Fragment, useEffect, useState} from "react"
 import {MiniappHeader, useRpc, useSafeArea} from "@mentra/miniapp/ui"
-import type {AnswerWord, Channels, SessionRecord, Snapshot} from "../shared/channels"
+import type {AnswerWord, Channels, SessionRecord, Snapshot, WordDiagEntry} from "../shared/channels"
 import {QUESTIONS, QUESTION_COUNT} from "../shared/questions"
 import {buildCandidates} from "../shared/sentence"
 import {START_ANNOUNCEMENT, FRAMING_ANNOUNCEMENT} from "../background/tts"
@@ -58,6 +58,7 @@ const EMPTY_SNAPSHOT: Snapshot = {
     session: null,
     pastSessions: [],
   },
+  wordDiags: [],
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +104,15 @@ function fmtStartTime(ts: number, now: number): string {
 
 function durationOf(record: SessionRecord): number {
   return (record.endedAt ?? record.startedAt) - record.startedAt
+}
+
+/**
+ * 스냅샷과 live 의 진단 줄을 합친다. live 가 더 새로우므로 앞에 두고,
+ * 같은 at 은 live 가 이긴다.
+ */
+function mergeWordDiags(history: WordDiagEntry[], live: WordDiagEntry[]): WordDiagEntry[] {
+  const liveAts = new Set(live.map((e) => e.at))
+  return [...live, ...history.filter((e) => !liveAts.has(e.at))].slice(0, 10)
 }
 
 function wordCountOf(record: SessionRecord): number {
@@ -492,6 +502,94 @@ function SummaryQuestionCard({record, index}: {record: SessionRecord; index: num
   )
 }
 
+const DIAG_KIND_LABEL: Record<string, string> = {
+  recognized: "인식",
+  low_confidence: "확신 부족",
+  out_of_frame: "화면 이탈",
+  too_short: "너무 짧음",
+  model_unavailable: "모델 미연결",
+}
+
+function fmtDiagTime(at: number): string {
+  const d = new Date(at)
+  const pad = (v: number) => String(v).padStart(2, "0")
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+function fmtDiagNum(value: number | null | undefined, digits = 2): string {
+  return typeof value === "number" ? value.toFixed(digits) : "—"
+}
+
+function fmtDiagPct(value: number | null | undefined): string {
+  return typeof value === "number" ? `${Math.round(value * 100)}%` : "—"
+}
+
+/** 최근 단어 구간 표. 가로로 길어 스크롤 컨테이너 안에 그린다. */
+function WordDiagTable({entries}: {entries: WordDiagEntry[]}) {
+  if (entries.length === 0) {
+    return <p className="gs-wdiag-empty">아직 단어 구간이 없습니다.</p>
+  }
+  return (
+    <div className="gs-wdiag-wrap">
+      <table className="gs-wdiag">
+        <thead>
+          <tr>
+            <th>시각</th>
+            <th>종류</th>
+            <th>후보</th>
+            <th>conf</th>
+            <th>기준</th>
+            <th>margin</th>
+            <th>기준</th>
+            <th>fr</th>
+            <th>uni</th>
+            <th>tgt</th>
+            <th>span</th>
+            <th>얼굴</th>
+            <th>손</th>
+            <th>close</th>
+            <th>ontime</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((e) => (
+            <Fragment key={e.at}>
+              <tr>
+                <td className="gs-wdiag-left">{fmtDiagTime(e.at)}</td>
+                <td className="gs-wdiag-left">{DIAG_KIND_LABEL[e.kind] ?? e.kind}</td>
+                <td className="gs-wdiag-left">{e.candidate ?? "—"}</td>
+                <td>{fmtDiagNum(e.confidence)}</td>
+                <td>{fmtDiagNum(e.confidenceThreshold)}</td>
+                <td>{fmtDiagNum(e.margin)}</td>
+                <td>{fmtDiagNum(e.marginThreshold)}</td>
+                <td>{e.frameCount ?? "—"}</td>
+                <td>{e.uniformFrameCount ?? "—"}</td>
+                <td>{e.targetFrames ?? "—"}</td>
+                <td>{typeof e.spanMs === "number" ? Math.round(e.spanMs) : "—"}</td>
+                <td>{fmtDiagPct(e.coverageFace)}</td>
+                <td>{fmtDiagPct(e.coverageHand)}</td>
+                <td className="gs-wdiag-left">{e.closeReason ?? "—"}</td>
+                <td>{fmt(e.resampledOnTime)}</td>
+              </tr>
+              {typeof e.message === "string" &&
+              e.message !== "" &&
+              e.coverageFace === null &&
+              e.kind !== "recognized" &&
+              e.kind !== "low_confidence" ? (
+                <tr>
+                  <td className="gs-wdiag-msg" colSpan={15}>
+                    {e.message}
+                  </td>
+                </tr>
+              ) : null}
+            </Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 function DiagnosticsPanel({snap}: {snap: Snapshot}) {
   const latest = snap.results[snap.results.length - 1]
   const d = snap.diagnostics
@@ -581,6 +679,9 @@ function DiagnosticsPanel({snap}: {snap: Snapshot}) {
           <dd className="gs-mono">{fmt(snap.glasses.charging)}</dd>
         </div>
       </dl>
+
+      <p className="gs-wdiag-title">최근 단어 구간</p>
+      <WordDiagTable entries={snap.wordDiags} />
     </details>
   )
 }
@@ -674,6 +775,10 @@ export function App() {
         seen.add("session")
         setSnap((s) => ({...s, session}))
       }),
+      mentra.on("word:diag", (entry) => {
+        seen.add("wordDiags")
+        setSnap((s) => ({...s, wordDiags: [entry, ...s.wordDiags].slice(0, 10)}))
+      }),
     ]
 
     // 부트스트랩에서 반드시 한 번 불러야 한다. SDK 가 멱등이라고 명시한다.
@@ -696,6 +801,9 @@ export function App() {
           // 스냅샷에는 담기지만 화면 표시는 아직 붙이지 않았다.
           error: seen.has("error") ? s.error : snapshot.error,
           session: seen.has("session") ? s.session : snapshot.session,
+          wordDiags: seen.has("wordDiags")
+            ? mergeWordDiags(snapshot.wordDiags, s.wordDiags)
+            : snapshot.wordDiags,
         }))
         // 결과 카드도 히스토리에서 복구한다. 방송이 이미 채웠으면 그쪽이 더 새롭다.
         setWordEvent((prev) => {
