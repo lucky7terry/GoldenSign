@@ -35,6 +35,41 @@
 
 import type {Rpc} from "@mentra/miniapp/ui"
 
+/** 대기 화면에서 고르는 진행 방식. 마지막 선택은 background 가 메모리로만 유지한다. */
+export type Mode = "questionnaire" | "free"
+
+/** 스트림 상태와 별개의 화면 상태. 전이 규칙은 background 가 소유한다. */
+export type Screen = "idle" | "active" | "summary"
+
+/**
+ * 답으로 모인 단어 한 개. `id` 는 background 가 붙이는 증가 번호다 —
+ * windowIndex 는 -1 센티널이 있어 식별자로 쓸 수 없다.
+ */
+export interface AnswerWord {
+  id: number
+  text: string
+  confidence: number
+  windowIndex: number
+}
+
+/** 질문 하나의 답. `adopted` 는 문장 후보에서 채택한 문장이다(없으면 null). */
+export interface SessionQuestion {
+  words: AnswerWord[]
+  adopted?: string | null
+}
+
+/**
+ * 기록 세션 한 건. 경계는 스트림이 아니라 "모드 시작~종료"다 — 요약에서 자유
+ * 모드로 이어 가면 스트림은 그대로여도 세션은 새로 시작하고, 재연결로 서버
+ * session_id 가 바뀌어도 세션은 유지된다. 자유 모드는 questions[0] 하나만 쓴다.
+ */
+export interface SessionRecord {
+  mode: Mode
+  startedAt: number
+  endedAt?: number | null
+  questions: SessionQuestion[]
+}
+
 /**
  * 갓 마운트된 UI 가 다음 브로드캐스트를 기다리지 않고 바로 그릴 수 있는 만큼의
  * 상태. background 의 단일 `patch()` 가 브로드캐스트와 같은 값을 여기에도
@@ -49,6 +84,8 @@ export interface Snapshot {
   results: Channels["recognition:result"][]
   /** 마지막으로 받은 에러. 아직 없으면 null. */
   error: Channels["error"] | null
+  /** 화면·기록 상태. 한 덩어리로 다뤄 스냅샷 병합이 슬롯 하나로 끝난다. */
+  session: Channels["session:state"]
 }
 
 export interface Channels {
@@ -149,6 +186,23 @@ export interface Channels {
     status?: string | null
   }
 
+  /**
+   * 화면·기록 상태 한 덩어리. 모드 선택, 화면 전이, 단어 추가·삭제, 구간
+   * 열림/닫힘이 전부 이 채널 하나로 방송된다.
+   */
+  "session:state": {
+    mode: Mode
+    screen: Screen
+    /** 문진 모드의 현재 질문(0~3). 자유 모드에서는 늘 0 이다. */
+    questionIndex: number
+    /** 단어 구간이 열려 있는지. UI 가 진행 중 점선 칩을 그리는 근거다. */
+    segmentOpen: boolean
+    /** 진행 중인 기록 세션. 없으면 null. */
+    session: SessionRecord | null
+    /** 직전 세션 1건. 영구 저장은 하지 않는다. */
+    lastSession: SessionRecord | null
+  }
+
   // ---------------------------------------------------------------------
   // WebView → background (RPC)
   // ---------------------------------------------------------------------
@@ -158,6 +212,30 @@ export interface Channels {
    * 타입이 `{}` 이고, 호출부는 `mentra.request("getSnapshot", {})` 로 쓴다.
    */
   "getSnapshot": Rpc<{}, Snapshot>
+
+  /** 대기 화면의 진행 방식 선택. idle 화면에서만 의미가 있다. */
+  "setMode": Rpc<{mode: Mode}, {}>
+
+  /** 다음 질문으로. 마지막 질문에서 부르면 summary 로 넘어간다(스트림 유지). */
+  "nextQuestion": Rpc<{}, {}>
+
+  /** 이전 질문으로. 기존 답은 그대로 두고 이어서 추가한다. */
+  "prevQuestion": Rpc<{}, {}>
+
+  /** 답 단어 삭제. id 는 AnswerWord.id 다. */
+  "removeWord": Rpc<{wordId: number}, {}>
+
+  /** 문장 후보 채택. 후보는 background 가 buildCandidates 로 다시 만들어 찾는다. */
+  "adoptCandidate": Rpc<{questionIndex: number; candidateIndex: number}, {}>
+
+  /** 요약에서 새 자유 세션으로 이어 간다. 스트림이 죽어 있으면 다시 시작한다. */
+  "continueFree": Rpc<{}, {}>
+
+  /** 요약에서 대기 화면으로. 스트림이 살아 있으면 종료한다. */
+  "goHome": Rpc<{}, {}>
+
+  /** 문장 후보의 듣기 버튼. 넘긴 문장을 안경 스피커로 읽는다. */
+  "speakText": Rpc<{text: string}, {}>
 }
 
 declare global {

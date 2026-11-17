@@ -43,6 +43,14 @@ const EMPTY_SNAPSHOT: Snapshot = {
   },
   results: [],
   error: null,
+  session: {
+    mode: "questionnaire",
+    screen: "idle",
+    questionIndex: 0,
+    segmentOpen: false,
+    session: null,
+    lastSession: null,
+  },
 }
 
 // ---------------------------------------------------------------------------
@@ -419,6 +427,10 @@ export function App() {
         seen.add("error")
         setSnap((s) => ({...s, error: e}))
       }),
+      mentra.on("session:state", (session) => {
+        seen.add("session")
+        setSnap((s) => ({...s, session}))
+      }),
     ]
 
     // 부트스트랩에서 반드시 한 번 불러야 한다. SDK 가 멱등이라고 명시한다.
@@ -440,6 +452,7 @@ export function App() {
           // 다른 슬롯과 같은 규칙이다. 방송으로 이미 받았으면 그쪽이 더 새롭다.
           // 스냅샷에는 담기지만 화면 표시는 아직 붙이지 않았다.
           error: seen.has("error") ? s.error : snapshot.error,
+          session: seen.has("session") ? s.session : snapshot.session,
         }))
         setPhase({kind: "ready"})
       })

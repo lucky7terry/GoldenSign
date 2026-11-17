@@ -627,6 +627,14 @@ registerMiniapp((session) => {
     },
     results: [],
     error: null,
+    session: {
+      mode: "questionnaire",
+      screen: "idle",
+      questionIndex: 0,
+      segmentOpen: false,
+      session: null,
+      lastSession: null,
+    },
   }
 
   // --- LED ------------------------------------------------------------------
