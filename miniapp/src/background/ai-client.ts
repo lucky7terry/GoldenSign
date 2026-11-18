@@ -112,6 +112,8 @@ function logFetchError(tag: string, label: string, err: unknown): void {
  * 없으니 헷갈리지 말 것.
  */
 export interface AiRecognitionResult {
+  /** 서버가 echo 한 id. 클라이언트 종료면 word_end, 자동 종료면 word_start 의 것이다. */
+  clientMessageId: string | null
   /** 모델 연결 전에는 서버가 null 을 보낸다. "" 로 뭉개면 빈 결과와 구분이 안 된다. */
   text: string | null
   confidence: number
@@ -133,6 +135,14 @@ export interface AiRecognitionResult {
   spanMs?: number
   /** 시간축 리샘플이 제때 끝났는지. */
   resampledOnTime?: boolean
+  /** 30fps 격자로 편 뒤의 프레임 수. */
+  uniformFrameCount?: number
+  /** 모델 입력 길이. 서버의 WORD_TARGET_FRAMES 를 그대로 보여 준다. */
+  targetFrames?: number
+  /** 구간에서 얼굴이 보인 프레임 비율. */
+  coverageFace?: number
+  /** 구간에서 손이 보인 프레임 비율. */
+  coverageHand?: number
   /** 결과 생성 시점의 모델 로드 여부. */
   modelLoaded?: boolean
   /** 서버의 판정 근거. 거절됐을 때 무엇을 1위로 봤는지 로그로 남기는 용도다. */
@@ -140,8 +150,8 @@ export interface AiRecognitionResult {
 }
 
 /**
- * `result.recognition` 블록. 화면에도 LED 에도 쓰지 않는다 — 앱 동작은 이 값에
- * 의존하지 않고, 서버가 왜 그렇게 판정했는지 로그로 남기기 위한 것이다.
+ * `result.recognition` 블록. candidate 와 confidenceThreshold 는 화면 표시에
+ * 쓰고, 나머지는 서버가 왜 그렇게 판정했는지 로그로 남기기 위한 것이다.
  */
 export interface AiRecognitionDecision {
   /** 1위 후보. 서버가 문자열로 주지 않으면 null. */
@@ -151,6 +161,10 @@ export interface AiRecognitionDecision {
   margin: number | null
   /** 임계값을 넘겨 채택됐는지. */
   accepted: boolean | null
+  /** 서버의 채택 임계값. UI 가 확신도 막대의 기준선으로 그린다. */
+  confidenceThreshold: number | null
+  /** 서버의 격차 임계값. 진단 표에만 쓴다. */
+  marginThreshold: number | null
 }
 
 /**
@@ -182,6 +196,8 @@ export interface AiServerError {
   message: string
   /** 서버가 boolean 으로 주지 않으면 null. */
   retryable: boolean | null
+  /** 서버가 echo 한 id. 단어 오류의 구간 대조에 쓴다. */
+  clientMessageId: string | null
 }
 
 /** `client_log` 의 level. 서버가 그대로 로그 레벨로 쓴다. */
@@ -804,7 +820,7 @@ export class AiClient {
               ` model_loaded=${String(model?.loaded)}`,
           )
         }
-        // 거절됐을 때 서버가 무엇을 1위로 봤는지 남긴다. 화면에도 LED 에도 쓰지 않는다.
+        // 거절됐을 때 서버가 무엇을 1위로 봤는지 남긴다.
         if (decision !== undefined) {
           console.log(
             `${this.tag} result.recognition candidate=${JSON.stringify(decision.candidate)}` +
@@ -823,12 +839,15 @@ export class AiClient {
         // windowIndex 가 -1 이면 서버가 값을 주지 않았다는 뜻이다(60프레임 미만
         // 구간에서 null 로 온다). 소비자가 던지는 예외로 소켓이 죽으면 안 된다.
         if (this.onResult !== undefined) {
+          const coverage = asRecord(word?.coverage)
           const windowIndex = asRecord(r?.sequence)?.window_index
           // r 이 아니라 m 에서 읽는다 — 최상위 형제 필드다.
           const sequenceIndex = m?.sequence_index
           const spanMs = word?.span_ms
           try {
             this.onResult({
+              clientMessageId:
+                typeof m?.client_message_id === "string" ? m.client_message_id : null,
               // 서버가 null 을 보내는 것과 빈 문자열을 보내는 것은 다른 뜻이다.
               text: typeof r?.text === "string" ? r.text : null,
               confidence: typeof r?.confidence === "number" ? r.confidence : 0,
@@ -841,6 +860,12 @@ export class AiClient {
               spanMs: typeof spanMs === "number" ? spanMs : undefined,
               resampledOnTime:
                 typeof word?.resampled_on_time === "boolean" ? word.resampled_on_time : undefined,
+              uniformFrameCount:
+                typeof word?.uniform_frame_count === "number" ? word.uniform_frame_count : undefined,
+              targetFrames:
+                typeof word?.target_frames === "number" ? word.target_frames : undefined,
+              coverageFace: typeof coverage?.face === "number" ? coverage.face : undefined,
+              coverageHand: typeof coverage?.hand === "number" ? coverage.hand : undefined,
               modelLoaded: typeof model?.loaded === "boolean" ? model.loaded : undefined,
               recognition:
                 decision === undefined
@@ -851,6 +876,14 @@ export class AiClient {
                         typeof decision.confidence === "number" ? decision.confidence : null,
                       margin: typeof decision.margin === "number" ? decision.margin : null,
                       accepted: typeof decision.accepted === "boolean" ? decision.accepted : null,
+                      confidenceThreshold:
+                        typeof decision.confidence_threshold === "number"
+                          ? decision.confidence_threshold
+                          : null,
+                      marginThreshold:
+                        typeof decision.margin_threshold === "number"
+                          ? decision.margin_threshold
+                          : null,
                     },
             })
           } catch (err) {
@@ -886,6 +919,8 @@ export class AiClient {
               code: typeof code === "string" ? code : "unknown",
               message: typeof message === "string" ? message : "",
               retryable: typeof retryable === "boolean" ? retryable : null,
+              clientMessageId:
+                typeof m?.client_message_id === "string" ? m.client_message_id : null,
             })
           } catch (err) {
             console.error(`${this.tag} onError 콜백 예외:`, err)
@@ -1048,13 +1083,14 @@ export class AiClient {
    *
    * stream_start 와 달리 중복 가드가 없다 — 단어는 한 세션에서 여러 번 반복된다.
    * 이미 열린 구간이 있으면 서버가 word_already_started 오류로 거절한다.
-   * 동기 함수라 어느 콜백에서 불러도 안전하다. 아무것도 안 보냈으면 false.
+   * 동기 함수라 어느 콜백에서 불러도 안전하다. 보냈으면 client_message_id 를
+   * 돌려준다 — 호출자가 결과·오류를 이 구간과 대조하는 근거다.
    */
-  sendWordStart(): boolean {
+  sendWordStart(): string | undefined {
     const sessionId = this.sessionId
     if (sessionId === undefined) {
       console.error(`${this.tag} word_start 전송 불가 — AI session_id 없음`)
-      return false
+      return undefined
     }
 
     const clientMessageId = `word-start-${Date.now()}`
@@ -1068,11 +1104,11 @@ export class AiClient {
       },
       "word_start",
     )
-    if (!sent) return false
+    if (!sent) return undefined
 
     this.pendingAcks.set(clientMessageId, {label: "word_start", sentAt: Date.now()})
     console.log(`${this.tag} word_start 전송 시각=`, new Date().toISOString())
-    return sent
+    return clientMessageId
   }
 
   /**
@@ -1081,11 +1117,11 @@ export class AiClient {
    * 이미 서버가 max_seconds 로 자동 종료했다면 오류가 아니라
    * status="word_already_closed" 인 ack 이 온다.
    */
-  sendWordEnd(): boolean {
+  sendWordEnd(): string | undefined {
     const sessionId = this.sessionId
     if (sessionId === undefined) {
       console.error(`${this.tag} word_end 전송 불가 — AI session_id 없음`)
-      return false
+      return undefined
     }
 
     const clientMessageId = `word-end-${Date.now()}`
@@ -1098,11 +1134,11 @@ export class AiClient {
       },
       "word_end",
     )
-    if (!sent) return false
+    if (!sent) return undefined
 
     this.pendingAcks.set(clientMessageId, {label: "word_end", sentAt: Date.now()})
     console.log(`${this.tag} word_end 전송 시각=`, new Date().toISOString())
-    return sent
+    return clientMessageId
   }
 
   // -------------------------------------------------------------------------

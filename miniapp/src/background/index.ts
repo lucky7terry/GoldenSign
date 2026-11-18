@@ -53,7 +53,9 @@ import {
   type UIModule,
   type WifiData,
 } from "@mentra/miniapp/background"
-import type {Channels, Snapshot} from "../shared/channels"
+import type {Channels, Mode, Screen, SessionRecord, Snapshot} from "../shared/channels"
+import {QUESTION_COUNT} from "../shared/questions"
+import {buildCandidates} from "../shared/sentence"
 import {
   AiClient,
   probeRuntime,
@@ -70,6 +72,7 @@ import {
   START_ANNOUNCEMENT,
   RETRY_ANNOUNCEMENT,
   FRAMING_ANNOUNCEMENT,
+  STREAM_LOST_ANNOUNCEMENT,
   type TtsReporter,
 } from "./tts"
 
@@ -241,6 +244,7 @@ function logStreamResult(result: StreamResult): void {
 }
 
 /** 요청 인코딩 설정. 시작 시 resolvedConfig.video.fps 와 대조한다. */
+// 끊김 비교 실험의 대안 값은 fps 15(더 낮추면 960x540 15fps)다.
 const VIDEO_CONFIG = {width: 1280, height: 720, fps: 30} as const
 
 /** 요청 fps. 요청값과 협상값을 나란히 찍기 위해 따로 둔다. */
@@ -521,6 +525,51 @@ function isLedTimeoutError(err: unknown): boolean {
   return text.includes("timeout") || text.includes("timed out") || text.includes("etimedout")
 }
 
+/** 요약 화면에서 입력이 없을 때 스트림만 자동 종료하기까지의 시간. */
+const SUMMARY_IDLE_TIMEOUT_MS = 5 * 60_000
+
+/** 끝난 세션을 보관하는 상한. 넘으면 가장 오래된 것부터 버린다. */
+const MAX_PAST_SESSIONS = 10
+
+/** 진단 패널의 최근 단어 구간 보관 상한. */
+const MAX_WORD_DIAGS = 10
+
+/** 구간을 닫는 서버 오류. 이 코드들만 진단 표에 한 줄로 남긴다. */
+const WORD_DIAG_ERROR_CODES = new Set([
+  "word_too_short",
+  "word_out_of_frame",
+  "word_not_started",
+  "word_recognition_failed",
+])
+
+/**
+ * word_out_of_frame 오류 message 의 "NN%" 에서 얼굴·손 비율을 뽑는다.
+ * 형식: "Face visible in 37% of frames (at least 50% required) and hands in 10% (at least 20%)."
+ */
+function parseCoverageMessage(message: string): {face: number | null; hand: number | null} {
+  const face = /Face visible in (\d+)%/.exec(message)
+  const hand = /hands in (\d+)%/.exec(message)
+  return {
+    face: face === null ? null : Number(face[1]) / 100,
+    hand: hand === null ? null : Number(hand[1]) / 100,
+  }
+}
+
+/** word_too_short 오류 message("has N frames")에서 프레임 수를 뽑는다. */
+function parseTooShortFrames(message: string): number | null {
+  const m = /has (\d+) frames/.exec(message)
+  return m === null ? null : Number(m[1])
+}
+
+// 모듈 레벨에 두어 Mentra 세션이 끝나도 JSContext 가 살아 있는 동안 유지된다.
+// 영구 저장은 하지 않는다 — 의료 정보 성격이라 폰에 남기지 않는다.
+/** 대기 화면에서 마지막으로 고른 진행 방식. */
+let savedMode: Mode = "questionnaire"
+/** 끝난 세션 목록. 최신이 앞이다. */
+let savedPastSessions: SessionRecord[] = []
+/** 답 단어 id 발급기. windowIndex 는 -1 센티널이 있어 식별자로 못 쓴다. */
+let nextWordId = 1
+
 registerMiniapp((session) => {
   /**
    * 모든 구독의 해제 함수가 여기 모이고 "disconnect" 에서 한 번에 비운다.
@@ -552,17 +601,41 @@ registerMiniapp((session) => {
   let startInFlight = false
   /** 시작 안내를 이미 읽었는지 확인한다. */
   let startAnnounced = false
+  /** 서버가 stream_unavailable 로 스트림을 놓은 상태. 길게 누르면 재시작한다. */
+  let streamLost = false
   /**
    * 열려 있는 단어 구간. 닫혀 있으면 undefined 다. `phase` 가 "closing" 인 구간은
    * word_end 를 보내고 result 를 기다리는 중이다 — 진짜 닫힘은 result 도착이다.
+   * questionIndex 와 session 은 구간을 시작한 자리다 — 결과는 그 질문에 넣고,
+   * 구간이 이미 걷혔거나 세션이 바뀌었으면 버린다. startId·endId 는 서버가
+   * 결과·오류에 echo 하는 client_message_id 와 대조하는 근거다.
    */
   let wordSegment:
-    | {phase: "open" | "closing"; startedAt: number; timer: ReturnType<typeof setTimeout> | undefined}
+    | {
+        phase: "open" | "closing"
+        startedAt: number
+        timer: ReturnType<typeof setTimeout> | undefined
+        questionIndex: number
+        session: SessionRecord | undefined
+        startId: string | null
+        endId: string | null
+      }
     | undefined
 
   // "ready" 안에서 만든다. session.userId 는 CONNECT_ACK 이후에야 채워지기
   // 때문이다. 런타임 확인에 실패하면 undefined 로 남는다.
   let ai: AiClient | undefined
+
+  // --- 화면·기록 세션 상태 ---------------------------------------------------
+  // 스트림 상태(appState)와 별개의 축이다. 오류·재연결은 화면과 기록을 건드리지
+  // 않고, 기록 세션의 경계는 스트림이 아니라 "모드 시작~종료"다.
+  let screen: Screen = "idle"
+  /** 문진 모드의 현재 질문(0~3). 자유 모드에서는 늘 0 이다. */
+  let questionIndex = 0
+  /** 진행 중인 기록 세션. 없으면 undefined. */
+  let currentSession: SessionRecord | undefined
+  /** 요약 화면의 무입력 자동 종료 타이머. */
+  let summaryTimer: ReturnType<typeof setTimeout> | undefined
 
   // --- 서버 보고 -------------------------------------------------------------
 
@@ -614,19 +687,32 @@ registerMiniapp((session) => {
    */
   const snapshot: Snapshot = {
     ai: {state: "disconnected", sessionId: null, model: null, message: null},
-    stream: {state: "idle", streamId: null, message: null},
+    stream: {state: "idle", streamId: null, message: null, lost: false},
     glasses: {wifiConnected: null, ssid: null, battery: null, charging: null},
     diagnostics: {
       requestedFps: null,
       resolvedFps: null,
       processedFps: null,
       transport: null,
+      resolvedSize: null,
       webrtcHost: null,
       mode: null,
       status: null,
     },
     results: [],
     error: null,
+    session: {
+      mode: savedMode,
+      screen: "idle",
+      questionIndex: 0,
+      segmentOpen: false,
+      segmentOpenedAt: null,
+      session: null,
+      pastSessions: savedPastSessions,
+    },
+    wordDiags: [],
+    progress: null,
+    wordCard: null,
   }
 
   // --- LED ------------------------------------------------------------------
@@ -819,6 +905,21 @@ registerMiniapp((session) => {
         // 에러를 볼 수 있어야 한다.
         snapshot.error = next as Channels["error"]
         break
+      case "session:state":
+        snapshot.session = next as Channels["session:state"]
+        break
+      case "word:diag":
+        snapshot.wordDiags.unshift(next as Channels["word:diag"])
+        if (snapshot.wordDiags.length > MAX_WORD_DIAGS) {
+          snapshot.wordDiags.length = MAX_WORD_DIAGS
+        }
+        break
+      case "word:progress":
+        snapshot.progress = next as Channels["word:progress"]
+        break
+      case "word:card":
+        snapshot.wordCard = next as Channels["word:card"]
+        break
       default:
         break
     }
@@ -827,7 +928,12 @@ registerMiniapp((session) => {
 
   /** 현재 시점의 appState 와 activeStream 짝을 그대로 방송한다. */
   function publishStreamState(message: string | null = null): void {
-    patch("stream:state", {state: appState, streamId: activeStream?.streamId ?? null, message})
+    patch("stream:state", {
+      state: appState,
+      streamId: activeStream?.streamId ?? null,
+      message,
+      lost: streamLost,
+    })
   }
 
   /** 현재 시점의 AI 단계와 세션 식별 정보를 방송한다. */
@@ -900,7 +1006,14 @@ registerMiniapp((session) => {
   /**
    * word_progress 한 건마다 부른다. fps 는 서버가 이미 계산해서 보낸다.
    */
-  function trackProcessedFps(progress: AiWordProgress): void {
+  function trackWordProgress(progress: AiWordProgress): void {
+    // 녹화 중 카드가 쓴다. 첫 건은 fps 가 null 이어도 프레임 수는 유효하다.
+    patch("word:progress", {
+      at: Date.now(),
+      frameCount: progress.frameCount,
+      processedFps: progress.processedFps,
+    })
+
     // 첫 건은 서버도 낼 근거가 없어 null 이다. 이전 값을 그대로 둔다.
     if (progress.processedFps === null) return
 
@@ -909,6 +1022,20 @@ registerMiniapp((session) => {
       // patch 는 진단 슬롯을 통째로 갈아 끼우므로 나머지 필드를 함께 실어야 한다.
       processedFps: progress.processedFps,
     })
+  }
+
+  /** 진단 표 한 줄을 보관·방송하고 같은 내용을 콘솔에도 남긴다. */
+  function pushWordDiag(entry: Channels["word:diag"]): void {
+    console.log(
+      `[Diag] ${entry.kind} cand=${String(entry.candidate)}` +
+        ` conf=${String(entry.confidence)}/${String(entry.confidenceThreshold)}` +
+        ` margin=${String(entry.margin)}/${String(entry.marginThreshold)}` +
+        ` frames=${String(entry.frameCount)}->${String(entry.uniformFrameCount)}` +
+        `/${String(entry.targetFrames)} span=${String(entry.spanMs)}ms` +
+        ` face=${String(entry.coverageFace)} hand=${String(entry.coverageHand)}` +
+        ` close=${String(entry.closeReason)} ontime=${String(entry.resampledOnTime)}`,
+    )
+    patch("word:diag", entry)
   }
 
   /** AiClient 가 result 를 받을 때마다 부르는 곳. */
@@ -924,7 +1051,34 @@ registerMiniapp((session) => {
       if (next.resampledOnTime === false) {
         console.warn("[Word] resampled_on_time=false — 입력에 촬영 시각이 안 붙었다")
       }
-      clearWordSegment()
+      const diagBase = {
+        at: Date.now(),
+        candidate: next.recognition?.candidate ?? null,
+        confidence: next.confidence,
+        margin: next.recognition?.margin ?? null,
+        confidenceThreshold: next.recognition?.confidenceThreshold ?? null,
+        marginThreshold: next.recognition?.marginThreshold ?? null,
+        frameCount: next.wordFrameCount ?? null,
+        uniformFrameCount: next.uniformFrameCount ?? null,
+        targetFrames: next.targetFrames ?? null,
+        spanMs: next.spanMs ?? null,
+        coverageFace: next.coverageFace ?? null,
+        coverageHand: next.coverageHand ?? null,
+        closeReason: next.closeReason ?? null,
+        resampledOnTime: next.resampledOnTime ?? null,
+        message: null,
+      }
+      // 이미 걷힌 구간의 늦은 결과는 지금 구간을 닫지 않고 기록만 남긴다.
+      if (!segmentMatches(next.clientMessageId)) {
+        console.warn(`[Word] 열린 구간의 결과가 아니다 — 버린다. id=${String(next.clientMessageId)}`)
+        pushWordDiag({...diagBase, kind: "stale_result"})
+        return
+      }
+      // 걷어내기 전에 구간이 시작된 자리를 붙잡아 둔다. 답 귀속의 근거다.
+      // 방송은 아래에서 단어 추가까지 끝난 뒤 한 번만 한다 — 중간에 단어 없는
+      // 기록이 나가면 화면이 그 낡은 상태에 머물 수 있다.
+      const segment = wordSegment
+      dropWordSegment()
       // 구간을 닫은 뒤에 얹는다. 순서가 반대면 flash 복귀가 아직 살아 있는
       // 구간을 보고 주황으로 돌아가 결과 색이 묻힌다.
       //
@@ -936,11 +1090,39 @@ registerMiniapp((session) => {
       if (next.text !== null && next.text !== "")
         speakSafe(session.speaker, next.text, "result", reportTts)
       else speakSafe(session.speaker, RETRY_ANNOUNCEMENT, "retry", reportTts)
+
+      // text 가 있을 때만, 구간을 시작한 질문의 답에 쌓는다. 구간이 이미
+      // 걷혔거나(안전망 뒤 늦은 결과) 세션이 바뀌었으면 버린다.
+      if (
+        hasText &&
+        screen === "active" &&
+        segment !== undefined &&
+        currentSession !== undefined &&
+        segment.session === currentSession
+      ) {
+        currentSession.questions[segment.questionIndex]?.words.push({
+          id: nextWordId++,
+          text: next.text ?? "",
+          confidence: next.confidence,
+          windowIndex: next.windowIndex,
+        })
+      }
+      // 구간 닫힘과 단어 추가를 한 방송에 싣는다.
+      publishSessionState()
+
+      pushWordDiag({
+        ...diagBase,
+        kind: hasText
+          ? "recognized"
+          : next.modelLoaded === false
+            ? "model_unavailable"
+            : "low_confidence",
+      })
     }
-    // 채널에 선언된 필드만 골라 담는다. next 를 통째로 넘기면 UI 가 쓰지 않기로
-    // 한 recognition(임계값 조정용)까지 스냅샷에 실려 간다. text 는 null 그대로
-    // 올린다 — UI 가 null 과 빈 문자열을 구분해 문구를 고른다.
-    publishResult({
+    // 채널에 선언된 필드만 골라 담는다. recognition 블록은 UI 가 쓰는 두 값만
+    // 꺼내 싣는다. text 는 null 그대로 올린다 — UI 가 null 과 빈 문자열을
+    // 구분해 문구를 고른다.
+    const published: Channels["recognition:result"] = {
       text: next.text,
       confidence: next.confidence,
       isFinal: next.isFinal,
@@ -951,20 +1133,45 @@ registerMiniapp((session) => {
       wordFrameCount: next.wordFrameCount,
       spanMs: next.spanMs,
       modelLoaded: next.modelLoaded,
-    })
+      confidenceThreshold: next.recognition?.confidenceThreshold ?? null,
+      candidate: next.recognition?.candidate ?? null,
+    }
+    publishResult(published)
+    // 카드는 구간 결과만 보여준다. 비우는 쪽은 질문 이동과 세션 전이다.
+    if (next.isWordResult) patch("word:card", {kind: "result", result: published})
   }
 
   // --- 단어 구간 --------------------------------------------------------------
 
   /**
-   * 구간 상태와 안전망 타이머를 함께 비운다. 닫는 경로 넷(result / 안전망 /
-   * 오류 / 스트림 종료)이 전부 여기를 지나므로 불도 여기서 되돌린다.
+   * 결과·오류의 client_message_id 가 지금 열린 구간의 것인지. 계약상 클라이언트
+   * 종료면 word_end, 서버 자동 종료면 word_start 의 id 가 온다. null 로 오면
+   * 구간을 특정할 수 없으므로 열린 구간의 것으로 간주한다.
    */
-  function clearWordSegment(): void {
-    if (wordSegment === undefined) return
+  function segmentMatches(id: string | null): boolean {
+    if (wordSegment === undefined) return false
+    if (id === null) return true
+    return id === wordSegment.startId || id === wordSegment.endId
+  }
+
+  /**
+   * 구간 상태와 안전망 타이머만 비우고 불을 되돌린다. 방송은 호출부 책임이다 —
+   * 결과 경로가 단어 추가까지 끝낸 뒤 한 번만 방송할 수 있게 분리해 두었다.
+   */
+  function dropWordSegment(): boolean {
+    if (wordSegment === undefined) return false
     if (wordSegment.timer !== undefined) clearTimeout(wordSegment.timer)
     wordSegment = undefined
     setWordLed(false)
+    return true
+  }
+
+  /**
+   * 구간을 비우고 즉시 방송한다. 결과 경로를 제외한 닫는 경로(안전망 / 오류 /
+   * 스트림 종료)가 전부 여기를 지난다. UI 의 진행 중 점선 칩이 여기서 꺼진다.
+   */
+  function clearWordSegment(): void {
+    if (dropWordSegment()) publishSessionState()
   }
 
   /**
@@ -983,16 +1190,26 @@ registerMiniapp((session) => {
 
     if (wordSegment === undefined) {
       // 전송에 실패했는데 열어 두면 서버는 구간을 모르는 채로 다음 누름이
-      // word_end 를 보낸다. true 를 받았을 때만 연다.
-      if (!client.sendWordStart()) {
+      // word_end 를 보낸다. id 를 받았을 때만 연다.
+      const startId = client.sendWordStart()
+      if (startId === undefined) {
         console.warn("[Word] word_start 전송 실패 — 구간을 열지 않는다")
         // 서버에는 아무것도 도착하지 않았으므로 "구간이 없다"로만 보인다.
         // 사용자가 버튼을 눌렀다는 사실은 앱만 안다.
         report("app_error", "warn", {where: "word_start_send"})
         return
       }
-      wordSegment = {phase: "open", startedAt: Date.now(), timer: undefined}
+      wordSegment = {
+        phase: "open",
+        startedAt: Date.now(),
+        timer: undefined,
+        questionIndex: currentSession?.mode === "questionnaire" ? questionIndex : 0,
+        session: currentSession,
+        startId,
+        endId: null,
+      }
       setWordLed(true)
+      publishSessionState()
       console.log("[Word] 구간 시작")
       return
     }
@@ -1004,11 +1221,13 @@ registerMiniapp((session) => {
 
     // 보낸 즉시 닫지 않는다. 진짜 닫힘은 result 도착이고, 실패하면 안전망
     // 타이머가 열린 상태를 걷어낸다.
-    if (!client.sendWordEnd()) {
+    const endId = client.sendWordEnd()
+    if (endId === undefined) {
       console.warn("[Word] word_end 전송 실패 — 안전망 타이머에 맡긴다")
       report("app_error", "warn", {where: "word_end_send"})
       return
     }
+    wordSegment.endId = endId
     wordSegment.phase = "closing"
     console.log(`[Word] 구간 종료 요청. 길이=${Date.now() - wordSegment.startedAt}ms`)
   }
@@ -1059,6 +1278,21 @@ registerMiniapp((session) => {
    * 서버에 맞춘 뒤, 나머지 code 와 똑같이 방송한다.
    */
   function handleAiError(err: AiServerError): void {
+    // 단어 구간 오류는 echo 된 id 로 지금 구간의 것인지 먼저 가린다. 아니면
+    // 지금 구간을 건드리지 않고 로그와 진단 표 기록만 남긴다.
+    if (
+      (err.code === "word_too_short" ||
+        err.code === "word_out_of_frame" ||
+        err.code === "word_recognition_failed") &&
+      !segmentMatches(err.clientMessageId)
+    ) {
+      console.warn(
+        `[Word] 열린 구간의 오류가 아니다 — 무시. code=${err.code} id=${String(err.clientMessageId)}`,
+      )
+      pushWordDiag({at: Date.now(), kind: "stale_error", message: `${err.code}: ${err.message}`})
+      return
+    }
+
     // 구간 오류는 스트림을 죽이지 않는다 — 다섯 다 setState("error") 를 부르지
     // 않는 이유다. 실패한 것은 구간 하나뿐이다.
     //
@@ -1084,6 +1318,7 @@ registerMiniapp((session) => {
         // 고쳐지지 않으므로, 재시도 안내 대신 무엇을 고쳐야 하는지 읽는다.
         console.warn(`[Word] 얼굴이나 손이 화면 밖입니다 — 구간을 닫습니다. ${err.message}`)
         clearWordSegment()
+        patch("word:card", {kind: "out_of_frame"})
         rejected = true
         announcement = FRAMING_ANNOUNCEMENT
         break
@@ -1101,10 +1336,21 @@ registerMiniapp((session) => {
         // 오지 않아 안전망은 폴백으로 건다.
         console.warn("[Word] 서버에 구간이 이미 열려 있습니다 — 앱 상태를 열림으로 맞춥니다")
         const startedAt = wordSegment?.startedAt ?? Date.now()
+        // 서버가 아는 구간은 우리가 연 그 구간이라 id 도 그대로 이어받는다.
+        const startId = wordSegment?.startId ?? null
         clearWordSegment()
-        wordSegment = {phase: "open", startedAt, timer: undefined}
+        wordSegment = {
+          phase: "open",
+          startedAt,
+          timer: undefined,
+          questionIndex: currentSession?.mode === "questionnaire" ? questionIndex : 0,
+          session: currentSession,
+          startId,
+          endId: null,
+        }
         // 서버 기준으로는 열린 구간이라 불도 열림으로 되돌린다.
         setWordLed(true)
+        publishSessionState()
         armWordTimer(WORD_MAX_SECONDS_FALLBACK)
         rejected = true
         break
@@ -1126,6 +1372,26 @@ registerMiniapp((session) => {
         // 도중에도 오므로 구간을 닫지 않는다 — 닫으면 단어가 통째로 날아간다.
         console.warn("[AI] 프레임 인식 실패 — 구간은 그대로 둔다")
         break
+
+      case "stream_unavailable":
+        // 서버가 WHEP 재연결을 소진하고 이 스트림 처리를 멈췄다. 세션과
+        // 화면은 그대로 두고 스트림만 오류로 내려 길게 눌러 재시작하게 한다.
+        console.warn("[Stream] 서버가 영상 스트림을 놓았다 — 정리 후 재시작 대기")
+        streamLost = true
+        clearWordSegment()
+        report("app_error", "error", {
+          where: "stream_unavailable",
+          stream_id: activeStream?.streamId ?? "",
+        })
+        // 요약에서는 길게 누르기가 재시작이 아니라 처음으로라 안내를 읽지 않는다.
+        if (screen !== "summary")
+          speakSafe(session.speaker, STREAM_LOST_ANNOUNCEMENT, "stream_lost", reportTts)
+        setState("error")
+        void cleanupStream("stream_unavailable", {notifyAi: false}).catch((cleanupErr) => {
+          console.error("[Stream] stream_unavailable 정리 실패 — 카메라가 잡혀있을 수 있다")
+          logRequestError("[Stream] stream_unavailable 정리", cleanupErr)
+        })
+        break
     }
 
     if (rejected) flashLed(REJECT_LED, FLASH_MS)
@@ -1134,13 +1400,269 @@ registerMiniapp((session) => {
     if (announcement !== undefined)
       speakSafe(session.speaker, announcement, err.code, reportTts)
 
+    if (WORD_DIAG_ERROR_CODES.has(err.code)) {
+      const coverage =
+        err.code === "word_out_of_frame"
+          ? parseCoverageMessage(err.message)
+          : {face: null, hand: null}
+      pushWordDiag({
+        at: Date.now(),
+        kind:
+          err.code === "word_too_short"
+            ? "too_short"
+            : err.code === "word_out_of_frame"
+              ? "out_of_frame"
+              : err.code,
+        frameCount: err.code === "word_too_short" ? parseTooShortFrames(err.message) : null,
+        coverageFace: coverage.face,
+        coverageHand: coverage.hand,
+        message: err.message,
+      })
+    }
+
     patch("error", {code: err.code, message: err.message, retryable: err.retryable})
+  }
+
+  // --- 화면·기록 세션 ----------------------------------------------------------
+
+  /** 화면·기록 상태를 한 덩어리로 방송한다. 이 축의 모든 변경이 여기를 지난다. */
+  function publishSessionState(): void {
+    patch("session:state", {
+      mode: savedMode,
+      screen,
+      questionIndex,
+      segmentOpen: wordSegment !== undefined,
+      segmentOpenedAt: wordSegment?.startedAt ?? null,
+      session: currentSession ?? null,
+      pastSessions: savedPastSessions,
+    })
+  }
+
+  /** 새 기록 세션을 열고 active 화면으로 간다. */
+  function startSession(mode: Mode): void {
+    const count = mode === "questionnaire" ? QUESTION_COUNT : 1
+    const questions: SessionRecord["questions"] = []
+    for (let i = 0; i < count; i += 1) questions.push({words: [], adopted: null})
+    currentSession = {mode, startedAt: Date.now(), endedAt: null, questions}
+    questionIndex = 0
+    screen = "active"
+    // 새 세션의 카드가 직전 세션의 결과를 이어받으면 안 된다.
+    patch("word:card", null)
+    publishSessionState()
+  }
+
+  /** 진행 중 세션을 끝내 기록 목록 맨 앞에 넣는다. 화면 전이는 호출부 몫이다. */
+  function archiveSession(): void {
+    if (currentSession === undefined) return
+    // 문진은 요약 진입 때 이미 찍혔고, 자유 모드는 여기서 찍힌다.
+    if (currentSession.endedAt == null) currentSession.endedAt = Date.now()
+    let wordCount = 0
+    for (const q of currentSession.questions) wordCount += q.words.length
+    // 단어가 하나도 없는 세션은 기록으로 남길 내용이 없어 버린다.
+    if (wordCount > 0) {
+      savedPastSessions.unshift(currentSession)
+      if (savedPastSessions.length > MAX_PAST_SESSIONS) savedPastSessions.length = MAX_PAST_SESSIONS
+    }
+    currentSession = undefined
+  }
+
+  function clearSummaryTimer(): void {
+    if (summaryTimer !== undefined) {
+      clearTimeout(summaryTimer)
+      summaryTimer = undefined
+    }
+  }
+
+  /**
+   * 요약 화면의 무입력 타이머를 (다시) 건다. 만료되면 스트림만 끄고 화면은
+   * summary 에 남긴다 — 이후 "자유 모드로 계속" 은 재시작 경로를 탄다.
+   */
+  function armSummaryTimer(): void {
+    clearSummaryTimer()
+    summaryTimer = setTimeout(() => {
+      summaryTimer = undefined
+      if (appState === "streaming") {
+        console.log("[Session] 요약 5분 무입력 — 스트림 자동 종료")
+        void runStopSequence("요약 무입력 자동 종료").catch((err) => {
+          setState("error")
+          logRequestError("[Stream] 요약 자동 종료 예외", err)
+        })
+      }
+    }, SUMMARY_IDLE_TIMEOUT_MS)
+  }
+
+  /** 요약 화면에서의 입력(버튼·RPC)마다 불러 타이머를 되돌린다. */
+  function touchSummaryTimer(): void {
+    if (screen === "summary" && summaryTimer !== undefined) armSummaryTimer()
+  }
+
+  /** 요약 화면으로 간다. 스트림은 건드리지 않는다 — 끄는 쪽은 호출부가 정한다. */
+  function enterSummary(): void {
+    // 문진의 종료 시각은 요약 진입 시점이다. 소요 시간 표시가 여기서 멈춘다.
+    if (currentSession !== undefined && currentSession.endedAt == null) {
+      currentSession.endedAt = Date.now()
+    }
+    screen = "summary"
+    armSummaryTimer()
+    publishSessionState()
+  }
+
+  /**
+   * 요약을 끝내고 대기로 간다. 스트림이 살아 있으면 종료하고, 세션을
+   * lastSession 으로 옮긴다. "처음으로" 버튼과 요약 화면의 길게 누르기가 같이 쓴다.
+   */
+  function goHomeFromSummary(reason: string): void {
+    if (screen !== "summary") return
+    clearSummaryTimer()
+    if (appState === "streaming") {
+      void runStopSequence(reason).catch((err) => {
+        setState("error")
+        logRequestError("[Stream] 요약 종료 예외", err)
+      })
+    }
+    archiveSession()
+    screen = "idle"
+    questionIndex = 0
+    patch("word:card", null)
+    publishSessionState()
   }
 
   // 정확히 한 번만 등록한다. 같은 채널에 두 번째로 등록하면 ui.handle 이 동기적
   // 으로 throw 한다(채널당 핸들러 하나). 두 번 실행될 수 있는 자리로 옮기면
   // 안 된다. 반환값은 해제 함수다.
   unsubscribers.push(ui.handle("getSnapshot", async () => snapshot))
+
+  unsubscribers.push(
+    ui.handle("setMode", async ({mode}) => {
+      // idle 밖에서는 모드를 바꿀 수 없다. 진행 중 세션의 모드가 어긋난다.
+      if (screen === "idle" && savedMode !== mode) {
+        savedMode = mode
+        publishSessionState()
+      }
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("nextQuestion", async () => {
+      // 열린 단어 구간은 현재 질문에 묶여 있어, 닫히기 전에는 옮기지 않는다.
+      if (wordSegment === undefined && screen === "active" && currentSession?.mode === "questionnaire") {
+        if (questionIndex < QUESTION_COUNT - 1) {
+          questionIndex += 1
+          patch("word:card", null)
+          publishSessionState()
+        } else {
+          // 마지막 질문의 "다음 질문". 스트림은 유지한 채 요약으로 간다.
+          enterSummary()
+        }
+      }
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("prevQuestion", async () => {
+      if (wordSegment === undefined && screen === "active" && currentSession?.mode === "questionnaire" && questionIndex > 0) {
+        questionIndex -= 1
+        patch("word:card", null)
+        publishSessionState()
+      }
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("removeWord", async ({wordId}) => {
+      touchSummaryTimer()
+      const record = currentSession
+      if (record !== undefined) {
+        for (const question of record.questions) {
+          const i = question.words.findIndex((w) => w.id === wordId)
+          if (i >= 0) {
+            question.words.splice(i, 1)
+            publishSessionState()
+            break
+          }
+        }
+      }
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("adoptCandidate", async ({questionIndex: qi, candidateIndex}) => {
+      touchSummaryTimer()
+      // UI 와 같은 입력으로 후보를 다시 만들어 인덱스를 푼다. 지금은
+      // buildCandidates 가 스텁이라 늘 빈 배열이고, 이 핸들러는 무동작이다.
+      const question = currentSession?.questions[qi]
+      if (question !== undefined) {
+        const candidate = buildCandidates(question.words, qi)[candidateIndex]
+        if (candidate !== undefined) {
+          question.adopted = candidate.text
+          publishSessionState()
+        }
+      }
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("continueFree", async () => {
+      if (screen !== "summary") return {}
+      clearSummaryTimer()
+      archiveSession()
+      startSession("free")
+      // 조기 종료나 무입력 자동 종료로 스트림이 죽어 있으면 다시 시작한다.
+      if (appState !== "streaming") {
+        const bound = currentSession
+        void (async () => {
+          // 조기 종료의 정지가 아직 돌고 있으면 끝나기를 기다렸다가 시작한다.
+          const deadline = Date.now() + 8000
+          while (appState === "stopping" && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 100))
+          }
+          // 기한이 지나도 정지 중이면 시작하지 않고 영상 끊김 흐름으로 넘긴다.
+          if (appState === "stopping") {
+            console.warn("[Stream] 정지가 끝나지 않아 자유 모드 시작을 포기한다 — 끊김 흐름으로 전환")
+            report("app_error", "warn", {where: "continue_free_stop_timeout"})
+            streamLost = true
+            setState("error")
+            return
+          }
+          await runStartSequence(bound)
+        })().catch((err) => {
+          setState("error")
+          logRequestError("[Stream] 자유 모드 재시작 예외", err)
+        })
+      }
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("goHome", async () => {
+      goHomeFromSummary("요약에서 처음으로")
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("speakText", async ({text}) => {
+      touchSummaryTimer()
+      speakSafe(session.speaker, text, "candidate", reportTts)
+      return {}
+    }),
+  )
+
+  unsubscribers.push(
+    ui.handle("clearHistory", async () => {
+      if (savedPastSessions.length > 0) {
+        savedPastSessions = []
+        publishSessionState()
+      }
+      return {}
+    }),
+  )
 
   function setState(next: AppState): void {
     if (appState === next) return
@@ -1292,8 +1814,8 @@ registerMiniapp((session) => {
         handleAiError,
         // ack 는 word_start 의 max_seconds 만 쓴다.
         handleAck,
-        // 처리 fps 의 출처. 구간이 열려 있는 동안 초당 한 번 온다.
-        trackProcessedFps,
+        // 처리 fps 와 녹화 중 카드의 출처. 구간이 열려 있는 동안 초당 한 번 온다.
+        trackWordProgress,
       )
       console.log("[AI] 인스턴스 생성", ai.getId())
       ai.connect()
@@ -1384,6 +1906,13 @@ registerMiniapp((session) => {
       activeStream = undefined
       publishStreamState(`disconnect: ${r}`)
       setState("idle")
+
+      // 진행 중이던 세션은 모듈 레벨 기록 목록에 남겨, 미니앱을 다시 열면
+      // "지난 기록 보기"에서 찾을 수 있게 한다.
+      clearSummaryTimer()
+      archiveSession()
+      screen = "idle"
+      questionIndex = 0
 
       for (const unsubscribe of unsubscribers) {
         unsubscribe()
@@ -1503,7 +2032,10 @@ registerMiniapp((session) => {
    * 순서는 의도적이다. Mentra 스트림이 사라지기 *전에* AI 서버에 pull 중지를
    * 알린다. 반대로 하면 서버가 죽은 WHEP 엔드포인트를 계속 당긴다.
    */
-  async function cleanupStream(reason: string, opts: {notifyAi: boolean}): Promise<void> {
+  async function cleanupStream(
+    reason: string,
+    opts: {notifyAi: boolean; fromOwnStart?: boolean},
+  ): Promise<void> {
     const streamId = activeStream?.streamId
     activeStream = undefined
     // 여기서 LED 를 건드리지 않는 건 의도다. 호출부 둘(runStopSequence, rollback)
@@ -1526,6 +2058,13 @@ registerMiniapp((session) => {
     } catch (err) {
       console.error("[Stream] stream.stop 실패 — 인자 없는 stop() 으로 폴백")
       logRequestError("[Stream] stream.stop", err)
+      // 폴백은 "활성 스트림" 을 멈추므로 새 스트림이나 진행 중인 시작을 죽일 수
+      // 있다. 다만 그 시작 자신의 롤백(fromOwnStart)은 카메라를 풀 마지막
+      // 기회라 허용한다.
+      if (activeStream !== undefined || (startInFlight && opts.fromOwnStart !== true)) {
+        console.warn("[Stream] 새 스트림이나 진행 중인 시작이 있어 인자 없는 stop() 을 건너뛴다")
+        throw err
+      }
       try {
         await session.stream.stop()
         console.log("[Stream] stream.stop() (인자 없음) 성공")
@@ -1596,7 +2135,11 @@ registerMiniapp((session) => {
     })
   }
 
-  async function runStartSequence(): Promise<void> {
+  /**
+   * boundSession 을 주면 그 세션을 위한 재시작이다 — 시작을 기다리는 동안
+   * 세션이 끝나면 시작을 무효화하고 뒤늦게 켜진 스트림은 바로 정리한다.
+   */
+  async function runStartSequence(boundSession?: SessionRecord): Promise<void> {
     if (startInFlight) {
       console.warn("[Stream] 시작 시퀀스가 이미 진행 중이다 — 무시. state=", appState)
       return
@@ -1678,6 +2221,11 @@ registerMiniapp((session) => {
         resolvedFps: result?.resolvedConfig?.video?.fps ?? null,
         processedFps: null,
         transport: result?.resolvedConfig?.transport ?? null,
+        resolvedSize:
+          typeof result?.resolvedConfig?.video?.width === "number" &&
+          typeof result?.resolvedConfig?.video?.height === "number"
+            ? `${result.resolvedConfig.video.width}x${result.resolvedConfig.video.height}`
+            : null,
         webrtcHost:
           typeof webrtcUrl === "string" && webrtcUrl.length > 0
             ? (parseUrlParts(webrtcUrl)?.hostname ?? null)
@@ -1750,9 +2298,20 @@ registerMiniapp((session) => {
         return
       }
 
-      // 5. 완료.
+      // 5. 완료. 묶인 세션이 그 사이 끝났으면 이 시작은 무효다.
+      if (boundSession !== undefined && boundSession !== currentSession) {
+        console.warn("[Stream] 묶인 세션이 끝났다 — 뒤늦게 켜진 스트림을 정리한다")
+        await cleanupStream("세션 종료로 시작 무효", {notifyAi: true, fromOwnStart: true})
+        setState(ai?.isReady() === true ? "ai_ready" : "error")
+        return
+      }
+      streamLost = false
       setState("streaming")
       console.log("[Stream] streaming. streamId=", streamId)
+
+      // 대기 화면에서 사용자가 직접 시작한 경우에만 새 세션을 연다. 세션에
+      // 묶인 재시작은 호출자가 이미 세션과 화면을 준비해 두었다.
+      if (boundSession === undefined && screen === "idle") startSession(savedMode)
 
       // 협상 결과는 앱만 안다. 서버는 webrtcUrl 하나만 받으므로, 프레임이 적게
       // 들어올 때 그것이 인코더 설정 탓인지 여기서만 가려진다. resolvedConfig
@@ -1791,7 +2350,7 @@ registerMiniapp((session) => {
   async function rollback(why: string): Promise<void> {
     console.warn("[Stream] 롤백:", why)
     try {
-      await cleanupStream(`rollback: ${why}`, {notifyAi: false})
+      await cleanupStream(`rollback: ${why}`, {notifyAi: false, fromOwnStart: true})
     } catch (err) {
       // cleanupStream 이 두 번의 stop 시도를 이미 로그로 남겼다.
       console.error("[Stream] 롤백 중 stop 실패 — 카메라가 잡혀있을 수 있다")
@@ -1817,9 +2376,14 @@ registerMiniapp((session) => {
       // stream_stop 메시지는 서버가 이미 받았지만, 안경 쪽 스트림이 실제로
       // 멈췄는지는 앱만 안다.
       report("stream_stop", "info", {result: "ok", reason})
+      // 정지 중에 새 시작이 상태를 가져갔으면 덮어쓰지 않는다.
+      if (appState !== "stopping") {
+        console.log("[Stream] 정지 중 상태가 바뀌었다 — 상태 유지. state=", appState)
+        return
+      }
       setState(ai?.isReady() === true ? "ai_ready" : "error")
     } catch (err) {
-      setState("error")
+      if (appState === "stopping") setState("error")
       console.error("[Stream] 정지 실패 — error 상태. 롱프레스로 재시도 가능")
       report("stream_stop", "error", {
         result: "fail",
@@ -1854,13 +2418,39 @@ registerMiniapp((session) => {
             //
             // waiting_wifi 는 재시도 진입점이다. 사용자가 설정 흐름으로 WiFi 를
             // 연결하고 돌아와 다시 누르는 자리다.
-            void runStartSequence().catch((err) => {
-              setState("error")
-              logRequestError("[Stream] 시작 시퀀스 예외", err)
-            })
+            //
+            // 요약 화면에서는 시작하지 않는다. 스트림이 꺼진 요약에서의 길게
+            // 누르기는 "처음으로"와 같다 — 세션을 넘기고 대기로 간다.
+            if (screen === "summary") {
+              goHomeFromSummary(`long press (buttonId=${press.buttonId})`)
+              return
+            }
+            // 인식 화면의 재시작은 세션에 묶어, 기다리는 사이 처음으로 가면
+            // 뒤늦게 켜진 스트림이 새 세션을 열지 않게 한다.
+            void runStartSequence(screen === "active" ? currentSession : undefined).catch(
+              (err) => {
+                setState("error")
+                logRequestError("[Stream] 시작 시퀀스 예외", err)
+              },
+            )
             return
 
           case "streaming":
+            // 화면 축이 종료의 의미를 정한다. 문진 중이면 조기 종료 → 요약,
+            // 자유 모드면 세션을 lastSession 으로 옮기고 대기로, 요약에서는
+            // "처음으로"와 같다(스트림 종료 + 세션을 넘기고 대기로).
+            if (screen === "summary") {
+              goHomeFromSummary(`long press (buttonId=${press.buttonId})`)
+              return
+            }
+            if (screen === "active" && currentSession?.mode === "questionnaire") {
+              enterSummary()
+            } else if (screen === "active") {
+              archiveSession()
+              screen = "idle"
+              questionIndex = 0
+              publishSessionState()
+            }
             void runStopSequence(`long press (buttonId=${press.buttonId})`).catch((err) => {
               setState("error")
               logRequestError("[Stream] 정지 시퀀스 예외", err)
@@ -1870,6 +2460,19 @@ registerMiniapp((session) => {
           case "error":
             // 복구: 잡혀 있는 것을 정리하고, AI 소켓이 살아 있으면 ai_ready 로
             // 돌아간다. 핫 리로드 탈출구이기도 하다.
+            // 요약 화면이었다면 "처음으로"처럼 세션을 넘기고 대기로도 간다.
+            if (screen === "summary") goHomeFromSummary("요약에서 길게 누르기 (error)")
+            // 서버가 스트림을 놓은 경우는 조기 종료가 아니라 재시작이다.
+            // 세션과 질문 번호가 그대로라 성공하면 같은 화면으로 돌아가고,
+            // 실패하면 streamLost 가 남아 다음 길게 누르기가 다시 시도한다.
+            else if (streamLost && screen === "active") {
+              console.log("[Stream] stream_unavailable 복구 — 스트림 재시작")
+              void runStartSequence(currentSession).catch((err) => {
+                setState("error")
+                logRequestError("[Stream] 스트림 재시작 예외", err)
+              })
+              return
+            }
             console.warn("[Stream] error 상태 — 복구 정지 시도")
             void runStopSequence("error 복구").catch((err) => {
               setState("error")
@@ -1886,8 +2489,15 @@ registerMiniapp((session) => {
         }
       } else {
         // 짧게 누르면 단어 구간을 토글한다. 예전 빌드의 사진 촬영은 이어받지 않았다.
-        console.log("[Input] SHORT state=", appState)
-        handleWordPress()
+        console.log("[Input] SHORT state=", appState, "screen=", screen)
+        touchSummaryTimer()
+        // 스트림이 끊긴 상태에서는 word_start 를 보내지 않고 안내만 다시 읽는다.
+        if (streamLost && screen === "active") {
+          speakSafe(session.speaker, STREAM_LOST_ANNOUNCEMENT, "stream_lost", reportTts)
+          return
+        }
+        // 단어 구간은 인식 화면에서만 연다. 요약에서 열면 답이 갈 곳이 없다.
+        if (screen === "active") handleWordPress()
       }
     }),
   )

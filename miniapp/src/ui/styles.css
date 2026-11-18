@@ -18,22 +18,25 @@
 :root {
   color-scheme: light dark;
 
-  --gs-brand: #0b4fd8;
-  --gs-streaming: #00a862;
-  --gs-waiting: #e08a00;
-  --gs-error: #e5342a;
-  --gs-idle: #5a6b84;
-
-  --gs-bg: #f2f6fc;
-  --gs-fg: #0a1424;
+  --gs-bg: #f6f9fb;
   --gs-surface: #ffffff;
-  --gs-border: #d3deee;
-  --gs-muted: #5a6b84;
+  --gs-border: #dfe8ee;
+  --gs-fg: #22303a;
+  --gs-muted: #5e6e7a;
+  /* 바탕 #f6f9fb 대비 4.70:1 — "답 없음" 같은 읽어야 하는 문구가 이 색을 쓴다. */
+  --gs-subtle: #63727c;
+  --gs-accent: #7bd8fd;
+  --gs-accent-strong: #1b9cd8;
+  --gs-accent-text: #0c7197;
+  --gs-accent-tint: #e9f7fe;
+  --gs-ok: #116b41;
+  --gs-ok-tint: #e3f2e9;
+  --gs-error: #b3362b;
+  --gs-error-tint: #fbeae7;
 
-  /* 4 / 8 / 10 만 쓴다. 더 둥글면 응급 도구가 아니라 소비자 앱처럼 읽힌다. */
-  --gs-r-sm: 4px;
-  --gs-r-md: 8px;
-  --gs-r-lg: 10px;
+  /* 모서리는 두 단뿐이다. 카드 12px, 칩·버튼은 완전한 알약. */
+  --gs-r-card: 12px;
+  --gs-r-pill: 999px;
 
   --gs-font-ui: "IBM Plex Sans KR", "IBM Plex Sans", -apple-system, BlinkMacSystemFont,
     "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
@@ -41,17 +44,20 @@
 }
 
 .dark {
-  --gs-brand: #5b8df0;
-  --gs-streaming: #2cc183;
-  --gs-waiting: #f0a430;
+  --gs-bg: #0e1a22;
+  --gs-surface: #152430;
+  --gs-border: #283b49;
+  --gs-fg: #e8f1f7;
+  --gs-muted: #9db0bc;
+  --gs-subtle: #6e8290;
+  --gs-accent: #7bd8fd;
+  --gs-accent-strong: #4fc3f0;
+  --gs-accent-text: #7bd8fd;
+  --gs-accent-tint: #113246;
+  --gs-ok: #2cc183;
+  --gs-ok-tint: #103a2c;
   --gs-error: #ff6357;
-  --gs-idle: #93a4bc;
-
-  --gs-bg: #0a1424;
-  --gs-fg: #e8eef7;
-  --gs-surface: #121e31;
-  --gs-border: #24344c;
-  --gs-muted: #93a4bc;
+  --gs-error-tint: #3f1f1b;
 }
 
 * {
@@ -67,6 +73,10 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+button {
+  font-family: var(--gs-font-ui);
+}
+
 /* --------------------------------------------------------------------------
    톤 → 색. 점·카드·맥동이 같은 클래스를 쓴다.
    톤이 유일한 신호인 곳은 없다. 톤을 쓰는 자리마다 문구나 테두리 스타일,
@@ -74,16 +84,16 @@ body {
    -------------------------------------------------------------------------- */
 
 .gs-tone-idle {
-  --gs-tone: var(--gs-idle);
+  --gs-tone: var(--gs-muted);
 }
 .gs-tone-connecting {
-  --gs-tone: var(--gs-brand);
+  --gs-tone: var(--gs-accent-strong);
 }
 .gs-tone-waiting {
-  --gs-tone: var(--gs-waiting);
+  --gs-tone: var(--gs-accent-text);
 }
 .gs-tone-streaming {
-  --gs-tone: var(--gs-streaming);
+  --gs-tone: var(--gs-ok);
 }
 .gs-tone-error {
   --gs-tone: var(--gs-error);
@@ -131,9 +141,9 @@ body {
 
 .gs-notice {
   margin: 0;
-  padding: 10px 12px;
+  padding: 10px 14px;
   border: 1px solid var(--gs-border);
-  border-radius: var(--gs-r-md);
+  border-radius: var(--gs-r-card);
   background: var(--gs-surface);
   color: var(--gs-muted);
   font-size: 0.875rem;
@@ -146,7 +156,47 @@ body {
 }
 
 /* --------------------------------------------------------------------------
-   상태 배지
+   카드 공통
+   -------------------------------------------------------------------------- */
+
+.gs-card {
+  padding: 16px;
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-card);
+  background: var(--gs-surface);
+}
+
+.gs-card-title {
+  margin: 0 0 10px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--gs-muted);
+}
+
+.gs-empty {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--gs-subtle);
+}
+
+/* --------------------------------------------------------------------------
+   시작 안내 (accent-tint 배경)
+   -------------------------------------------------------------------------- */
+
+.gs-intro {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--gs-accent);
+  border-radius: var(--gs-r-card);
+  background: var(--gs-accent-tint);
+  color: var(--gs-accent-text);
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+/* --------------------------------------------------------------------------
+   상태 칩 (서버 / 안경 / 스트림)
    -------------------------------------------------------------------------- */
 
 .gs-badges {
@@ -161,9 +211,9 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 9px;
+  padding: 7px 12px;
   border: 1px solid var(--gs-border);
-  border-radius: var(--gs-r-sm);
+  border-radius: var(--gs-r-pill);
   background: var(--gs-surface);
 }
 
@@ -172,7 +222,7 @@ body {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--gs-tone, var(--gs-idle));
+  background: var(--gs-tone, var(--gs-muted));
 }
 
 .gs-badge-name {
@@ -187,21 +237,60 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--gs-font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 0.75rem;
 }
 
 /* --------------------------------------------------------------------------
-   상태 카드 — 라이브 영상 자리를 대신하는 화면의 중심
+   상단 상태 표시줄 — "인식 중 · 경과" 칩과 자유 인식 태그
    -------------------------------------------------------------------------- */
 
-.gs-card {
-  padding: 16px;
-  border: 1px solid var(--gs-border);
-  border-radius: var(--gs-r-lg);
-  background: var(--gs-surface);
+.gs-topline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }
+
+.gs-livechip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--gs-r-pill);
+  background: var(--gs-ok-tint);
+  color: var(--gs-ok);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.gs-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border: 1px solid var(--gs-accent);
+  border-radius: var(--gs-r-pill);
+  background: var(--gs-accent-tint);
+  color: var(--gs-accent-text);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.gs-streamoff {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: var(--gs-r-pill);
+  background: var(--gs-error-tint);
+  color: var(--gs-error);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
+   대기 상태 카드 — 라이브 영상 자리를 대신하는 화면의 중심
+   -------------------------------------------------------------------------- */
 
 .gs-status {
   display: flex;
@@ -209,15 +298,12 @@ body {
   align-items: center;
   gap: 10px;
   text-align: center;
-  /* 톤을 채우기가 아니라 좌측 세로선으로 표현한다. 평평한 조명에서도, 시연
-     영상이 채도를 뭉개도 읽힌다. */
-  border-left: 3px solid var(--gs-tone, var(--gs-idle));
 }
 
 .gs-status-label {
   margin: 0;
-  font-size: 1.5rem;
-  font-weight: 600;
+  font-size: 1.3125rem;
+  font-weight: 700;
   letter-spacing: -0.01em;
 }
 
@@ -231,24 +317,24 @@ body {
 
 .gs-visual {
   position: relative;
-  width: 84px;
-  height: 84px;
+  width: 72px;
+  height: 72px;
   display: grid;
   place-items: center;
 }
 
 .gs-pulse-core {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  background: var(--gs-tone, var(--gs-idle));
+  background: var(--gs-tone, var(--gs-muted));
 }
 
 .gs-pulse-ring {
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  border: 2px solid var(--gs-tone, var(--gs-idle));
+  border: 2px solid var(--gs-tone, var(--gs-muted));
   opacity: 0.25;
 }
 
@@ -275,71 +361,594 @@ body {
   }
 }
 
+/* --------------------------------------------------------------------------
+   진행 방식 라디오 카드
+   -------------------------------------------------------------------------- */
+
+.gs-modes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gs-mode-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-card);
+  background: var(--gs-surface);
+  color: var(--gs-fg);
+  text-align: left;
+  cursor: pointer;
+}
+
+.gs-mode-card-on {
+  border-color: var(--gs-accent-strong);
+  background: var(--gs-accent-tint);
+}
+
+.gs-mode-radio {
+  flex: none;
+  margin-top: 2px;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--gs-subtle);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+}
+
+.gs-mode-card-on .gs-mode-radio {
+  border-color: var(--gs-accent-strong);
+}
+
+.gs-mode-radio-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gs-accent-strong);
+}
+
+.gs-mode-name {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.gs-mode-desc {
+  margin: 4px 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: var(--gs-muted);
+  white-space: pre-line;
+}
+
+/* --------------------------------------------------------------------------
+   안내 카드와 지난 기록 행
+   -------------------------------------------------------------------------- */
+
 .gs-hint {
   margin: 0;
-  padding: 10px 12px;
+  padding: 12px 14px;
   border: 1px dashed var(--gs-border);
-  border-radius: var(--gs-r-md);
+  border-radius: var(--gs-r-card);
   text-align: center;
   font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--gs-muted);
+}
+
+.gs-lastrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-card);
+  background: var(--gs-surface);
+  color: var(--gs-fg);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.gs-lastrow-sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8125rem;
+  font-weight: 400;
   color: var(--gs-muted);
 }
 
 /* --------------------------------------------------------------------------
-   인식 결과
+   지난 기록 — 목록과 상세
    -------------------------------------------------------------------------- */
 
-.gs-card-title {
-  margin: 0 0 10px;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+.gs-histhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gs-histtitle {
+  margin: 0;
+  flex: 1;
+  font-size: 1.3125rem;
+  font-weight: 700;
+}
+
+.gs-histback {
+  flex: none;
+  margin-left: auto;
+  min-height: 40px;
+  padding: 8px 16px;
+  border: 1px solid var(--gs-accent-strong);
+  border-radius: var(--gs-r-pill);
+  background: var(--gs-surface);
+  color: var(--gs-accent-text);
+  font-size: 0.8125rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.gs-histrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 56px;
+  padding: 12px 16px;
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-card);
+  background: var(--gs-surface);
+  color: var(--gs-fg);
+  text-align: left;
+  cursor: pointer;
+}
+
+.gs-histtag {
+  flex: none;
+  padding: 4px 10px;
+  border-radius: var(--gs-r-pill);
+  background: var(--gs-accent-tint);
+  color: var(--gs-accent-text);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.gs-histmeta {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
   color: var(--gs-muted);
 }
 
-.gs-empty {
+.gs-histchev {
+  flex: none;
+  font-size: 1.25rem;
+  color: var(--gs-subtle);
+}
+
+.gs-btn-danger {
+  border: 1px solid var(--gs-error);
+  background: var(--gs-error-tint);
+  color: var(--gs-error);
+}
+
+.gs-histfail {
+  color: var(--gs-error);
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
+   질문 카드 (문진)
+   -------------------------------------------------------------------------- */
+
+.gs-question {
+  border-color: var(--gs-accent);
+  border-width: 2px;
+}
+
+.gs-question-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.gs-question-count {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--gs-accent-text);
+}
+
+.gs-qdots {
+  display: flex;
+  gap: 6px;
+}
+
+.gs-qdot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gs-border);
+}
+
+.gs-qdot-done {
+  background: var(--gs-accent);
+}
+
+.gs-qdot-on {
+  background: var(--gs-accent-strong);
+}
+
+.gs-question-text {
   margin: 0;
+  font-size: 1.3125rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+/* --------------------------------------------------------------------------
+   방금 인식된 단어 카드 — 서버 결과별 4가지 상태
+   -------------------------------------------------------------------------- */
+
+.gs-result-word {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.gs-result-sub {
+  margin: 6px 0 0;
   font-size: 0.875rem;
+  line-height: 1.55;
   color: var(--gs-muted);
 }
+
+.gs-result-conf {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.gs-result-pct {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--gs-accent-text);
+}
+
+/* 확신도 막대. 면은 accent, 기준선 틱은 accent-strong 이다. */
+.gs-confbar {
+  position: relative;
+  flex: 1;
+  height: 8px;
+  border-radius: var(--gs-r-pill);
+  background: var(--gs-accent-tint);
+  overflow: visible;
+}
+
+.gs-confbar-fill {
+  /* span 은 inline 이라 block 으로 바꿔야 width 가 적용된다. */
+  display: block;
+  height: 100%;
+  border-radius: var(--gs-r-pill);
+  background: var(--gs-accent);
+}
+
+.gs-confbar-tick {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  background: var(--gs-accent-strong);
+}
+
+/* 녹화 중 카드의 영상 미수신 경고. */
+.gs-result-stall {
+  color: var(--gs-error);
+  font-weight: 600;
+}
+
+/* 확신 부족·화면 이탈은 중립, 모델 미연결은 경고색이다. */
+.gs-result-warn {
+  border-color: var(--gs-error);
+  background: var(--gs-error-tint);
+}
+
+.gs-result-warn .gs-result-word,
+.gs-result-warn .gs-result-sub {
+  color: var(--gs-error);
+}
+
+/* --------------------------------------------------------------------------
+   인식 기록 — 답 단어 칩 (× 버튼 포함)
+   -------------------------------------------------------------------------- */
 
 .gs-chips {
   display: flex;
   flex-wrap: wrap;
+  gap: 8px;
+}
+
+.gs-wordchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 44px;
+  padding: 0 4px 0 14px;
+  border: 1px solid var(--gs-accent);
+  border-radius: var(--gs-r-pill);
+  background: var(--gs-surface);
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+/* × 는 44px 터치 타깃을 자체로 확보한다. 칩 높이도 같이 맞춘다. */
+.gs-chip-x {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--gs-muted);
+  font-size: 1.125rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* 진행 중 구간. 아직 단어가 아니라 점선이다. */
+.gs-wordchip-open {
+  border-style: dashed;
+  border-color: var(--gs-border);
+  color: var(--gs-subtle);
+  font-weight: 400;
+  padding-right: 14px;
+}
+
+/* 요약·지난 기록의 읽기 전용 칩. 확신도 % 가 붙고 × 가 없다. */
+.gs-wordchip-ro {
+  min-height: 0;
+  padding: 6px 12px;
   gap: 6px;
 }
 
-.gs-chip {
-  padding: 4px 9px;
-  border-radius: var(--gs-r-sm);
-  font-family: var(--gs-font-mono);
+.gs-wordchip-pct {
   font-variant-numeric: tabular-nums;
-  font-size: 0.8125rem;
-}
-
-/* 확정과 중간은 테두리 스타일·굵기·투명도로 갈린다. 여기에 컴포넌트가 붙이는
-   "…" 까지 더해진다. 색조만으로 구분하지 않는다. */
-.gs-chip-final {
-  border: 1px solid var(--gs-brand);
-  color: var(--gs-fg);
-  font-weight: 600;
-  opacity: 1;
-}
-
-.gs-chip-interim {
-  border: 1px dashed var(--gs-border);
-  color: var(--gs-muted);
+  font-size: 0.75rem;
   font-weight: 400;
-  opacity: 0.7;
+  color: var(--gs-muted);
 }
 
-.gs-sentence {
-  margin: 12px 0 0;
+/* --------------------------------------------------------------------------
+   문장 후보 — buildCandidates 가 채워지면 나타난다
+   -------------------------------------------------------------------------- */
+
+.gs-cands {
+  margin-top: 12px;
   padding-top: 12px;
   border-top: 1px solid var(--gs-border);
+}
+
+.gs-cand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px 14px;
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-card);
+  background: var(--gs-surface);
+  color: var(--gs-fg);
+  text-align: left;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.gs-cand-on {
+  border-color: var(--gs-accent-strong);
+  background: var(--gs-accent-tint);
+  font-weight: 600;
+}
+
+.gs-cand-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.gs-cand-listen {
+  flex: none;
+  display: grid;
+  place-items: center;
+  min-width: 44px;
+  min-height: 44px;
+  margin: -10px -10px -10px 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--gs-accent-text);
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+/* --------------------------------------------------------------------------
+   이전 질문의 답 요약 한 줄
+   -------------------------------------------------------------------------- */
+
+.gs-prevanswer {
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--gs-border);
+  border-radius: var(--gs-r-card);
+  background: var(--gs-surface);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--gs-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------------
+   버튼
+   -------------------------------------------------------------------------- */
+
+.gs-nav {
+  display: flex;
+  gap: 8px;
+}
+
+.gs-btn {
+  flex: 1;
+  min-height: 48px;
+  padding: 12px 16px;
+  border-radius: var(--gs-r-pill);
+  font-size: 0.9375rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* 라이트는 흰 글자 대비(4.5:1 이상)를 위해 accent-strong 대신 accent-text 를 쓴다. */
+.gs-btn-filled {
+  border: 1px solid var(--gs-accent-text);
+  background: var(--gs-accent-text);
+  color: #ffffff;
+}
+
+.dark .gs-btn-filled {
+  border-color: var(--gs-accent-strong);
+  background: var(--gs-accent-strong);
+  color: #0e1a22;
+}
+
+.gs-btn-outline {
+  border: 1px solid var(--gs-accent-strong);
+  background: var(--gs-surface);
+  color: var(--gs-accent-text);
+}
+
+.gs-btn:disabled {
+  border-color: var(--gs-border);
+  background: var(--gs-surface);
+  color: var(--gs-subtle);
+  cursor: default;
+}
+
+/* --------------------------------------------------------------------------
+   오류 카드
+   -------------------------------------------------------------------------- */
+
+.gs-errorcard {
+  border-color: var(--gs-error);
+  background: var(--gs-error-tint);
+}
+
+.gs-errorcard-title {
+  margin: 0;
   font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--gs-error);
+}
+
+.gs-errorcard-body {
+  margin: 8px 0 0;
+  font-size: 0.875rem;
   line-height: 1.6;
-  font-weight: 500;
+}
+
+.gs-errorcard-actions {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  font-size: 0.875rem;
+  line-height: 1.7;
+}
+
+/* --------------------------------------------------------------------------
+   요약 (문진 요약 / 지난 기록 보기)
+   -------------------------------------------------------------------------- */
+
+.gs-sumhead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.gs-sumchip {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: var(--gs-r-pill);
+  background: var(--gs-ok-tint);
+  color: var(--gs-ok);
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.gs-sumstats {
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--gs-muted);
+}
+
+.gs-sumq-no {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--gs-accent-text);
+}
+
+.gs-sumq-question {
+  margin: 2px 0 0;
+  font-size: 0.8125rem;
+  color: var(--gs-muted);
+}
+
+.gs-sumq-answer {
+  margin: 8px 0 0;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.gs-sumq-none {
+  color: var(--gs-subtle);
+  font-weight: 400;
+}
+
+.gs-sumq-chips {
+  margin-top: 8px;
+}
+
+.gs-caption {
+  margin: 0;
+  text-align: center;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--gs-subtle);
 }
 
 /* --------------------------------------------------------------------------
@@ -348,7 +957,7 @@ body {
 
 .gs-diag {
   border: 1px solid var(--gs-border);
-  border-radius: var(--gs-r-md);
+  border-radius: var(--gs-r-card);
   background: var(--gs-surface);
 }
 
@@ -395,4 +1004,61 @@ body {
   font-family: var(--gs-font-mono);
   /* 값이 바뀔 때 숫자가 세로로 정렬된다 — fps, 배터리, window index. */
   font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------------------
+   진단 — 최근 단어 구간 표
+   -------------------------------------------------------------------------- */
+
+.gs-wdiag-title {
+  margin: 0;
+  padding: 10px 14px 4px;
+  border-top: 1px solid var(--gs-border);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--gs-muted);
+}
+
+.gs-wdiag-empty {
+  margin: 0;
+  padding: 0 14px 12px;
+  font-size: 0.75rem;
+  color: var(--gs-subtle);
+}
+
+.gs-wdiag-wrap {
+  overflow-x: auto;
+  padding: 0 14px 12px;
+}
+
+.gs-wdiag {
+  border-collapse: collapse;
+  font-family: var(--gs-font-mono);
+  font-size: 0.625rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.gs-wdiag th,
+.gs-wdiag td {
+  padding: 3px 6px;
+  border-top: 1px solid var(--gs-border);
+  text-align: right;
+}
+
+.gs-wdiag th {
+  font-weight: 400;
+  color: var(--gs-muted);
+}
+
+.gs-wdiag-left {
+  text-align: left;
+}
+
+.gs-wdiag-msg {
+  max-width: 60vw;
+  text-align: left;
+  white-space: normal;
+  color: var(--gs-muted);
 }

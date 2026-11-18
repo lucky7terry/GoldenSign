@@ -3,7 +3,8 @@
  *
  * 네트워크도 AI 소켓도 스트림 제어도 저장소도 소유하지 않는다. 화면의 모든 값은
  * 타입 지정 채널로 왔거나 마운트 시 한 번의 `getSnapshot` 으로 온 것이다
- * (src/shared/channels.ts 참고). "변환 시작" 버튼을 두지 않은 것도 의도다.
+ * (src/shared/channels.ts 참고). 화면 전이(대기/인식/요약)도 background 가
+ * 소유하고, UI 는 session:state 를 그리면서 조작을 RPC 로 되돌려 보낸다.
  * 스트리밍은 안경 관자놀이 버튼으로만 시작한다.
  *
  * 스냅샷이 선택이 아니라 필수인 이유: `session.ui.send` 는 바인딩된 WebView 가
@@ -12,15 +13,18 @@
  * 따라잡을 방법이 없다.
  */
 
-import {useEffect, useState} from "react"
+import {Fragment, useEffect, useState} from "react"
 import {MiniappHeader, useRpc, useSafeArea} from "@mentra/miniapp/ui"
-import type {Channels, Snapshot} from "../shared/channels"
+import type {AnswerWord, Channels, SessionRecord, Snapshot, WordDiagEntry} from "../shared/channels"
+import {QUESTIONS, QUESTION_COUNT} from "../shared/questions"
+import {buildCandidates} from "../shared/sentence"
+import {START_ANNOUNCEMENT, FRAMING_ANNOUNCEMENT} from "../background/tts"
 
 /**
  * `mentra.request` 에는 기본 timeout 이 없다(ui/index.d.ts). 이 값을 주지 않으면
  * background 가 붙어 있지 않을 때 Promise 가 영원히 매달린다.
  */
-const SNAPSHOT_TIMEOUT_MS = 3000
+const RPC_TIMEOUT_MS = 3000
 
 /** background 쪽 상한과 같은 값. 두 버퍼가 어긋나지 않게 한다. */
 const MAX_RESULTS = 20
@@ -31,7 +35,7 @@ type Phase = {kind: "loading"} | {kind: "error"; message: string} | {kind: "read
 
 const EMPTY_SNAPSHOT: Snapshot = {
   ai: {state: "disconnected", sessionId: null, model: null, message: null},
-  stream: {state: "idle", streamId: null, message: null},
+  stream: {state: "idle", streamId: null, message: null, lost: false},
   glasses: {wifiConnected: null, ssid: null, battery: null, charging: null},
   diagnostics: {
     requestedFps: null,
@@ -43,6 +47,18 @@ const EMPTY_SNAPSHOT: Snapshot = {
   },
   results: [],
   error: null,
+  session: {
+    mode: "questionnaire",
+    screen: "idle",
+    questionIndex: 0,
+    segmentOpen: false,
+    segmentOpenedAt: null,
+    session: null,
+    pastSessions: [],
+  },
+  wordDiags: [],
+  progress: null,
+  wordCard: null,
 }
 
 // ---------------------------------------------------------------------------
@@ -67,16 +83,42 @@ function fmtWindowIndex(value: number | undefined): string {
   return String(value)
 }
 
-/**
- * 화면에 띄울 문구. 판정은 서버가 끝냈고 text 가 그 결과라 앱은 confidence 를
- * 다시 보지 않는다. 비어 있을 때만 왜 비었는지를 대신 보여 준다.
- */
-function resultLabel(r: Channels["recognition:result"] | undefined): string {
-  if (r === undefined) return "—"
-  if (r.text !== null && r.text !== "") return r.text
-  if (r.modelLoaded === false) return "모델 미연결"
+function fmtPercent(confidence: number): string {
+  return `${Math.round(confidence * 100)}%`
+}
 
-  return r.modelLoaded === true ? "확신 부족" : "—"
+function fmtElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000))
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`
+}
+
+/** 시작 시각. 오늘이면 HH:mm, 아니면 M/D HH:mm 로 줄인다. */
+function fmtStartTime(ts: number, now: number): string {
+  const d = new Date(ts)
+  const n = new Date(now)
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+  const sameDay =
+    d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate()
+  return sameDay ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`
+}
+
+function durationOf(record: SessionRecord): number {
+  return (record.endedAt ?? record.startedAt) - record.startedAt
+}
+
+/**
+ * 스냅샷과 live 의 진단 줄을 합친다. live 가 더 새로우므로 앞에 두고,
+ * 같은 at 은 live 가 이긴다.
+ */
+function mergeWordDiags(history: WordDiagEntry[], live: WordDiagEntry[]): WordDiagEntry[] {
+  const liveAts = new Set(live.map((e) => e.at))
+  return [...live, ...history.filter((e) => !liveAts.has(e.at))].slice(0, 10)
+}
+
+function wordCountOf(record: SessionRecord): number {
+  let count = 0
+  for (const q of record.questions) count += q.words.length
+  return count
 }
 
 /**
@@ -141,6 +183,41 @@ function describeError(snap: Snapshot): string {
   return `${cause}. ${alivePart} 버튼을 길게 눌러 다시 시도할 수 있습니다.`
 }
 
+/** 오류 카드용 구조화 문구. 원인 제목과 조치 두 가지를 원인별로 고른다. */
+function describeErrorCard(snap: Snapshot): {title: string; body: string; actions: string[]} {
+  const alive: string[] = []
+  if (snap.ai.state === "ready") alive.push("인식 서버")
+  if (snap.glasses.wifiConnected === true) alive.push("안경 WiFi")
+
+  let title: string
+  let actions: string[]
+  if (snap.ai.state === "error") {
+    title = snap.ai.message ?? "인식 서버에 연결하지 못했습니다"
+    actions = [
+      "잠시 뒤 안경 버튼을 길게 눌러 다시 시도해 주세요",
+      "계속 안 되면 폰의 인터넷 연결을 확인해 주세요",
+    ]
+  } else if (snap.glasses.wifiConnected === false) {
+    title = "안경이 WiFi에 연결되어 있지 않습니다"
+    actions = [
+      "안경을 WiFi에 연결해 주세요",
+      "연결한 뒤 안경 버튼을 길게 눌러 다시 시도해 주세요",
+    ]
+  } else {
+    title = snap.stream.message ?? "카메라 스트림을 시작하지 못했습니다"
+    actions = [
+      "안경 버튼을 길게 눌러 다시 시도해 주세요",
+      "계속 안 되면 미니앱을 닫았다가 다시 열어 주세요",
+    ]
+  }
+
+  const body =
+    alive.length > 0
+      ? `${alive.join(" · ")}는 정상입니다. 버튼을 길게 눌러 다시 시도할 수 있습니다.`
+      : "정상 동작 중인 항목이 없습니다. 아래 조치를 확인해 주세요."
+  return {title, body, actions}
+}
+
 function describeStream(snap: Snapshot): StateView {
   switch (snap.stream.state) {
     case "idle":
@@ -189,7 +266,7 @@ function describeGlasses(snap: Snapshot): StateView {
 
 function describeRpcFailure(name: string | undefined, err: unknown): string {
   if (name === "MentraRpcTimeoutError") {
-    return `백그라운드가 ${SNAPSHOT_TIMEOUT_MS / 1000}초 안에 응답하지 않았습니다.`
+    return `백그라운드가 ${RPC_TIMEOUT_MS / 1000}초 안에 응답하지 않았습니다.`
   }
   if (name === "MentraRpcError") {
     const message = (err as {message?: string} | null)?.message
@@ -214,6 +291,16 @@ function StatusBadge({name, view}: {name: string; view: StateView}) {
   )
 }
 
+function StatusBadges({snap}: {snap: Snapshot}) {
+  return (
+    <div className="gs-badges">
+      <StatusBadge name="서버" view={describeAi(snap)} />
+      <StatusBadge name="안경" view={describeGlasses(snap)} />
+      <StatusBadge name="스트림" view={describeStream(snap)} />
+    </div>
+  )
+}
+
 /**
  * 시각 피드백. 일부러 이 컴포넌트 하나로 격리해 두었다.
  *
@@ -233,50 +320,321 @@ function VisualFeedback({tone, animated}: {tone: Tone; animated: boolean}) {
   )
 }
 
-/**
- * 중간 결과와 확정 결과는 테두리 스타일·굵기·투명도, 그리고 뒤에 붙는 말줄임표로
- * 구분한다. 색만으로 구분하지 않는다. 시연 조명과 재인코딩된 영상은 색차를
- * 뭉개지만 형태는 살아남는다.
- */
-function ResultPanel({results}: {results: Channels["recognition:result"][]}) {
-  const finals = results.filter((r) => r.isFinal)
-  const sentence = finals.length > 0 ? resultLabel(finals[finals.length - 1]) : null
-  // 마지막 단어 구간 요약. close_reason 이 비어도 구간 결과다.
-  const lastWord = results.filter((r) => r.isWordResult).pop()
+/** 열린 구간 동안 서버가 받은 프레임 수와 처리 속도. word_progress 가 채운다. */
+function RecordingCard({
+  progress,
+  openedAt,
+  now,
+}: {
+  progress: Snapshot["progress"]
+  openedAt: number | null | undefined
+  now: number
+}) {
+  // 이전 구간의 진행 상황이 남아 있을 수 있어 구간 시작 이후의 값만 쓴다.
+  const live =
+    progress !== null && typeof openedAt === "number" && progress.at >= openedAt ? progress : null
+  const stalled =
+    typeof openedAt === "number" && now - openedAt > 2000 && (live === null || live.frameCount === 0)
 
   return (
     <section className="gs-card">
-      <h2 className="gs-card-title">인식 결과</h2>
+      <h2 className="gs-card-title">방금 인식된 단어</h2>
+      <p className="gs-result-word">녹화 중</p>
+      <p className="gs-result-sub">
+        프레임 {live === null ? "—" : live.frameCount} · 처리{" "}
+        {live === null || live.processedFps === null ? "—" : live.processedFps.toFixed(1)} fps
+      </p>
+      {/* 매초 바뀌는 프레임 수는 넣지 않고 경고 문구만 알림 영역에 넣었다 뺀다. */}
+      <p className="gs-result-sub gs-result-stall" role="status">
+        {stalled ? "영상이 서버에 들어오지 않고 있어요" : null}
+      </p>
+    </section>
+  )
+}
 
-      {results.length === 0 ? (
-        <p className="gs-empty">아직 인식된 내용이 없습니다.</p>
+/** 서버가 영상 스트림을 놓쳤을 때(stream_unavailable)의 안내 카드. */
+function StreamLostCard() {
+  return (
+    <section className="gs-card gs-errorcard">
+      <h2 className="gs-errorcard-title">카메라 영상이 끊겼어요</h2>
+      <p className="gs-errorcard-body">서버가 안경 영상을 받지 못해 인식을 멈췄습니다.</p>
+      <ol className="gs-errorcard-actions">
+        <li>안경 버튼을 길게 눌러 다시 시작해 주세요</li>
+        <li>지금까지의 기록과 질문은 그대로 유지됩니다</li>
+      </ol>
+    </section>
+  )
+}
+
+/** 원인 제목 + 살아 있는 항목 + 조치 1·2. describeError 를 카드로 편 것이다. */
+function ErrorCard({snap}: {snap: Snapshot}) {
+  const view = describeErrorCard(snap)
+  return (
+    <section className="gs-card gs-errorcard">
+      <h2 className="gs-errorcard-title">{view.title}</h2>
+      <p className="gs-errorcard-body">{view.body}</p>
+      <ol className="gs-errorcard-actions">
+        {view.actions.map((action) => (
+          <li key={action}>{action}</li>
+        ))}
+      </ol>
+    </section>
+  )
+}
+
+/**
+ * 방금 인식된 단어 카드. 서버 결과별 4가지 상태를 그린다 —
+ * 인식됨 / 확신 부족 / 화면 이탈 / 모델 미연결.
+ */
+function ResultCard({card}: {card: Snapshot["wordCard"]}) {
+  if (card === null) {
+    return (
+      <section className="gs-card">
+        <h2 className="gs-card-title">방금 인식된 단어</h2>
+        <p className="gs-empty">수어를 하면 여기에 표시돼요</p>
+      </section>
+    )
+  }
+
+  if (card.kind === "out_of_frame") {
+    return (
+      <section className="gs-card">
+        <h2 className="gs-card-title">방금 인식된 단어</h2>
+        <p className="gs-result-word">화면 이탈</p>
+        <p className="gs-result-sub">{FRAMING_ANNOUNCEMENT}</p>
+      </section>
+    )
+  }
+
+  const r = card.result
+  if (r.modelLoaded === false) {
+    return (
+      <section className="gs-card gs-result-warn">
+        <h2 className="gs-card-title">방금 인식된 단어</h2>
+        <p className="gs-result-word">모델 미연결</p>
+        <p className="gs-result-sub">서버가 인식 모델을 불러오지 못했습니다. 잠시 뒤 다시 시도해 주세요.</p>
+      </section>
+    )
+  }
+
+  const recognized = r.text !== null && r.text !== ""
+  // 기준선은 서버가 result.recognition 에 실어 보낸 채택 임계값이다. 없으면 긋지 않는다.
+  const threshold = r.confidenceThreshold
+  return (
+    <section className="gs-card">
+      <h2 className="gs-card-title">방금 인식된 단어</h2>
+      <p className="gs-result-word">{recognized ? r.text : "확신 부족"}</p>
+      {recognized ? null : <p className="gs-result-sub">같은 수어를 한 번 더 보여 주세요.</p>}
+      {recognized || r.candidate === null || r.candidate === undefined || r.candidate === "" ? null : (
+        <p className="gs-result-sub">1위 후보 {r.candidate}</p>
+      )}
+      <div className="gs-result-conf">
+        <span className="gs-result-pct">{fmtPercent(r.confidence)}</span>
+        <span className="gs-confbar" aria-hidden="true">
+          <span
+            className="gs-confbar-fill"
+            style={{width: `${Math.min(100, Math.max(0, r.confidence * 100))}%`}}
+          />
+          {typeof threshold === "number" ? (
+            <span
+              className="gs-confbar-tick"
+              style={{left: `${Math.min(100, Math.max(0, threshold * 100))}%`}}
+            />
+          ) : null}
+        </span>
+      </div>
+    </section>
+  )
+}
+
+/**
+ * 인식 기록 카드. 답 단어 칩(각 칩에 × 삭제)과, 후보가 있을 때만 그 아래
+ * "문장 후보" 영역을 그린다. buildCandidates 가 스텁인 동안 후보 영역은 영영
+ * 나타나지 않는다.
+ */
+function AnswerCard(props: {
+  words: AnswerWord[]
+  segmentOpen: boolean
+  showsError: boolean
+  questionIndex: number
+  adopted: string | null | undefined
+  onRemove: (wordId: number) => void
+  onAdopt: (candidateIndex: number) => void
+  onListen: (text: string) => void
+}) {
+  const candidates = buildCandidates(props.words, props.questionIndex)
+
+  return (
+    <section className="gs-card">
+      <h2 className="gs-card-title">인식 기록</h2>
+      {props.showsError ? <p className="gs-empty">오류 전 기록은 유지됩니다.</p> : null}
+
+      {props.words.length === 0 && !props.segmentOpen ? (
+        <p className="gs-empty">아직 인식된 단어가 없습니다.</p>
       ) : (
         <div className="gs-chips">
-          {results.map((r, i) => (
-            <span
-              // 결과에는 고유 id 가 없다. 뒤에만 붙고 상한이 있는 목록이라
-              // 인덱스 + windowIndex 조합이면 충분히 안정적이다.
-              key={`${i}-${r.windowIndex}`}
-              className={`gs-chip ${r.isFinal ? "gs-chip-final" : "gs-chip-interim"}`}
+          {props.words.map((w) => (
+            <span key={w.id} className="gs-wordchip">
+              {w.text}
+              <button
+                className="gs-chip-x"
+                aria-label={`${w.text} 삭제`}
+                onClick={() => props.onRemove(w.id)}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+          {props.segmentOpen ? <span className="gs-wordchip gs-wordchip-open">인식 중…</span> : null}
+        </div>
+      )}
+
+      {candidates.length === 0 ? null : (
+        <div className="gs-cands">
+          <h2 className="gs-card-title">문장 후보</h2>
+          {candidates.map((c, i) => (
+            <button
+              key={`${i}-${c.text}`}
+              className={`gs-cand${props.adopted === c.text ? " gs-cand-on" : ""}`}
+              onClick={() => props.onAdopt(i)}
             >
-              {resultLabel(r)}
-              {r.isFinal ? "" : "…"}
+              <span className="gs-cand-text">{c.text}</span>
+              <span
+                className="gs-cand-listen"
+                role="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  props.onListen(c.text)
+                }}
+              >
+                듣기
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+/** 요약·지난 기록이 공유하는 질문 카드 한 장. */
+function SummaryQuestionCard({record, index}: {record: SessionRecord; index: number}) {
+  const question = record.questions[index]
+  if (question === undefined) return null
+
+  const isQuestionnaire = record.mode === "questionnaire"
+  const sentence =
+    question.adopted ??
+    (question.words.length > 0 ? question.words.map((w) => w.text).join(" ") : null)
+
+  return (
+    <section className="gs-card">
+      <p className="gs-sumq-no">{isQuestionnaire ? `질문 ${index + 1}` : "자유 인식"}</p>
+      {isQuestionnaire ? <p className="gs-sumq-question">{QUESTIONS[index]}</p> : null}
+      <p className={`gs-sumq-answer${sentence === null ? " gs-sumq-none" : ""}`}>
+        {sentence ?? "답 없음"}
+      </p>
+      {question.words.length === 0 ? null : (
+        <div className="gs-chips gs-sumq-chips">
+          {question.words.map((w) => (
+            <span key={w.id} className="gs-wordchip gs-wordchip-ro">
+              {w.text}
+              <span className="gs-wordchip-pct">{fmtPercent(w.confidence)}</span>
             </span>
           ))}
         </div>
       )}
-
-      <p className="gs-sentence" aria-live="polite">
-        {sentence ?? "—"}
-      </p>
-
-      {lastWord === undefined ? null : (
-        <p className="gs-empty">
-          마지막 구간: {fmt(lastWord.wordFrameCount)}프레임 · {fmt(lastWord.spanMs)}ms ·{" "}
-          {fmt(lastWord.closeReason)}
-        </p>
-      )}
     </section>
+  )
+}
+
+const DIAG_KIND_LABEL: Record<string, string> = {
+  recognized: "인식",
+  low_confidence: "확신 부족",
+  out_of_frame: "화면 이탈",
+  too_short: "너무 짧음",
+  model_unavailable: "모델 미연결",
+  stale_result: "늦은 결과",
+  stale_error: "늦은 오류",
+}
+
+function fmtDiagTime(at: number): string {
+  const d = new Date(at)
+  const pad = (v: number) => String(v).padStart(2, "0")
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+function fmtDiagNum(value: number | null | undefined, digits = 2): string {
+  return typeof value === "number" ? value.toFixed(digits) : "—"
+}
+
+function fmtDiagPct(value: number | null | undefined): string {
+  return typeof value === "number" ? `${Math.round(value * 100)}%` : "—"
+}
+
+/** 최근 단어 구간 표. 가로로 길어 스크롤 컨테이너 안에 그린다. */
+function WordDiagTable({entries}: {entries: WordDiagEntry[]}) {
+  if (entries.length === 0) {
+    return <p className="gs-wdiag-empty">아직 단어 구간이 없습니다.</p>
+  }
+  return (
+    <div className="gs-wdiag-wrap">
+      <table className="gs-wdiag">
+        <thead>
+          <tr>
+            <th>시각</th>
+            <th>종류</th>
+            <th>후보</th>
+            <th>conf</th>
+            <th>기준</th>
+            <th>margin</th>
+            <th>기준</th>
+            <th>fr</th>
+            <th>uni</th>
+            <th>tgt</th>
+            <th>span</th>
+            <th>얼굴</th>
+            <th>손</th>
+            <th>close</th>
+            <th>ontime</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((e) => (
+            <Fragment key={e.at}>
+              <tr>
+                <td className="gs-wdiag-left">{fmtDiagTime(e.at)}</td>
+                <td className="gs-wdiag-left">{DIAG_KIND_LABEL[e.kind] ?? e.kind}</td>
+                <td className="gs-wdiag-left">{e.candidate ?? "—"}</td>
+                <td>{fmtDiagNum(e.confidence)}</td>
+                <td>{fmtDiagNum(e.confidenceThreshold)}</td>
+                <td>{fmtDiagNum(e.margin)}</td>
+                <td>{fmtDiagNum(e.marginThreshold)}</td>
+                <td>{e.frameCount ?? "—"}</td>
+                <td>{e.uniformFrameCount ?? "—"}</td>
+                <td>{e.targetFrames ?? "—"}</td>
+                <td>{typeof e.spanMs === "number" ? Math.round(e.spanMs) : "—"}</td>
+                <td>{fmtDiagPct(e.coverageFace)}</td>
+                <td>{fmtDiagPct(e.coverageHand)}</td>
+                <td className="gs-wdiag-left">{e.closeReason ?? "—"}</td>
+                <td>{fmt(e.resampledOnTime)}</td>
+              </tr>
+              {typeof e.message === "string" &&
+              e.message !== "" &&
+              (e.coverageFace === null || e.coverageFace === undefined) &&
+              e.kind !== "recognized" &&
+              e.kind !== "low_confidence" ? (
+                <tr>
+                  <td className="gs-wdiag-msg" colSpan={15}>
+                    {e.message}
+                  </td>
+                </tr>
+              ) : null}
+            </Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
@@ -305,6 +663,10 @@ function DiagnosticsPanel({snap}: {snap: Snapshot}) {
         <div className="gs-diag-row">
           <dt>transport</dt>
           <dd className="gs-mono">{fmt(d.transport)}</dd>
+        </div>
+        <div className="gs-diag-row">
+          <dt>해상도 (협상값)</dt>
+          <dd className="gs-mono">{fmt(d.resolvedSize)}</dd>
         </div>
         <div className="gs-diag-row">
           <dt>webrtc host</dt>
@@ -354,6 +716,13 @@ function DiagnosticsPanel({snap}: {snap: Snapshot}) {
           </dd>
         </div>
         <div className="gs-diag-row">
+          <dt>screen / mode / q</dt>
+          <dd className="gs-mono">
+            {snap.session.screen} / {snap.session.session?.mode ?? snap.session.mode} /{" "}
+            {snap.session.questionIndex}
+          </dd>
+        </div>
+        <div className="gs-diag-row">
           <dt>ssid</dt>
           <dd className="gs-mono">{fmt(snap.glasses.ssid)}</dd>
         </div>
@@ -362,6 +731,9 @@ function DiagnosticsPanel({snap}: {snap: Snapshot}) {
           <dd className="gs-mono">{fmt(snap.glasses.charging)}</dd>
         </div>
       </dl>
+
+      <p className="gs-wdiag-title">최근 단어 구간</p>
+      <WordDiagTable entries={snap.wordDiags} />
     </details>
   )
 }
@@ -373,6 +745,16 @@ function DiagnosticsPanel({snap}: {snap: Snapshot}) {
 export function App() {
   const [snap, setSnap] = useState<Snapshot>(EMPTY_SNAPSHOT)
   const [phase, setPhase] = useState<Phase>({kind: "loading"})
+  /** 지난 기록 목록·상세는 UI 로컬 화면이다. 데이터는 background 목록에서 읽는다. */
+  const [view, setView] = useState<{kind: "main"} | {kind: "list"} | {kind: "detail"; index: number}>({
+    kind: "main",
+  })
+  /** "기록 모두 지우기"의 화면 내 확인 단계. */
+  const [confirmClear, setConfirmClear] = useState(false)
+  /** clearHistory RPC 가 실패했을 때의 재시도 안내. */
+  const [clearFailed, setClearFailed] = useState(false)
+  /** 경과 시간 표시용 1초 틱. */
+  const [now, setNow] = useState(() => Date.now())
 
   // insets 와 capsuleMenu 는 마운트 시 한 번만 읽힌다(useSafeArea 내부의
   // useState 이니셜라이저). 런타임에 갱신되지 않으며 바뀌려면 호스트가 리로드를
@@ -381,6 +763,25 @@ export function App() {
 
   // 제네릭 두 개를 직접 써야 한다. 인자에서 추론되지 않는다.
   const getSnapshot = useRpc<Channels, "getSnapshot">("getSnapshot")
+  const setMode = useRpc<Channels, "setMode">("setMode")
+  const nextQuestion = useRpc<Channels, "nextQuestion">("nextQuestion")
+  const prevQuestion = useRpc<Channels, "prevQuestion">("prevQuestion")
+  const removeWord = useRpc<Channels, "removeWord">("removeWord")
+  const adoptCandidate = useRpc<Channels, "adoptCandidate">("adoptCandidate")
+  const continueFree = useRpc<Channels, "continueFree">("continueFree")
+  const goHome = useRpc<Channels, "goHome">("goHome")
+  const speakText = useRpc<Channels, "speakText">("speakText")
+  const clearHistory = useRpc<Channels, "clearHistory">("clearHistory")
+
+  /** 조작 RPC 는 결과를 기다리지 않는다. 화면은 session:state 방송으로 갱신된다. */
+  function fire(p: Promise<unknown>): void {
+    void p.catch((err: unknown) => console.warn("[UI] RPC 실패", err))
+  }
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
 
   useEffect(() => {
     // 순서는 구독 → ready() → 요청이다. background 가 ready 시점에 밀린 것을
@@ -419,6 +820,22 @@ export function App() {
         seen.add("error")
         setSnap((s) => ({...s, error: e}))
       }),
+      mentra.on("session:state", (session) => {
+        seen.add("session")
+        setSnap((s) => ({...s, session}))
+      }),
+      mentra.on("word:diag", (entry) => {
+        seen.add("wordDiags")
+        setSnap((s) => ({...s, wordDiags: [entry, ...s.wordDiags].slice(0, 10)}))
+      }),
+      mentra.on("word:progress", (progress) => {
+        seen.add("progress")
+        setSnap((s) => ({...s, progress}))
+      }),
+      mentra.on("word:card", (wordCard) => {
+        seen.add("wordCard")
+        setSnap((s) => ({...s, wordCard}))
+      }),
     ]
 
     // 부트스트랩에서 반드시 한 번 불러야 한다. SDK 가 멱등이라고 명시한다.
@@ -426,7 +843,7 @@ export function App() {
     // 하려는 것이다.
     mentra.ready()
 
-    getSnapshot({}, {timeout: SNAPSHOT_TIMEOUT_MS})
+    getSnapshot({}, {timeout: RPC_TIMEOUT_MS})
       .then((snapshot) => {
         // 슬롯 단위로 판단한다. 방송은 스냅샷보다 새로우므로 이미 방송을 받은
         // 슬롯은 live 값을 지키고, 받지 않은 슬롯만 스냅샷 값을 취한다. 결과는
@@ -440,6 +857,12 @@ export function App() {
           // 다른 슬롯과 같은 규칙이다. 방송으로 이미 받았으면 그쪽이 더 새롭다.
           // 스냅샷에는 담기지만 화면 표시는 아직 붙이지 않았다.
           error: seen.has("error") ? s.error : snapshot.error,
+          session: seen.has("session") ? s.session : snapshot.session,
+          wordDiags: seen.has("wordDiags")
+            ? mergeWordDiags(snapshot.wordDiags, s.wordDiags)
+            : snapshot.wordDiags,
+          progress: seen.has("progress") ? s.progress : snapshot.progress,
+          wordCard: seen.has("wordCard") ? s.wordCard : snapshot.wordCard,
         }))
         setPhase({kind: "ready"})
       })
@@ -457,8 +880,367 @@ export function App() {
     }
   }, [getSnapshot])
 
-  const stream = describeStream(snap)
-  const animated = snap.stream.state !== "idle" && snap.stream.state !== "error"
+  const ss = snap.session
+  const record = ss.session
+  const streaming = snap.stream.state === "streaming"
+  const streamView = describeStream(snap)
+  const hasStreamError = snap.stream.state === "error"
+
+  // 지난 기록을 보는 중에 안경 버튼으로 새 세션이 시작되면 돌아온다.
+  useEffect(() => {
+    if (ss.screen !== "idle") {
+      setView({kind: "main"})
+      setConfirmClear(false)
+    }
+  }, [ss.screen])
+
+  /** 기록 화면 사이 이동. 확인 단계와 실패 안내는 이동할 때마다 접는다. */
+  function goView(next: typeof view): void {
+    setConfirmClear(false)
+    setClearFailed(false)
+    setView(next)
+  }
+
+  // -------------------------------------------------------------------------
+  // 화면별 본문
+  // -------------------------------------------------------------------------
+
+  function renderIdle() {
+    return (
+      <>
+        <p className="gs-intro">{START_ANNOUNCEMENT}</p>
+
+        {hasStreamError ? (
+          <ErrorCard snap={snap} />
+        ) : (
+          <section className={`gs-card gs-status gs-tone-${streamView.tone}`}>
+            <VisualFeedback
+              tone={streamView.tone}
+              animated={snap.stream.state !== "idle" && snap.stream.state !== "error"}
+            />
+            <p className="gs-status-label">{streamView.label}</p>
+            <p className="gs-status-detail">{streamView.detail}</p>
+          </section>
+        )}
+
+        <StatusBadges snap={snap} />
+
+        <div className="gs-modes" role="radiogroup" aria-label="진행 방식">
+          <button
+            className={`gs-mode-card${ss.mode === "questionnaire" ? " gs-mode-card-on" : ""}`}
+            role="radio"
+            aria-checked={ss.mode === "questionnaire"}
+            onClick={() => fire(setMode({mode: "questionnaire"}, {timeout: RPC_TIMEOUT_MS}))}
+          >
+            <span className="gs-mode-radio" aria-hidden="true">
+              {ss.mode === "questionnaire" ? <span className="gs-mode-radio-dot" /> : null}
+            </span>
+            <span>
+              <p className="gs-mode-name">문진</p>
+              <p className="gs-mode-desc">{QUESTIONS.join("\n")}</p>
+            </span>
+          </button>
+          <button
+            className={`gs-mode-card${ss.mode === "free" ? " gs-mode-card-on" : ""}`}
+            role="radio"
+            aria-checked={ss.mode === "free"}
+            onClick={() => fire(setMode({mode: "free"}, {timeout: RPC_TIMEOUT_MS}))}
+          >
+            <span className="gs-mode-radio" aria-hidden="true">
+              {ss.mode === "free" ? <span className="gs-mode-radio-dot" /> : null}
+            </span>
+            <span>
+              <p className="gs-mode-name">자유 인식</p>
+              <p className="gs-mode-desc">질문 없이 수어 단어를 이어서 인식합니다</p>
+            </span>
+          </button>
+        </div>
+
+        <p className="gs-hint">{FRAMING_ANNOUNCEMENT}</p>
+
+        {ss.pastSessions.length === 0 ? null : (
+          <button className="gs-lastrow" onClick={() => goView({kind: "list"})}>
+            지난 기록 보기
+            <span className="gs-lastrow-sub">{ss.pastSessions.length}건</span>
+          </button>
+        )}
+
+        <DiagnosticsPanel snap={snap} />
+      </>
+    )
+  }
+
+  function renderActive(activeRecord: SessionRecord) {
+    const isQuestionnaire = activeRecord.mode === "questionnaire"
+    const qi = isQuestionnaire ? ss.questionIndex : 0
+    const question = activeRecord.questions[qi]
+    const prevAnswer = isQuestionnaire && qi > 0 ? activeRecord.questions[qi - 1] : undefined
+
+    return (
+      <>
+        <div className="gs-topline">
+          {streaming ? (
+            <span className="gs-livechip">인식 중 · {fmtElapsed(now - activeRecord.startedAt)}</span>
+          ) : (
+            <span className="gs-streamoff">{streamView.label}</span>
+          )}
+          {isQuestionnaire ? null : <span className="gs-tag">자유 인식</span>}
+        </div>
+
+        <StatusBadges snap={snap} />
+
+        {isQuestionnaire ? (
+          <section className="gs-card gs-question">
+            <div className="gs-question-meta">
+              <span className="gs-question-count">
+                질문 {qi + 1}/{QUESTION_COUNT}
+              </span>
+              <span className="gs-qdots" aria-hidden="true">
+                {QUESTIONS.map((text, i) => (
+                  <span
+                    key={text}
+                    className={`gs-qdot${i === qi ? " gs-qdot-on" : i < qi ? " gs-qdot-done" : ""}`}
+                  />
+                ))}
+              </span>
+            </div>
+            <p className="gs-question-text">{QUESTIONS[qi]}</p>
+          </section>
+        ) : null}
+
+        {hasStreamError ? (
+          snap.stream.lost === true ? (
+            <StreamLostCard />
+          ) : (
+            <ErrorCard snap={snap} />
+          )
+        ) : ss.segmentOpen ? (
+          <RecordingCard progress={snap.progress} openedAt={ss.segmentOpenedAt} now={now} />
+        ) : (
+          <ResultCard card={snap.wordCard} />
+        )}
+
+        <AnswerCard
+          words={question?.words ?? []}
+          segmentOpen={ss.segmentOpen}
+          showsError={hasStreamError}
+          questionIndex={qi}
+          adopted={question?.adopted}
+          onRemove={(wordId) => fire(removeWord({wordId}, {timeout: RPC_TIMEOUT_MS}))}
+          onAdopt={(candidateIndex) =>
+            fire(adoptCandidate({questionIndex: qi, candidateIndex}, {timeout: RPC_TIMEOUT_MS}))
+          }
+          onListen={(text) => fire(speakText({text}, {timeout: RPC_TIMEOUT_MS}))}
+        />
+
+        {prevAnswer === undefined ? null : (
+          <p className="gs-prevanswer">
+            이전 질문 답 ·{" "}
+            {prevAnswer.words.length > 0
+              ? prevAnswer.words.map((w) => w.text).join(" ")
+              : "답 없음"}
+          </p>
+        )}
+
+        {isQuestionnaire ? (
+          <div className="gs-nav">
+            {/* 단어 구간이 열려 있는 동안에는 질문을 옮길 수 없다. */}
+            <button
+              className="gs-btn gs-btn-outline"
+              disabled={qi === 0 || ss.segmentOpen}
+              onClick={() => fire(prevQuestion({}, {timeout: RPC_TIMEOUT_MS}))}
+            >
+              이전 질문
+            </button>
+            <button
+              className="gs-btn gs-btn-filled"
+              disabled={ss.segmentOpen}
+              onClick={() => fire(nextQuestion({}, {timeout: RPC_TIMEOUT_MS}))}
+            >
+              다음 질문
+            </button>
+          </div>
+        ) : (
+          <p className="gs-hint">
+            버튼을 길게 누르면 인식을 마치고 대기 화면으로 돌아가요 · 기록은 지난 기록에 남아요
+          </p>
+        )}
+
+        <DiagnosticsPanel snap={snap} />
+      </>
+    )
+  }
+
+  function renderSummary(summaryRecord: SessionRecord) {
+    const elapsed = (summaryRecord.endedAt ?? now) - summaryRecord.startedAt
+    return (
+      <>
+        <div className="gs-sumhead">
+          <span className="gs-sumchip">문진 완료</span>
+          <span className="gs-sumstats">
+            단어 {wordCountOf(summaryRecord)}개 · {fmtElapsed(elapsed)}
+          </span>
+          {streaming ? null : <span className="gs-streamoff">스트림 종료됨</span>}
+        </div>
+
+        {summaryRecord.questions.map((_, i) => (
+          <SummaryQuestionCard key={i} record={summaryRecord} index={i} />
+        ))}
+
+        <p className="gs-caption">
+          단어 옆 숫자는 모델 확신도입니다. 낮은 단어는 한 번 더 확인해 주세요.
+        </p>
+
+        <div className="gs-nav">
+          <button
+            className="gs-btn gs-btn-outline"
+            onClick={() => fire(continueFree({}, {timeout: RPC_TIMEOUT_MS}))}
+          >
+            자유 모드로 계속
+          </button>
+          <button
+            className="gs-btn gs-btn-filled"
+            onClick={() => fire(goHome({}, {timeout: RPC_TIMEOUT_MS}))}
+          >
+            처음으로
+          </button>
+        </div>
+
+        <p className="gs-caption">
+          {streaming
+            ? "카메라 스트림이 켜져 있습니다. 자유 모드로 바로 이어 갈 수 있습니다."
+            : "자유 모드로 계속하면 카메라 스트림을 다시 시작합니다."}
+        </p>
+
+        <DiagnosticsPanel snap={snap} />
+      </>
+    )
+  }
+
+  function renderHistoryList() {
+    return (
+      <>
+        <div className="gs-histhead">
+          <h2 className="gs-histtitle">지난 기록</h2>
+          <button className="gs-histback" onClick={() => goView({kind: "main"})}>
+            돌아가기
+          </button>
+        </div>
+
+        {ss.pastSessions.map((rec, i) => (
+          <button
+            key={`${rec.startedAt}-${i}`}
+            className="gs-histrow"
+            onClick={() => goView({kind: "detail", index: i})}
+          >
+            <span className="gs-histtag">{rec.mode === "questionnaire" ? "문진" : "자유"}</span>
+            <span className="gs-histmeta">
+              {fmtStartTime(rec.startedAt, now)} · {fmtElapsed(durationOf(rec))} · 단어{" "}
+              {wordCountOf(rec)}개
+            </span>
+            <span className="gs-histchev" aria-hidden="true">
+              ›
+            </span>
+          </button>
+        ))}
+
+        <p className="gs-caption">기록은 폰에 저장되지 않으며 최근 10건만 남습니다.</p>
+
+        {confirmClear ? (
+          <>
+            {clearFailed ? (
+              <p className="gs-caption gs-histfail">삭제하지 못했어요. 다시 시도해 주세요</p>
+            ) : null}
+            <div className="gs-nav">
+              <button className="gs-btn gs-btn-outline" onClick={() => setConfirmClear(false)}>
+                취소
+              </button>
+              <button
+                className="gs-btn gs-btn-danger"
+                onClick={() => {
+                  setClearFailed(false)
+                  clearHistory({}, {timeout: RPC_TIMEOUT_MS})
+                    .then(() => goView({kind: "main"}))
+                    .catch(() => setClearFailed(true))
+                }}
+              >
+                정말 모두 지우기
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="gs-nav">
+            <button
+              className="gs-btn gs-btn-outline"
+              onClick={() => {
+                setClearFailed(false)
+                setConfirmClear(true)
+              }}
+            >
+              기록 모두 지우기
+            </button>
+          </div>
+        )}
+      </>
+    )
+  }
+
+  function renderHistoryDetail(detailRecord: SessionRecord) {
+    return (
+      <>
+        <div className="gs-histhead">
+          <span className="gs-histtag">
+            {detailRecord.mode === "questionnaire" ? "문진" : "자유"}
+          </span>
+          <span className="gs-histmeta">
+            {fmtStartTime(detailRecord.startedAt, now)} · {fmtElapsed(durationOf(detailRecord))}
+          </span>
+          <button className="gs-histback" onClick={() => goView({kind: "list"})}>
+            돌아가기
+          </button>
+        </div>
+
+        {detailRecord.mode === "questionnaire" ? (
+          detailRecord.questions.map((_, i) => (
+            <SummaryQuestionCard key={i} record={detailRecord} index={i} />
+          ))
+        ) : (
+          <section className="gs-card">
+            <h2 className="gs-card-title">인식 단어</h2>
+            {detailRecord.questions[0] === undefined ||
+            detailRecord.questions[0].words.length === 0 ? (
+              <p className="gs-empty">답 없음</p>
+            ) : (
+              <div className="gs-chips">
+                {detailRecord.questions[0].words.map((w) => (
+                  <span key={w.id} className="gs-wordchip gs-wordchip-ro">
+                    {w.text}
+                    <span className="gs-wordchip-pct">{fmtPercent(w.confidence)}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        <p className="gs-caption">단어 옆 숫자는 모델 확신도입니다.</p>
+      </>
+    )
+  }
+
+  let body: React.ReactNode
+  const detailRecord = view.kind === "detail" ? ss.pastSessions[view.index] : undefined
+  if (ss.screen === "summary" && record !== null) {
+    body = renderSummary(record)
+  } else if (ss.screen === "active" && record !== null) {
+    body = renderActive(record)
+  } else if (detailRecord !== undefined) {
+    body = renderHistoryDetail(detailRecord)
+  } else if (view.kind !== "main" && ss.pastSessions.length > 0) {
+    body = renderHistoryList()
+  } else {
+    body = renderIdle()
+  }
 
   return (
     <div
@@ -511,37 +1293,7 @@ export function App() {
           </p>
         ) : null}
 
-        <div className="gs-badges">
-          <StatusBadge name="AI" view={describeAi(snap)} />
-          <StatusBadge name="안경" view={describeGlasses(snap)} />
-          <StatusBadge name="스트림" view={stream} />
-        </div>
-
-        <section className={`gs-card gs-status gs-tone-${stream.tone}`}>
-          <VisualFeedback tone={stream.tone} animated={animated} />
-          <p className="gs-status-label">{stream.label}</p>
-          <p className="gs-status-detail">{stream.detail}</p>
-        </section>
-
-        {/*
-          박스 하나에 서로 배타적인 두 문구. 동시에 보이는 일은 없다. 시작 안내는
-          대기 상태의 것이고, 자세 안내는 실제로 프레임이 측정되는 동안에만
-          의미가 있다.
-
-          실측: 상대의 얼굴만 응시하면 얼굴 70/70, 양손 0/21 이다 — 손이 안경
-          시야 밖으로 완전히 벗어나 인식할 대상이 없다. 얼굴과 손이 함께 보이도록
-          잡으면 70/70, 21/21 이 된다. 스트리밍 중 이 줄이 화면을 차지할 값어치가
-          있는 이유다.
-        */}
-        <p className="gs-hint">
-          {snap.stream.state === "streaming"
-            ? "상대방의 얼굴과 손이 함께 보이도록 바라보세요"
-            : "안경 관자놀이 버튼을 길게 눌러 시작하세요"}
-        </p>
-
-        <ResultPanel results={snap.results} />
-
-        <DiagnosticsPanel snap={snap} />
+        {body}
       </main>
     </div>
   )

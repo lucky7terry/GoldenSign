@@ -11,6 +11,10 @@ export const START_ANNOUNCEMENT =
 // 구간 인식이 실패했을 때 LED 대신 소리로 알린다.
 export const RETRY_ANNOUNCEMENT = "인식에 실패했습니다. 재시도해주세요"
 
+// 서버가 영상 스트림을 놓쳐(stream_unavailable) 더는 프레임이 처리되지 않을 때 읽는다.
+export const STREAM_LOST_ANNOUNCEMENT =
+  "카메라 영상 연결이 끊겼습니다. 버튼을 길게 눌러 다시 시작해 주세요"
+
 // 서버 app/api/tts.py 의 FRAMING_ANNOUNCEMENT 와 글자까지 같아야 미리 만든 음성 캐시가 맞는다.
 export const FRAMING_ANNOUNCEMENT = "상대방의 얼굴과 손이 함께 보이도록 바라보세요"
 

@@ -35,6 +35,67 @@
 
 import type {Rpc} from "@mentra/miniapp/ui"
 
+/** 대기 화면에서 고르는 진행 방식. 마지막 선택은 background 가 메모리로만 유지한다. */
+export type Mode = "questionnaire" | "free"
+
+/** 스트림 상태와 별개의 화면 상태. 전이 규칙은 background 가 소유한다. */
+export type Screen = "idle" | "active" | "summary"
+
+/**
+ * 답으로 모인 단어 한 개. `id` 는 background 가 붙이는 증가 번호다 —
+ * windowIndex 는 -1 센티널이 있어 식별자로 쓸 수 없다.
+ */
+export interface AnswerWord {
+  id: number
+  text: string
+  confidence: number
+  windowIndex: number
+}
+
+/** 질문 하나의 답. `adopted` 는 문장 후보에서 채택한 문장이다(없으면 null). */
+export interface SessionQuestion {
+  words: AnswerWord[]
+  adopted?: string | null
+}
+
+/**
+ * 기록 세션 한 건. 경계는 스트림이 아니라 "모드 시작~종료"다 — 요약에서 자유
+ * 모드로 이어 가면 스트림은 그대로여도 세션은 새로 시작하고, 재연결로 서버
+ * session_id 가 바뀌어도 세션은 유지된다. 자유 모드는 questions[0] 하나만 쓴다.
+ */
+export interface SessionRecord {
+  mode: Mode
+  startedAt: number
+  endedAt?: number | null
+  questions: SessionQuestion[]
+}
+
+/**
+ * 진단 패널의 "최근 단어 구간" 한 줄. 단어 result 와 구간을 닫는 서버
+ * 오류(화면 이탈·너무 짧음 등)에서 background 가 만든다.
+ */
+export interface WordDiagEntry {
+  /** 기록 시각(epoch ms). */
+  at: number
+  /** recognized / low_confidence / out_of_frame / too_short / 그 외 오류 코드. */
+  kind: string
+  candidate?: string | null
+  confidence?: number | null
+  margin?: number | null
+  confidenceThreshold?: number | null
+  marginThreshold?: number | null
+  frameCount?: number | null
+  uniformFrameCount?: number | null
+  targetFrames?: number | null
+  spanMs?: number | null
+  coverageFace?: number | null
+  coverageHand?: number | null
+  closeReason?: string | null
+  resampledOnTime?: boolean | null
+  /** 오류 원문. 비율을 message 에서 못 뽑았을 때 그대로 보여 준다. */
+  message?: string | null
+}
+
 /**
  * 갓 마운트된 UI 가 다음 브로드캐스트를 기다리지 않고 바로 그릴 수 있는 만큼의
  * 상태. background 의 단일 `patch()` 가 브로드캐스트와 같은 값을 여기에도
@@ -49,6 +110,14 @@ export interface Snapshot {
   results: Channels["recognition:result"][]
   /** 마지막으로 받은 에러. 아직 없으면 null. */
   error: Channels["error"] | null
+  /** 화면·기록 상태. 한 덩어리로 다뤄 스냅샷 병합이 슬롯 하나로 끝난다. */
+  session: Channels["session:state"]
+  /** 최근 단어 구간 진단. 최신이 앞이고 상한은 background 가 건다. */
+  wordDiags: WordDiagEntry[]
+  /** 마지막 word_progress. 아직 없으면 null. */
+  progress: Channels["word:progress"] | null
+  /** "방금 인식된 단어" 카드 상태. 비어 있으면 null. */
+  wordCard: Channels["word:card"]
 }
 
 export interface Channels {
@@ -82,6 +151,8 @@ export interface Channels {
       | "error"
     streamId?: string | null
     message?: string | null
+    /** 서버가 stream_unavailable 로 스트림을 놓은 상태인지. */
+    lost?: boolean
   }
 
   /**
@@ -120,6 +191,10 @@ export interface Channels {
     spanMs?: number
     /** 결과 생성 시점의 모델 로드 여부. false 면 confidence 는 의미가 없다. */
     modelLoaded?: boolean
+    /** 서버의 채택 임계값. 확신도 막대의 기준선이다. 안 실려 오면 null. */
+    confidenceThreshold?: number | null
+    /** 서버가 1위로 본 후보. 확신 부족 카드에 보여 준다. */
+    candidate?: string | null
   }
 
   "glasses:state": {
@@ -143,10 +218,53 @@ export interface Channels {
      */
     processedFps?: number | null
     transport?: string | null
+    /** 협상된 해상도 "폭x높이". resolvedConfig 가 없으면 null. */
+    resolvedSize?: string | null
     /** 호스트명만. parseUrlParts() 로 뽑는다. `new URL()` 은 런타임에 없다. */
     webrtcHost?: string | null
     mode?: string | null
     status?: string | null
+  }
+
+  /**
+   * 화면·기록 상태 한 덩어리. 모드 선택, 화면 전이, 단어 추가·삭제, 구간
+   * 열림/닫힘이 전부 이 채널 하나로 방송된다.
+   */
+  "session:state": {
+    mode: Mode
+    screen: Screen
+    /** 문진 모드의 현재 질문(0~3). 자유 모드에서는 늘 0 이다. */
+    questionIndex: number
+    /** 단어 구간이 열려 있는지. UI 가 진행 중 점선 칩을 그리는 근거다. */
+    segmentOpen: boolean
+    /** 열린 구간의 시작 시각(epoch ms). 닫혀 있으면 null. */
+    segmentOpenedAt?: number | null
+    /** 진행 중인 기록 세션. 없으면 null. */
+    session: SessionRecord | null
+    /** 끝난 세션 목록. 최신순 최대 10건이며 영구 저장은 하지 않는다. */
+    pastSessions: SessionRecord[]
+  }
+
+  /** 단어 구간 진단 한 줄. 결과나 구간 오류가 올 때마다 나간다. */
+  "word:diag": WordDiagEntry
+
+  /**
+   * "방금 인식된 단어" 카드 상태. 지금 세션·지금 질문에서 나온 마지막 결과만
+   * 담고, 질문 이동·새 세션 시작·처음으로에서 background 가 null 로 비운다.
+   */
+  "word:card":
+    | {kind: "result"; result: Channels["recognition:result"]}
+    | {kind: "out_of_frame"}
+    | null
+
+  /** 열린 구간 동안 서버가 초당 한 번 보내는 진행 상황. */
+  "word:progress": {
+    /** background 가 받은 시각(epoch ms). 이전 구간의 값과 구분하는 기준이다. */
+    at: number
+    /** 이 구간에 서버가 모은 프레임 수. */
+    frameCount: number
+    /** 서버의 최근 처리 fps. 첫 건에서는 null. */
+    processedFps: number | null
   }
 
   // ---------------------------------------------------------------------
@@ -158,6 +276,33 @@ export interface Channels {
    * 타입이 `{}` 이고, 호출부는 `mentra.request("getSnapshot", {})` 로 쓴다.
    */
   "getSnapshot": Rpc<{}, Snapshot>
+
+  /** 대기 화면의 진행 방식 선택. idle 화면에서만 의미가 있다. */
+  "setMode": Rpc<{mode: Mode}, {}>
+
+  /** 다음 질문으로. 마지막 질문에서 부르면 summary 로 넘어간다(스트림 유지). */
+  "nextQuestion": Rpc<{}, {}>
+
+  /** 이전 질문으로. 기존 답은 그대로 두고 이어서 추가한다. */
+  "prevQuestion": Rpc<{}, {}>
+
+  /** 답 단어 삭제. id 는 AnswerWord.id 다. */
+  "removeWord": Rpc<{wordId: number}, {}>
+
+  /** 문장 후보 채택. 후보는 background 가 buildCandidates 로 다시 만들어 찾는다. */
+  "adoptCandidate": Rpc<{questionIndex: number; candidateIndex: number}, {}>
+
+  /** 요약에서 새 자유 세션으로 이어 간다. 스트림이 죽어 있으면 다시 시작한다. */
+  "continueFree": Rpc<{}, {}>
+
+  /** 요약에서 대기 화면으로. 스트림이 살아 있으면 종료한다. */
+  "goHome": Rpc<{}, {}>
+
+  /** 문장 후보의 듣기 버튼. 넘긴 문장을 안경 스피커로 읽는다. */
+  "speakText": Rpc<{text: string}, {}>
+
+  /** 지난 기록 목록을 전부 비운다. */
+  "clearHistory": Rpc<{}, {}>
 }
 
 declare global {
