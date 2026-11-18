@@ -653,6 +653,12 @@ button {
   background: var(--gs-accent-strong);
 }
 
+/* 녹화 중 카드의 영상 미수신 경고. */
+.gs-result-stall {
+  color: var(--gs-error);
+  font-weight: 600;
+}
+
 /* 확신 부족·화면 이탈은 중립, 모델 미연결은 경고색이다. */
 .gs-result-warn {
   border-color: var(--gs-error);

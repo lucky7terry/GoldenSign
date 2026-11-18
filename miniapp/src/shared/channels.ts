@@ -114,6 +114,8 @@ export interface Snapshot {
   session: Channels["session:state"]
   /** 최근 단어 구간 진단. 최신이 앞이고 상한은 background 가 건다. */
   wordDiags: WordDiagEntry[]
+  /** 마지막 word_progress. 아직 없으면 null. */
+  progress: Channels["word:progress"] | null
 }
 
 export interface Channels {
@@ -229,6 +231,8 @@ export interface Channels {
     questionIndex: number
     /** 단어 구간이 열려 있는지. UI 가 진행 중 점선 칩을 그리는 근거다. */
     segmentOpen: boolean
+    /** 열린 구간의 시작 시각(epoch ms). 닫혀 있으면 null. */
+    segmentOpenedAt?: number | null
     /** 진행 중인 기록 세션. 없으면 null. */
     session: SessionRecord | null
     /** 끝난 세션 목록. 최신순 최대 10건이며 영구 저장은 하지 않는다. */
@@ -237,6 +241,16 @@ export interface Channels {
 
   /** 단어 구간 진단 한 줄. 결과나 구간 오류가 올 때마다 나간다. */
   "word:diag": WordDiagEntry
+
+  /** 열린 구간 동안 서버가 초당 한 번 보내는 진행 상황. */
+  "word:progress": {
+    /** background 가 받은 시각(epoch ms). 이전 구간의 값과 구분하는 기준이다. */
+    at: number
+    /** 이 구간에 서버가 모은 프레임 수. */
+    frameCount: number
+    /** 서버의 최근 처리 fps. 첫 건에서는 null. */
+    processedFps: number | null
+  }
 
   // ---------------------------------------------------------------------
   // WebView → background (RPC)

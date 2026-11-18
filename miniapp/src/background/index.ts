@@ -554,6 +554,12 @@ function parseCoverageMessage(message: string): {face: number | null; hand: numb
   }
 }
 
+/** word_too_short 오류 message("has N frames")에서 프레임 수를 뽑는다. */
+function parseTooShortFrames(message: string): number | null {
+  const m = /has (\d+) frames/.exec(message)
+  return m === null ? null : Number(m[1])
+}
+
 // 모듈 레벨에 두어 Mentra 세션이 끝나도 JSContext 가 살아 있는 동안 유지된다.
 // 영구 저장은 하지 않는다 — 의료 정보 성격이라 폰에 남기지 않는다.
 /** 대기 화면에서 마지막으로 고른 진행 방식. */
@@ -695,10 +701,12 @@ registerMiniapp((session) => {
       screen: "idle",
       questionIndex: 0,
       segmentOpen: false,
+      segmentOpenedAt: null,
       session: null,
       pastSessions: savedPastSessions,
     },
     wordDiags: [],
+    progress: null,
   }
 
   // --- LED ------------------------------------------------------------------
@@ -900,6 +908,9 @@ registerMiniapp((session) => {
           snapshot.wordDiags.length = MAX_WORD_DIAGS
         }
         break
+      case "word:progress":
+        snapshot.progress = next as Channels["word:progress"]
+        break
       default:
         break
     }
@@ -981,7 +992,14 @@ registerMiniapp((session) => {
   /**
    * word_progress 한 건마다 부른다. fps 는 서버가 이미 계산해서 보낸다.
    */
-  function trackProcessedFps(progress: AiWordProgress): void {
+  function trackWordProgress(progress: AiWordProgress): void {
+    // 녹화 중 카드가 쓴다. 첫 건은 fps 가 null 이어도 프레임 수는 유효하다.
+    patch("word:progress", {
+      at: Date.now(),
+      frameCount: progress.frameCount,
+      processedFps: progress.processedFps,
+    })
+
     // 첫 건은 서버도 낼 근거가 없어 null 이다. 이전 값을 그대로 둔다.
     if (progress.processedFps === null) return
 
@@ -1331,6 +1349,7 @@ registerMiniapp((session) => {
             : err.code === "word_out_of_frame"
               ? "out_of_frame"
               : err.code,
+        frameCount: err.code === "word_too_short" ? parseTooShortFrames(err.message) : null,
         coverageFace: coverage.face,
         coverageHand: coverage.hand,
         message: err.message,
@@ -1349,6 +1368,7 @@ registerMiniapp((session) => {
       screen,
       questionIndex,
       segmentOpen: wordSegment !== undefined,
+      segmentOpenedAt: wordSegment?.startedAt ?? null,
       session: currentSession ?? null,
       pastSessions: savedPastSessions,
     })
@@ -1704,8 +1724,8 @@ registerMiniapp((session) => {
         handleAiError,
         // ack 는 word_start 의 max_seconds 만 쓴다.
         handleAck,
-        // 처리 fps 의 출처. 구간이 열려 있는 동안 초당 한 번 온다.
-        trackProcessedFps,
+        // 처리 fps 와 녹화 중 카드의 출처. 구간이 열려 있는 동안 초당 한 번 온다.
+        trackWordProgress,
       )
       console.log("[AI] 인스턴스 생성", ai.getId())
       ai.connect()

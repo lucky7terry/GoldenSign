@@ -55,10 +55,12 @@ const EMPTY_SNAPSHOT: Snapshot = {
     screen: "idle",
     questionIndex: 0,
     segmentOpen: false,
+    segmentOpenedAt: null,
     session: null,
     pastSessions: [],
   },
   wordDiags: [],
+  progress: null,
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +319,37 @@ function VisualFeedback({tone, animated}: {tone: Tone; animated: boolean}) {
       <span className={`gs-pulse-ring${animated ? " gs-pulse-on" : ""}`} />
       <span className="gs-pulse-core" />
     </div>
+  )
+}
+
+/** 열린 구간 동안 서버가 받은 프레임 수와 처리 속도. word_progress 가 채운다. */
+function RecordingCard({
+  progress,
+  openedAt,
+  now,
+}: {
+  progress: Snapshot["progress"]
+  openedAt: number | null | undefined
+  now: number
+}) {
+  // 이전 구간의 진행 상황이 남아 있을 수 있어 구간 시작 이후의 값만 쓴다.
+  const live =
+    progress !== null && typeof openedAt === "number" && progress.at >= openedAt ? progress : null
+  const stalled =
+    typeof openedAt === "number" && now - openedAt > 2000 && (live === null || live.frameCount === 0)
+
+  return (
+    <section className="gs-card">
+      <h2 className="gs-card-title">방금 인식된 단어</h2>
+      <p className="gs-result-word">녹화 중</p>
+      <p className="gs-result-sub">
+        프레임 {live === null ? "—" : live.frameCount} · 처리{" "}
+        {live === null || live.processedFps === null ? "—" : live.processedFps.toFixed(1)} fps
+      </p>
+      {stalled ? (
+        <p className="gs-result-sub gs-result-stall">영상이 서버에 들어오지 않고 있어요</p>
+      ) : null}
+    </section>
   )
 }
 
@@ -793,6 +826,10 @@ export function App() {
         seen.add("wordDiags")
         setSnap((s) => ({...s, wordDiags: [entry, ...s.wordDiags].slice(0, 10)}))
       }),
+      mentra.on("word:progress", (progress) => {
+        seen.add("progress")
+        setSnap((s) => ({...s, progress}))
+      }),
     ]
 
     // 부트스트랩에서 반드시 한 번 불러야 한다. SDK 가 멱등이라고 명시한다.
@@ -818,6 +855,7 @@ export function App() {
           wordDiags: seen.has("wordDiags")
             ? mergeWordDiags(snapshot.wordDiags, s.wordDiags)
             : snapshot.wordDiags,
+          progress: seen.has("progress") ? s.progress : snapshot.progress,
         }))
         // 결과 카드도 히스토리에서 복구한다. 방송이 이미 채웠으면 그쪽이 더 새롭다.
         setWordEvent((prev) => {
@@ -974,6 +1012,8 @@ export function App() {
           ) : (
             <ErrorCard snap={snap} />
           )
+        ) : ss.segmentOpen ? (
+          <RecordingCard progress={snap.progress} openedAt={ss.segmentOpenedAt} now={now} />
         ) : (
           <ResultCard event={wordEvent} />
         )}
