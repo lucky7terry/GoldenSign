@@ -1621,6 +1621,14 @@ registerMiniapp((session) => {
           while (appState === "stopping" && Date.now() < deadline) {
             await new Promise((resolve) => setTimeout(resolve, 100))
           }
+          // 기한이 지나도 정지 중이면 시작하지 않고 영상 끊김 흐름으로 넘긴다.
+          if (appState === "stopping") {
+            console.warn("[Stream] 정지가 끝나지 않아 자유 모드 시작을 포기한다 — 끊김 흐름으로 전환")
+            report("app_error", "warn", {where: "continue_free_stop_timeout"})
+            streamLost = true
+            setState("error")
+            return
+          }
           await runStartSequence(bound)
         })().catch((err) => {
           setState("error")
@@ -2047,9 +2055,9 @@ registerMiniapp((session) => {
     } catch (err) {
       console.error("[Stream] stream.stop 실패 — 인자 없는 stop() 으로 폴백")
       logRequestError("[Stream] stream.stop", err)
-      // 폴백은 "활성 스트림" 을 멈추므로 새 스트림이 생겼으면 그것을 죽인다.
-      if (activeStream !== undefined) {
-        console.warn("[Stream] 새 스트림이 이미 있어 인자 없는 stop() 을 건너뛴다")
+      // 폴백은 "활성 스트림" 을 멈추므로 새 스트림이나 진행 중인 시작을 죽일 수 있다.
+      if (activeStream !== undefined || startInFlight) {
+        console.warn("[Stream] 새 스트림이나 진행 중인 시작이 있어 인자 없는 stop() 을 건너뛴다")
         throw err
       }
       try {
@@ -2412,10 +2420,14 @@ registerMiniapp((session) => {
               goHomeFromSummary(`long press (buttonId=${press.buttonId})`)
               return
             }
-            void runStartSequence().catch((err) => {
-              setState("error")
-              logRequestError("[Stream] 시작 시퀀스 예외", err)
-            })
+            // 인식 화면의 재시작은 세션에 묶어, 기다리는 사이 처음으로 가면
+            // 뒤늦게 켜진 스트림이 새 세션을 열지 않게 한다.
+            void runStartSequence(screen === "active" ? currentSession : undefined).catch(
+              (err) => {
+                setState("error")
+                logRequestError("[Stream] 시작 시퀀스 예외", err)
+              },
+            )
             return
 
           case "streaming":
