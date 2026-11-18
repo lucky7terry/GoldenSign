@@ -751,6 +751,8 @@ export function App() {
   })
   /** "기록 모두 지우기"의 화면 내 확인 단계. */
   const [confirmClear, setConfirmClear] = useState(false)
+  /** clearHistory RPC 가 실패했을 때의 재시도 안내. */
+  const [clearFailed, setClearFailed] = useState(false)
   /** 경과 시간 표시용 1초 틱. */
   const [now, setNow] = useState(() => Date.now())
 
@@ -892,9 +894,10 @@ export function App() {
     }
   }, [ss.screen])
 
-  /** 기록 화면 사이 이동. 확인 단계는 이동할 때마다 접는다. */
+  /** 기록 화면 사이 이동. 확인 단계와 실패 안내는 이동할 때마다 접는다. */
   function goView(next: typeof view): void {
     setConfirmClear(false)
+    setClearFailed(false)
     setView(next)
   }
 
@@ -1144,23 +1147,36 @@ export function App() {
         <p className="gs-caption">기록은 폰에 저장되지 않으며 최근 10건만 남습니다.</p>
 
         {confirmClear ? (
-          <div className="gs-nav">
-            <button className="gs-btn gs-btn-outline" onClick={() => setConfirmClear(false)}>
-              취소
-            </button>
-            <button
-              className="gs-btn gs-btn-danger"
-              onClick={() => {
-                fire(clearHistory({}, {timeout: RPC_TIMEOUT_MS}))
-                goView({kind: "main"})
-              }}
-            >
-              정말 모두 지우기
-            </button>
-          </div>
+          <>
+            {clearFailed ? (
+              <p className="gs-caption gs-histfail">삭제하지 못했어요. 다시 시도해 주세요</p>
+            ) : null}
+            <div className="gs-nav">
+              <button className="gs-btn gs-btn-outline" onClick={() => setConfirmClear(false)}>
+                취소
+              </button>
+              <button
+                className="gs-btn gs-btn-danger"
+                onClick={() => {
+                  setClearFailed(false)
+                  clearHistory({}, {timeout: RPC_TIMEOUT_MS})
+                    .then(() => goView({kind: "main"}))
+                    .catch(() => setClearFailed(true))
+                }}
+              >
+                정말 모두 지우기
+              </button>
+            </div>
+          </>
         ) : (
           <div className="gs-nav">
-            <button className="gs-btn gs-btn-outline" onClick={() => setConfirmClear(true)}>
+            <button
+              className="gs-btn gs-btn-outline"
+              onClick={() => {
+                setClearFailed(false)
+                setConfirmClear(true)
+              }}
+            >
               기록 모두 지우기
             </button>
           </div>

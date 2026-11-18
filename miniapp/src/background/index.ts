@@ -1455,7 +1455,8 @@ registerMiniapp((session) => {
   /** 진행 중 세션을 끝내 기록 목록 맨 앞에 넣는다. 화면 전이는 호출부 몫이다. */
   function archiveSession(): void {
     if (currentSession === undefined) return
-    currentSession.endedAt = Date.now()
+    // 문진은 요약 진입 때 이미 찍혔고, 자유 모드는 여기서 찍힌다.
+    if (currentSession.endedAt == null) currentSession.endedAt = Date.now()
     let wordCount = 0
     for (const q of currentSession.questions) wordCount += q.words.length
     // 단어가 하나도 없는 세션은 기록으로 남길 내용이 없어 버린다.
@@ -1498,6 +1499,10 @@ registerMiniapp((session) => {
 
   /** 요약 화면으로 간다. 스트림은 건드리지 않는다 — 끄는 쪽은 호출부가 정한다. */
   function enterSummary(): void {
+    // 문진의 종료 시각은 요약 진입 시점이다. 소요 시간 표시가 여기서 멈춘다.
+    if (currentSession !== undefined && currentSession.endedAt == null) {
+      currentSession.endedAt = Date.now()
+    }
     screen = "summary"
     armSummaryTimer()
     publishSessionState()
