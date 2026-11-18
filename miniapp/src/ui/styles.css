@@ -23,8 +23,8 @@
   --gs-border: #dfe8ee;
   --gs-fg: #22303a;
   --gs-muted: #5e6e7a;
-  /* 흰 배경 대비 약 4.7:1 — "답 없음" 같은 읽어야 하는 문구가 이 색을 쓴다. */
-  --gs-subtle: #66757f;
+  /* 바탕 #f6f9fb 대비 4.70:1 — "답 없음" 같은 읽어야 하는 문구가 이 색을 쓴다. */
+  --gs-subtle: #63727c;
   --gs-accent: #7bd8fd;
   --gs-accent-strong: #1b9cd8;
   --gs-accent-text: #0c7197;
