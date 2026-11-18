@@ -352,7 +352,14 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
     "resampled_on_time": true,
     "dropped_after_cap": 0,
     "coverage": { "face": 0.963, "hand": 1.0 },
-    "close_reason": "client"
+    "close_reason": "client",
+    "timings": {
+      "drain_ms": 0.0,
+      "wait_ms": 0.4,
+      "features_ms": 18.3,
+      "inference_ms": 15.2,
+      "total_ms": 34.6
+    }
   },
   "model": { "loaded": true, "mode": "recognition" },
   "processed_at": "2026-09-05T01:00:02Z"
@@ -373,6 +380,20 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
   `result` 대신 `word_out_of_frame` 이 나간다. 통과한 구간에도 실리므로
   기준을 조정할 때 근거가 된다.
 - `close_reason`: `"client"`(word_end) 또는 `"timeout"`(8초 자동 종료).
+- `timings`: 서버가 이 단어에 쓴 시간(ms). 구간 마감을 시작한 순간부터 잰다.
+  - `drain_ms`: 버튼 시점에 처리 중이던 프레임을 기다린 시간
+  - `wait_ms`: 추론 슬롯(세마포어)과 작업 스레드를 기다린 시간
+  - `features_ms`: 30fps 복원 + 특징 420 + 목표 길이 리샘플
+  - `inference_ms`: 모델 한 번
+  - `total_ms`: 위를 포함해 **결과를 보내기 직전까지**의 전체 서버 처리 시간
+
+  **통신 왕복 = (결과 수신 시각 − `word_end` 송신 시각) − `total_ms`.**
+  두 시각은 앱이 폰 시계로 찍으므로 서버와 시계가 어긋나도 상관없다. 올라가는
+  길과 내려오는 길의 합(왕복)이며 한 방향 값은 이 방법으로 구할 수 없다.
+  소켓에 쓰는 시간(1ms 미만)은 통신 쪽으로 들어간다.
+  `close_reason` 이 `"timeout"` 이면 앱이 `word_end` 를 보내지 않았으므로 이
+  계산에서 뺀다. 서버 로그의 `Word recognized` / `Word closed` 줄에도 같은 값과,
+  송신까지 끝난 시각 `sent_ms` 가 남는다.
 - `text`: 임계값을 넘었을 때만 채운다. 못 넘으면 `null` 이다 — 서버가 확신하지
   못한 것이므로 앱은 아무것도 표시하지 않아야 한다. 인식 모델이 아직 안 올라온
   서버도 `null` 을 보내며, 그 경우는 `model.loaded` 가 `false` 다.
