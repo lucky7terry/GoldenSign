@@ -707,6 +707,7 @@ registerMiniapp((session) => {
     },
     wordDiags: [],
     progress: null,
+    wordCard: null,
   }
 
   // --- LED ------------------------------------------------------------------
@@ -911,6 +912,9 @@ registerMiniapp((session) => {
       case "word:progress":
         snapshot.progress = next as Channels["word:progress"]
         break
+      case "word:card":
+        snapshot.wordCard = next as Channels["word:card"]
+        break
       default:
         break
     }
@@ -1099,7 +1103,7 @@ registerMiniapp((session) => {
     // 채널에 선언된 필드만 골라 담는다. recognition 블록은 UI 가 쓰는 두 값만
     // 꺼내 싣는다. text 는 null 그대로 올린다 — UI 가 null 과 빈 문자열을
     // 구분해 문구를 고른다.
-    publishResult({
+    const published: Channels["recognition:result"] = {
       text: next.text,
       confidence: next.confidence,
       isFinal: next.isFinal,
@@ -1112,7 +1116,10 @@ registerMiniapp((session) => {
       modelLoaded: next.modelLoaded,
       confidenceThreshold: next.recognition?.confidenceThreshold ?? null,
       candidate: next.recognition?.candidate ?? null,
-    })
+    }
+    publishResult(published)
+    // 카드는 구간 결과만 보여준다. 비우는 쪽은 질문 이동과 세션 전이다.
+    if (next.isWordResult) patch("word:card", {kind: "result", result: published})
   }
 
   // --- 단어 구간 --------------------------------------------------------------
@@ -1261,6 +1268,7 @@ registerMiniapp((session) => {
         // 고쳐지지 않으므로, 재시도 안내 대신 무엇을 고쳐야 하는지 읽는다.
         console.warn(`[Word] 얼굴이나 손이 화면 밖입니다 — 구간을 닫습니다. ${err.message}`)
         clearWordSegment()
+        patch("word:card", {kind: "out_of_frame"})
         rejected = true
         announcement = FRAMING_ANNOUNCEMENT
         break
@@ -1382,6 +1390,8 @@ registerMiniapp((session) => {
     currentSession = {mode, startedAt: Date.now(), endedAt: null, questions}
     questionIndex = 0
     screen = "active"
+    // 새 세션의 카드가 직전 세션의 결과를 이어받으면 안 된다.
+    patch("word:card", null)
     publishSessionState()
   }
 
@@ -1452,6 +1462,7 @@ registerMiniapp((session) => {
     archiveSession()
     screen = "idle"
     questionIndex = 0
+    patch("word:card", null)
     publishSessionState()
   }
 
@@ -1477,6 +1488,7 @@ registerMiniapp((session) => {
       if (wordSegment === undefined && screen === "active" && currentSession?.mode === "questionnaire") {
         if (questionIndex < QUESTION_COUNT - 1) {
           questionIndex += 1
+          patch("word:card", null)
           publishSessionState()
         } else {
           // 마지막 질문의 "다음 질문". 스트림은 유지한 채 요약으로 간다.
@@ -1491,6 +1503,7 @@ registerMiniapp((session) => {
     ui.handle("prevQuestion", async () => {
       if (wordSegment === undefined && screen === "active" && currentSession?.mode === "questionnaire" && questionIndex > 0) {
         questionIndex -= 1
+        patch("word:card", null)
         publishSessionState()
       }
       return {}

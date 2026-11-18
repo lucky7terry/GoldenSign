@@ -33,9 +33,6 @@ type Tone = "idle" | "connecting" | "waiting" | "streaming" | "error"
 
 type Phase = {kind: "loading"} | {kind: "error"; message: string} | {kind: "ready"}
 
-/** 결과 카드가 그릴 마지막 단어 사건. 구간 결과이거나 화면 이탈 거절이다. */
-type WordEvent = {kind: "result"; r: Channels["recognition:result"]} | {kind: "out_of_frame"}
-
 const EMPTY_SNAPSHOT: Snapshot = {
   ai: {state: "disconnected", sessionId: null, model: null, message: null},
   stream: {state: "idle", streamId: null, message: null},
@@ -61,6 +58,7 @@ const EMPTY_SNAPSHOT: Snapshot = {
   },
   wordDiags: [],
   progress: null,
+  wordCard: null,
 }
 
 // ---------------------------------------------------------------------------
@@ -387,17 +385,17 @@ function ErrorCard({snap}: {snap: Snapshot}) {
  * 방금 인식된 단어 카드. 서버 결과별 4가지 상태를 그린다 —
  * 인식됨 / 확신 부족 / 화면 이탈 / 모델 미연결.
  */
-function ResultCard({event}: {event: WordEvent | null}) {
-  if (event === null) {
+function ResultCard({card}: {card: Snapshot["wordCard"]}) {
+  if (card === null) {
     return (
       <section className="gs-card">
         <h2 className="gs-card-title">방금 인식된 단어</h2>
-        <p className="gs-empty">버튼을 짧게 눌러 단어 구간을 시작해 보세요.</p>
+        <p className="gs-empty">수어를 하면 여기에 표시돼요</p>
       </section>
     )
   }
 
-  if (event.kind === "out_of_frame") {
+  if (card.kind === "out_of_frame") {
     return (
       <section className="gs-card">
         <h2 className="gs-card-title">방금 인식된 단어</h2>
@@ -407,7 +405,7 @@ function ResultCard({event}: {event: WordEvent | null}) {
     )
   }
 
-  const r = event.r
+  const r = card.result
   if (r.modelLoaded === false) {
     return (
       <section className="gs-card gs-result-warn">
@@ -740,8 +738,6 @@ function DiagnosticsPanel({snap}: {snap: Snapshot}) {
 export function App() {
   const [snap, setSnap] = useState<Snapshot>(EMPTY_SNAPSHOT)
   const [phase, setPhase] = useState<Phase>({kind: "loading"})
-  /** 결과 카드가 그릴 마지막 단어 사건. 방송에서만 쌓인다. */
-  const [wordEvent, setWordEvent] = useState<WordEvent | null>(null)
   /** 지난 기록 목록·상세는 UI 로컬 화면이다. 데이터는 background 목록에서 읽는다. */
   const [view, setView] = useState<{kind: "main"} | {kind: "list"} | {kind: "detail"; index: number}>({
     kind: "main",
@@ -809,14 +805,11 @@ export function App() {
       mentra.on("recognition:result", (r) => {
         seen.add("results")
         setSnap((s) => ({...s, results: [...s.results, r].slice(-MAX_RESULTS)}))
-        if (r.isWordResult) setWordEvent({kind: "result", r})
       }),
       mentra.on("error", (e) => {
         console.error("[UI] error", e.code, e.message)
         seen.add("error")
         setSnap((s) => ({...s, error: e}))
-        // 화면 이탈 거절은 결과 카드가 받는다. 나머지 구간 오류는 기존 흐름대로.
-        if (e.code === "word_out_of_frame") setWordEvent({kind: "out_of_frame"})
       }),
       mentra.on("session:state", (session) => {
         seen.add("session")
@@ -829,6 +822,10 @@ export function App() {
       mentra.on("word:progress", (progress) => {
         seen.add("progress")
         setSnap((s) => ({...s, progress}))
+      }),
+      mentra.on("word:card", (wordCard) => {
+        seen.add("wordCard")
+        setSnap((s) => ({...s, wordCard}))
       }),
     ]
 
@@ -856,13 +853,8 @@ export function App() {
             ? mergeWordDiags(snapshot.wordDiags, s.wordDiags)
             : snapshot.wordDiags,
           progress: seen.has("progress") ? s.progress : snapshot.progress,
+          wordCard: seen.has("wordCard") ? s.wordCard : snapshot.wordCard,
         }))
-        // 결과 카드도 히스토리에서 복구한다. 방송이 이미 채웠으면 그쪽이 더 새롭다.
-        setWordEvent((prev) => {
-          if (prev !== null) return prev
-          const lastWord = snapshot.results.filter((r) => r.isWordResult).pop()
-          return lastWord === undefined ? null : {kind: "result", r: lastWord}
-        })
         setPhase({kind: "ready"})
       })
       .catch((err: unknown) => {
@@ -1015,7 +1007,7 @@ export function App() {
         ) : ss.segmentOpen ? (
           <RecordingCard progress={snap.progress} openedAt={ss.segmentOpenedAt} now={now} />
         ) : (
-          <ResultCard event={wordEvent} />
+          <ResultCard card={snap.wordCard} />
         )}
 
         <AnswerCard

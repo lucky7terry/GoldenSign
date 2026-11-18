@@ -116,6 +116,8 @@ export interface Snapshot {
   wordDiags: WordDiagEntry[]
   /** 마지막 word_progress. 아직 없으면 null. */
   progress: Channels["word:progress"] | null
+  /** "방금 인식된 단어" 카드 상태. 비어 있으면 null. */
+  wordCard: Channels["word:card"]
 }
 
 export interface Channels {
@@ -241,6 +243,15 @@ export interface Channels {
 
   /** 단어 구간 진단 한 줄. 결과나 구간 오류가 올 때마다 나간다. */
   "word:diag": WordDiagEntry
+
+  /**
+   * "방금 인식된 단어" 카드 상태. 지금 세션·지금 질문에서 나온 마지막 결과만
+   * 담고, 질문 이동·새 세션 시작·처음으로에서 background 가 null 로 비운다.
+   */
+  "word:card":
+    | {kind: "result"; result: Channels["recognition:result"]}
+    | {kind: "out_of_frame"}
+    | null
 
   /** 열린 구간 동안 서버가 초당 한 번 보내는 진행 상황. */
   "word:progress": {
