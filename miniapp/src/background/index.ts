@@ -608,7 +608,8 @@ registerMiniapp((session) => {
    * 열려 있는 단어 구간. 닫혀 있으면 undefined 다. `phase` 가 "closing" 인 구간은
    * word_end 를 보내고 result 를 기다리는 중이다 — 진짜 닫힘은 result 도착이다.
    * questionIndex 와 session 은 구간을 시작한 자리다 — 결과는 그 질문에 넣고,
-   * 구간이 이미 걷혔거나 세션이 바뀌었으면 버린다.
+   * 구간이 이미 걷혔거나 세션이 바뀌었으면 버린다. startId·endId 는 서버가
+   * 결과·오류에 echo 하는 client_message_id 와 대조하는 근거다.
    */
   let wordSegment:
     | {
@@ -617,6 +618,8 @@ registerMiniapp((session) => {
         timer: ReturnType<typeof setTimeout> | undefined
         questionIndex: number
         session: SessionRecord | undefined
+        startId: string | null
+        endId: string | null
       }
     | undefined
 
@@ -1044,6 +1047,29 @@ registerMiniapp((session) => {
       if (next.resampledOnTime === false) {
         console.warn("[Word] resampled_on_time=false — 입력에 촬영 시각이 안 붙었다")
       }
+      const diagBase = {
+        at: Date.now(),
+        candidate: next.recognition?.candidate ?? null,
+        confidence: next.confidence,
+        margin: next.recognition?.margin ?? null,
+        confidenceThreshold: next.recognition?.confidenceThreshold ?? null,
+        marginThreshold: next.recognition?.marginThreshold ?? null,
+        frameCount: next.wordFrameCount ?? null,
+        uniformFrameCount: next.uniformFrameCount ?? null,
+        targetFrames: next.targetFrames ?? null,
+        spanMs: next.spanMs ?? null,
+        coverageFace: next.coverageFace ?? null,
+        coverageHand: next.coverageHand ?? null,
+        closeReason: next.closeReason ?? null,
+        resampledOnTime: next.resampledOnTime ?? null,
+        message: null,
+      }
+      // 이미 걷힌 구간의 늦은 결과는 지금 구간을 닫지 않고 기록만 남긴다.
+      if (!segmentMatches(next.clientMessageId)) {
+        console.warn(`[Word] 열린 구간의 결과가 아니다 — 버린다. id=${String(next.clientMessageId)}`)
+        pushWordDiag({...diagBase, kind: "stale_result"})
+        return
+      }
       // 걷어내기 전에 구간이 시작된 자리를 붙잡아 둔다. 답 귀속의 근거다.
       // 방송은 아래에서 단어 추가까지 끝난 뒤 한 번만 한다 — 중간에 단어 없는
       // 기록이 나가면 화면이 그 낡은 상태에 머물 수 있다.
@@ -1081,26 +1107,12 @@ registerMiniapp((session) => {
       publishSessionState()
 
       pushWordDiag({
-        at: Date.now(),
+        ...diagBase,
         kind: hasText
           ? "recognized"
           : next.modelLoaded === false
             ? "model_unavailable"
             : "low_confidence",
-        candidate: next.recognition?.candidate ?? null,
-        confidence: next.confidence,
-        margin: next.recognition?.margin ?? null,
-        confidenceThreshold: next.recognition?.confidenceThreshold ?? null,
-        marginThreshold: next.recognition?.marginThreshold ?? null,
-        frameCount: next.wordFrameCount ?? null,
-        uniformFrameCount: next.uniformFrameCount ?? null,
-        targetFrames: next.targetFrames ?? null,
-        spanMs: next.spanMs ?? null,
-        coverageFace: next.coverageFace ?? null,
-        coverageHand: next.coverageHand ?? null,
-        closeReason: next.closeReason ?? null,
-        resampledOnTime: next.resampledOnTime ?? null,
-        message: null,
       })
     }
     // 채널에 선언된 필드만 골라 담는다. recognition 블록은 UI 가 쓰는 두 값만
@@ -1126,6 +1138,17 @@ registerMiniapp((session) => {
   }
 
   // --- 단어 구간 --------------------------------------------------------------
+
+  /**
+   * 결과·오류의 client_message_id 가 지금 열린 구간의 것인지. 계약상 클라이언트
+   * 종료면 word_end, 서버 자동 종료면 word_start 의 id 가 온다. null 로 오면
+   * 구간을 특정할 수 없으므로 열린 구간의 것으로 간주한다.
+   */
+  function segmentMatches(id: string | null): boolean {
+    if (wordSegment === undefined) return false
+    if (id === null) return true
+    return id === wordSegment.startId || id === wordSegment.endId
+  }
 
   /**
    * 구간 상태와 안전망 타이머만 비우고 불을 되돌린다. 방송은 호출부 책임이다 —
@@ -1163,8 +1186,9 @@ registerMiniapp((session) => {
 
     if (wordSegment === undefined) {
       // 전송에 실패했는데 열어 두면 서버는 구간을 모르는 채로 다음 누름이
-      // word_end 를 보낸다. true 를 받았을 때만 연다.
-      if (!client.sendWordStart()) {
+      // word_end 를 보낸다. id 를 받았을 때만 연다.
+      const startId = client.sendWordStart()
+      if (startId === undefined) {
         console.warn("[Word] word_start 전송 실패 — 구간을 열지 않는다")
         // 서버에는 아무것도 도착하지 않았으므로 "구간이 없다"로만 보인다.
         // 사용자가 버튼을 눌렀다는 사실은 앱만 안다.
@@ -1177,6 +1201,8 @@ registerMiniapp((session) => {
         timer: undefined,
         questionIndex: currentSession?.mode === "questionnaire" ? questionIndex : 0,
         session: currentSession,
+        startId,
+        endId: null,
       }
       setWordLed(true)
       publishSessionState()
@@ -1191,11 +1217,13 @@ registerMiniapp((session) => {
 
     // 보낸 즉시 닫지 않는다. 진짜 닫힘은 result 도착이고, 실패하면 안전망
     // 타이머가 열린 상태를 걷어낸다.
-    if (!client.sendWordEnd()) {
+    const endId = client.sendWordEnd()
+    if (endId === undefined) {
       console.warn("[Word] word_end 전송 실패 — 안전망 타이머에 맡긴다")
       report("app_error", "warn", {where: "word_end_send"})
       return
     }
+    wordSegment.endId = endId
     wordSegment.phase = "closing"
     console.log(`[Word] 구간 종료 요청. 길이=${Date.now() - wordSegment.startedAt}ms`)
   }
@@ -1246,6 +1274,21 @@ registerMiniapp((session) => {
    * 서버에 맞춘 뒤, 나머지 code 와 똑같이 방송한다.
    */
   function handleAiError(err: AiServerError): void {
+    // 단어 구간 오류는 echo 된 id 로 지금 구간의 것인지 먼저 가린다. 아니면
+    // 지금 구간을 건드리지 않고 로그와 진단 표 기록만 남긴다.
+    if (
+      (err.code === "word_too_short" ||
+        err.code === "word_out_of_frame" ||
+        err.code === "word_recognition_failed") &&
+      !segmentMatches(err.clientMessageId)
+    ) {
+      console.warn(
+        `[Word] 열린 구간의 오류가 아니다 — 무시. code=${err.code} id=${String(err.clientMessageId)}`,
+      )
+      pushWordDiag({at: Date.now(), kind: "stale_error", message: `${err.code}: ${err.message}`})
+      return
+    }
+
     // 구간 오류는 스트림을 죽이지 않는다 — 다섯 다 setState("error") 를 부르지
     // 않는 이유다. 실패한 것은 구간 하나뿐이다.
     //
@@ -1289,6 +1332,8 @@ registerMiniapp((session) => {
         // 오지 않아 안전망은 폴백으로 건다.
         console.warn("[Word] 서버에 구간이 이미 열려 있습니다 — 앱 상태를 열림으로 맞춥니다")
         const startedAt = wordSegment?.startedAt ?? Date.now()
+        // 서버가 아는 구간은 우리가 연 그 구간이라 id 도 그대로 이어받는다.
+        const startId = wordSegment?.startId ?? null
         clearWordSegment()
         wordSegment = {
           phase: "open",
@@ -1296,6 +1341,8 @@ registerMiniapp((session) => {
           timer: undefined,
           questionIndex: currentSession?.mode === "questionnaire" ? questionIndex : 0,
           session: currentSession,
+          startId,
+          endId: null,
         }
         // 서버 기준으로는 열린 구간이라 불도 열림으로 되돌린다.
         setWordLed(true)

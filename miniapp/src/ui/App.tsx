@@ -554,6 +554,8 @@ const DIAG_KIND_LABEL: Record<string, string> = {
   out_of_frame: "화면 이탈",
   too_short: "너무 짧음",
   model_unavailable: "모델 미연결",
+  stale_result: "늦은 결과",
+  stale_error: "늦은 오류",
 }
 
 function fmtDiagTime(at: number): string {
@@ -619,7 +621,7 @@ function WordDiagTable({entries}: {entries: WordDiagEntry[]}) {
               </tr>
               {typeof e.message === "string" &&
               e.message !== "" &&
-              e.coverageFace === null &&
+              (e.coverageFace === null || e.coverageFace === undefined) &&
               e.kind !== "recognized" &&
               e.kind !== "low_confidence" ? (
                 <tr>
