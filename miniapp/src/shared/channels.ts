@@ -151,6 +151,8 @@ export interface Channels {
       | "error"
     streamId?: string | null
     message?: string | null
+    /** 서버가 stream_unavailable 로 스트림을 놓은 상태인지. */
+    lost?: boolean
   }
 
   /**

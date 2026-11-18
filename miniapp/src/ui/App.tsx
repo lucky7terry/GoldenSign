@@ -35,7 +35,7 @@ type Phase = {kind: "loading"} | {kind: "error"; message: string} | {kind: "read
 
 const EMPTY_SNAPSHOT: Snapshot = {
   ai: {state: "disconnected", sessionId: null, model: null, message: null},
-  stream: {state: "idle", streamId: null, message: null},
+  stream: {state: "idle", streamId: null, message: null, lost: false},
   glasses: {wifiConnected: null, ssid: null, battery: null, charging: null},
   diagnostics: {
     requestedFps: null,
@@ -1006,7 +1006,7 @@ export function App() {
         ) : null}
 
         {hasStreamError ? (
-          snap.error?.code === "stream_unavailable" ? (
+          snap.stream.lost === true ? (
             <StreamLostCard />
           ) : (
             <ErrorCard snap={snap} />

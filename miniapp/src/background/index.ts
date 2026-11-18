@@ -688,7 +688,7 @@ registerMiniapp((session) => {
    */
   const snapshot: Snapshot = {
     ai: {state: "disconnected", sessionId: null, model: null, message: null},
-    stream: {state: "idle", streamId: null, message: null},
+    stream: {state: "idle", streamId: null, message: null, lost: false},
     glasses: {wifiConnected: null, ssid: null, battery: null, charging: null},
     diagnostics: {
       requestedFps: null,
@@ -929,7 +929,12 @@ registerMiniapp((session) => {
 
   /** 현재 시점의 appState 와 activeStream 짝을 그대로 방송한다. */
   function publishStreamState(message: string | null = null): void {
-    patch("stream:state", {state: appState, streamId: activeStream?.streamId ?? null, message})
+    patch("stream:state", {
+      state: appState,
+      streamId: activeStream?.streamId ?? null,
+      message,
+      lost: streamLost,
+    })
   }
 
   /** 현재 시점의 AI 단계와 세션 식별 정보를 방송한다. */
@@ -1379,7 +1384,9 @@ registerMiniapp((session) => {
           where: "stream_unavailable",
           stream_id: activeStream?.streamId ?? "",
         })
-        speakSafe(session.speaker, STREAM_LOST_ANNOUNCEMENT, "stream_lost", reportTts)
+        // 요약에서는 길게 누르기가 재시작이 아니라 처음으로라 안내를 읽지 않는다.
+        if (screen !== "summary")
+          speakSafe(session.speaker, STREAM_LOST_ANNOUNCEMENT, "stream_lost", reportTts)
         setState("error")
         void cleanupStream("stream_unavailable", {notifyAi: false}).catch((cleanupErr) => {
           console.error("[Stream] stream_unavailable 정리 실패 — 카메라가 잡혀있을 수 있다")
@@ -1603,7 +1610,15 @@ registerMiniapp((session) => {
       startSession("free")
       // 조기 종료나 무입력 자동 종료로 스트림이 죽어 있으면 다시 시작한다.
       if (appState !== "streaming") {
-        void runStartSequence().catch((err) => {
+        const bound = currentSession
+        void (async () => {
+          // 조기 종료의 정지가 아직 돌고 있으면 끝나기를 기다렸다가 시작한다.
+          const deadline = Date.now() + 8000
+          while (appState === "stopping" && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 100))
+          }
+          await runStartSequence(bound)
+        })().catch((err) => {
           setState("error")
           logRequestError("[Stream] 자유 모드 재시작 예외", err)
         })
@@ -2028,6 +2043,11 @@ registerMiniapp((session) => {
     } catch (err) {
       console.error("[Stream] stream.stop 실패 — 인자 없는 stop() 으로 폴백")
       logRequestError("[Stream] stream.stop", err)
+      // 폴백은 "활성 스트림" 을 멈추므로 새 스트림이 생겼으면 그것을 죽인다.
+      if (activeStream !== undefined) {
+        console.warn("[Stream] 새 스트림이 이미 있어 인자 없는 stop() 을 건너뛴다")
+        throw err
+      }
       try {
         await session.stream.stop()
         console.log("[Stream] stream.stop() (인자 없음) 성공")
@@ -2098,7 +2118,11 @@ registerMiniapp((session) => {
     })
   }
 
-  async function runStartSequence(): Promise<void> {
+  /**
+   * boundSession 을 주면 그 세션을 위한 재시작이다 — 시작을 기다리는 동안
+   * 세션이 끝나면 시작을 무효화하고 뒤늦게 켜진 스트림은 바로 정리한다.
+   */
+  async function runStartSequence(boundSession?: SessionRecord): Promise<void> {
     if (startInFlight) {
       console.warn("[Stream] 시작 시퀀스가 이미 진행 중이다 — 무시. state=", appState)
       return
@@ -2257,14 +2281,20 @@ registerMiniapp((session) => {
         return
       }
 
-      // 5. 완료.
+      // 5. 완료. 묶인 세션이 그 사이 끝났으면 이 시작은 무효다.
+      if (boundSession !== undefined && boundSession !== currentSession) {
+        console.warn("[Stream] 묶인 세션이 끝났다 — 뒤늦게 켜진 스트림을 정리한다")
+        await cleanupStream("세션 종료로 시작 무효", {notifyAi: true})
+        setState(ai?.isReady() === true ? "ai_ready" : "error")
+        return
+      }
       streamLost = false
       setState("streaming")
       console.log("[Stream] streaming. streamId=", streamId)
 
-      // 대기 화면에서 시작한 경우에만 새 세션을 연다. "자유 모드로 계속" 의
-      // 재시작은 continueFree 가 이미 세션을 열고 active 로 옮겨 두었다.
-      if (screen === "idle") startSession(savedMode)
+      // 대기 화면에서 사용자가 직접 시작한 경우에만 새 세션을 연다. 세션에
+      // 묶인 재시작은 호출자가 이미 세션과 화면을 준비해 두었다.
+      if (boundSession === undefined && screen === "idle") startSession(savedMode)
 
       // 협상 결과는 앱만 안다. 서버는 webrtcUrl 하나만 받으므로, 프레임이 적게
       // 들어올 때 그것이 인코더 설정 탓인지 여기서만 가려진다. resolvedConfig
@@ -2329,9 +2359,14 @@ registerMiniapp((session) => {
       // stream_stop 메시지는 서버가 이미 받았지만, 안경 쪽 스트림이 실제로
       // 멈췄는지는 앱만 안다.
       report("stream_stop", "info", {result: "ok", reason})
+      // 정지 중에 새 시작이 상태를 가져갔으면 덮어쓰지 않는다.
+      if (appState !== "stopping") {
+        console.log("[Stream] 정지 중 상태가 바뀌었다 — 상태 유지. state=", appState)
+        return
+      }
       setState(ai?.isReady() === true ? "ai_ready" : "error")
     } catch (err) {
-      setState("error")
+      if (appState === "stopping") setState("error")
       console.error("[Stream] 정지 실패 — error 상태. 롱프레스로 재시도 가능")
       report("stream_stop", "error", {
         result: "fail",
@@ -2407,11 +2442,11 @@ registerMiniapp((session) => {
             // 요약 화면이었다면 "처음으로"처럼 세션을 넘기고 대기로도 간다.
             if (screen === "summary") goHomeFromSummary("요약에서 길게 누르기 (error)")
             // 서버가 스트림을 놓은 경우는 조기 종료가 아니라 재시작이다.
-            // 세션과 질문 번호가 그대로라 성공하면 같은 화면으로 돌아간다.
+            // 세션과 질문 번호가 그대로라 성공하면 같은 화면으로 돌아가고,
+            // 실패하면 streamLost 가 남아 다음 길게 누르기가 다시 시도한다.
             else if (streamLost && screen === "active") {
-              streamLost = false
               console.log("[Stream] stream_unavailable 복구 — 스트림 재시작")
-              void runStartSequence().catch((err) => {
+              void runStartSequence(currentSession).catch((err) => {
                 setState("error")
                 logRequestError("[Stream] 스트림 재시작 예외", err)
               })
