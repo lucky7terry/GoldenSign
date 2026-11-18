@@ -2032,7 +2032,10 @@ registerMiniapp((session) => {
    * 순서는 의도적이다. Mentra 스트림이 사라지기 *전에* AI 서버에 pull 중지를
    * 알린다. 반대로 하면 서버가 죽은 WHEP 엔드포인트를 계속 당긴다.
    */
-  async function cleanupStream(reason: string, opts: {notifyAi: boolean}): Promise<void> {
+  async function cleanupStream(
+    reason: string,
+    opts: {notifyAi: boolean; fromOwnStart?: boolean},
+  ): Promise<void> {
     const streamId = activeStream?.streamId
     activeStream = undefined
     // 여기서 LED 를 건드리지 않는 건 의도다. 호출부 둘(runStopSequence, rollback)
@@ -2055,8 +2058,10 @@ registerMiniapp((session) => {
     } catch (err) {
       console.error("[Stream] stream.stop 실패 — 인자 없는 stop() 으로 폴백")
       logRequestError("[Stream] stream.stop", err)
-      // 폴백은 "활성 스트림" 을 멈추므로 새 스트림이나 진행 중인 시작을 죽일 수 있다.
-      if (activeStream !== undefined || startInFlight) {
+      // 폴백은 "활성 스트림" 을 멈추므로 새 스트림이나 진행 중인 시작을 죽일 수
+      // 있다. 다만 그 시작 자신의 롤백(fromOwnStart)은 카메라를 풀 마지막
+      // 기회라 허용한다.
+      if (activeStream !== undefined || (startInFlight && opts.fromOwnStart !== true)) {
         console.warn("[Stream] 새 스트림이나 진행 중인 시작이 있어 인자 없는 stop() 을 건너뛴다")
         throw err
       }
@@ -2296,7 +2301,7 @@ registerMiniapp((session) => {
       // 5. 완료. 묶인 세션이 그 사이 끝났으면 이 시작은 무효다.
       if (boundSession !== undefined && boundSession !== currentSession) {
         console.warn("[Stream] 묶인 세션이 끝났다 — 뒤늦게 켜진 스트림을 정리한다")
-        await cleanupStream("세션 종료로 시작 무효", {notifyAi: true})
+        await cleanupStream("세션 종료로 시작 무효", {notifyAi: true, fromOwnStart: true})
         setState(ai?.isReady() === true ? "ai_ready" : "error")
         return
       }
@@ -2345,7 +2350,7 @@ registerMiniapp((session) => {
   async function rollback(why: string): Promise<void> {
     console.warn("[Stream] 롤백:", why)
     try {
-      await cleanupStream(`rollback: ${why}`, {notifyAi: false})
+      await cleanupStream(`rollback: ${why}`, {notifyAi: false, fromOwnStart: true})
     } catch (err) {
       // cleanupStream 이 두 번의 stop 시도를 이미 로그로 남겼다.
       console.error("[Stream] 롤백 중 stop 실패 — 카메라가 잡혀있을 수 있다")
