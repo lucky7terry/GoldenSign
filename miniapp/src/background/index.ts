@@ -72,6 +72,7 @@ import {
   START_ANNOUNCEMENT,
   RETRY_ANNOUNCEMENT,
   FRAMING_ANNOUNCEMENT,
+  STREAM_LOST_ANNOUNCEMENT,
   type TtsReporter,
 } from "./tts"
 
@@ -593,6 +594,8 @@ registerMiniapp((session) => {
   let startInFlight = false
   /** 시작 안내를 이미 읽었는지 확인한다. */
   let startAnnounced = false
+  /** 서버가 stream_unavailable 로 스트림을 놓은 상태. 길게 누르면 재시작한다. */
+  let streamLost = false
   /**
    * 열려 있는 단어 구간. 닫혀 있으면 undefined 다. `phase` 가 "closing" 인 구간은
    * word_end 를 보내고 result 를 기다리는 중이다 — 진짜 닫힘은 result 도착이다.
@@ -1288,6 +1291,24 @@ registerMiniapp((session) => {
         // 프레임 한 장이 실패한 것이다(session_websocket.py). 수어하는
         // 도중에도 오므로 구간을 닫지 않는다 — 닫으면 단어가 통째로 날아간다.
         console.warn("[AI] 프레임 인식 실패 — 구간은 그대로 둔다")
+        break
+
+      case "stream_unavailable":
+        // 서버가 WHEP 재연결을 소진하고 이 스트림 처리를 멈췄다. 세션과
+        // 화면은 그대로 두고 스트림만 오류로 내려 길게 눌러 재시작하게 한다.
+        console.warn("[Stream] 서버가 영상 스트림을 놓았다 — 정리 후 재시작 대기")
+        streamLost = true
+        clearWordSegment()
+        report("app_error", "error", {
+          where: "stream_unavailable",
+          stream_id: activeStream?.streamId ?? "",
+        })
+        speakSafe(session.speaker, STREAM_LOST_ANNOUNCEMENT, "stream_lost", reportTts)
+        setState("error")
+        void cleanupStream("stream_unavailable", {notifyAi: false}).catch((cleanupErr) => {
+          console.error("[Stream] stream_unavailable 정리 실패 — 카메라가 잡혀있을 수 있다")
+          logRequestError("[Stream] stream_unavailable 정리", cleanupErr)
+        })
         break
     }
 
@@ -2149,6 +2170,7 @@ registerMiniapp((session) => {
       }
 
       // 5. 완료.
+      streamLost = false
       setState("streaming")
       console.log("[Stream] streaming. streamId=", streamId)
 
@@ -2296,6 +2318,17 @@ registerMiniapp((session) => {
             // 돌아간다. 핫 리로드 탈출구이기도 하다.
             // 요약 화면이었다면 "처음으로"처럼 세션을 넘기고 대기로도 간다.
             if (screen === "summary") goHomeFromSummary("요약에서 길게 누르기 (error)")
+            // 서버가 스트림을 놓은 경우는 조기 종료가 아니라 재시작이다.
+            // 세션과 질문 번호가 그대로라 성공하면 같은 화면으로 돌아간다.
+            else if (streamLost && screen === "active") {
+              streamLost = false
+              console.log("[Stream] stream_unavailable 복구 — 스트림 재시작")
+              void runStartSequence().catch((err) => {
+                setState("error")
+                logRequestError("[Stream] 스트림 재시작 예외", err)
+              })
+              return
+            }
             console.warn("[Stream] error 상태 — 복구 정지 시도")
             void runStopSequence("error 복구").catch((err) => {
               setState("error")
@@ -2314,6 +2347,11 @@ registerMiniapp((session) => {
         // 짧게 누르면 단어 구간을 토글한다. 예전 빌드의 사진 촬영은 이어받지 않았다.
         console.log("[Input] SHORT state=", appState, "screen=", screen)
         touchSummaryTimer()
+        // 스트림이 끊긴 상태에서는 word_start 를 보내지 않고 안내만 다시 읽는다.
+        if (streamLost && screen === "active") {
+          speakSafe(session.speaker, STREAM_LOST_ANNOUNCEMENT, "stream_lost", reportTts)
+          return
+        }
         // 단어 구간은 인식 화면에서만 연다. 요약에서 열면 답이 갈 곳이 없다.
         if (screen === "active") handleWordPress()
       }

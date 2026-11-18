@@ -320,6 +320,20 @@ function VisualFeedback({tone, animated}: {tone: Tone; animated: boolean}) {
   )
 }
 
+/** 서버가 영상 스트림을 놓쳤을 때(stream_unavailable)의 안내 카드. */
+function StreamLostCard() {
+  return (
+    <section className="gs-card gs-errorcard">
+      <h2 className="gs-errorcard-title">카메라 영상이 끊겼어요</h2>
+      <p className="gs-errorcard-body">서버가 안경 영상을 받지 못해 인식을 멈췄습니다.</p>
+      <ol className="gs-errorcard-actions">
+        <li>안경 버튼을 길게 눌러 다시 시작해 주세요</li>
+        <li>지금까지의 기록과 질문은 그대로 유지됩니다</li>
+      </ol>
+    </section>
+  )
+}
+
 /** 원인 제목 + 살아 있는 항목 + 조치 1·2. describeError 를 카드로 편 것이다. */
 function ErrorCard({snap}: {snap: Snapshot}) {
   const view = describeErrorCard(snap)
@@ -954,7 +968,15 @@ export function App() {
           </section>
         ) : null}
 
-        {hasStreamError ? <ErrorCard snap={snap} /> : <ResultCard event={wordEvent} />}
+        {hasStreamError ? (
+          snap.error?.code === "stream_unavailable" ? (
+            <StreamLostCard />
+          ) : (
+            <ErrorCard snap={snap} />
+          )
+        ) : (
+          <ResultCard event={wordEvent} />
+        )}
 
         <AnswerCard
           words={question?.words ?? []}
