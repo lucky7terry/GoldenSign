@@ -216,6 +216,8 @@ export interface Channels {
      */
     processedFps?: number | null
     transport?: string | null
+    /** 협상된 해상도 "폭x높이". resolvedConfig 가 없으면 null. */
+    resolvedSize?: string | null
     /** 호스트명만. parseUrlParts() 로 뽑는다. `new URL()` 은 런타임에 없다. */
     webrtcHost?: string | null
     mode?: string | null

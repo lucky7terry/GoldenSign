@@ -244,7 +244,9 @@ function logStreamResult(result: StreamResult): void {
 }
 
 /** 요청 인코딩 설정. 시작 시 resolvedConfig.video.fps 와 대조한다. */
-const VIDEO_CONFIG = {width: 1280, height: 720, fps: 30} as const
+// Mentra 권고에 따라 안경 하드웨어 한계인 30fps 대신 15fps 로 요청한다.
+// 더 낮출 때는 {width: 960, height: 540, fps: 15} 로 바꾼다.
+const VIDEO_CONFIG = {width: 1280, height: 720, fps: 15} as const
 
 /** 요청 fps. 요청값과 협상값을 나란히 찍기 위해 따로 둔다. */
 const REQUESTED_FPS = VIDEO_CONFIG.fps
@@ -690,6 +692,7 @@ registerMiniapp((session) => {
       resolvedFps: null,
       processedFps: null,
       transport: null,
+      resolvedSize: null,
       webrtcHost: null,
       mode: null,
       status: null,
@@ -2130,6 +2133,11 @@ registerMiniapp((session) => {
         resolvedFps: result?.resolvedConfig?.video?.fps ?? null,
         processedFps: null,
         transport: result?.resolvedConfig?.transport ?? null,
+        resolvedSize:
+          typeof result?.resolvedConfig?.video?.width === "number" &&
+          typeof result?.resolvedConfig?.video?.height === "number"
+            ? `${result.resolvedConfig.video.width}x${result.resolvedConfig.video.height}`
+            : null,
         webrtcHost:
           typeof webrtcUrl === "string" && webrtcUrl.length > 0
             ? (parseUrlParts(webrtcUrl)?.hostname ?? null)

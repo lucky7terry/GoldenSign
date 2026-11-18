@@ -662,6 +662,10 @@ function DiagnosticsPanel({snap}: {snap: Snapshot}) {
           <dd className="gs-mono">{fmt(d.transport)}</dd>
         </div>
         <div className="gs-diag-row">
+          <dt>해상도 (협상값)</dt>
+          <dd className="gs-mono">{fmt(d.resolvedSize)}</dd>
+        </div>
+        <div className="gs-diag-row">
           <dt>webrtc host</dt>
           <dd className="gs-mono">{fmt(d.webrtcHost)}</dd>
         </div>
