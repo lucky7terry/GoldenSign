@@ -344,9 +344,10 @@ function RecordingCard({
         프레임 {live === null ? "—" : live.frameCount} · 처리{" "}
         {live === null || live.processedFps === null ? "—" : live.processedFps.toFixed(1)} fps
       </p>
-      {stalled ? (
-        <p className="gs-result-sub gs-result-stall">영상이 서버에 들어오지 않고 있어요</p>
-      ) : null}
+      {/* 매초 바뀌는 프레임 수는 넣지 않고 경고 문구만 알림 영역에 넣었다 뺀다. */}
+      <p className="gs-result-sub gs-result-stall" role="status">
+        {stalled ? "영상이 서버에 들어오지 않고 있어요" : null}
+      </p>
     </section>
   )
 }

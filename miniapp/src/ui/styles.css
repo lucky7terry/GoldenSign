@@ -23,7 +23,8 @@
   --gs-border: #dfe8ee;
   --gs-fg: #22303a;
   --gs-muted: #5e6e7a;
-  --gs-subtle: #93a3ae;
+  /* 흰 배경 대비 약 4.7:1 — "답 없음" 같은 읽어야 하는 문구가 이 색을 쓴다. */
+  --gs-subtle: #66757f;
   --gs-accent: #7bd8fd;
   --gs-accent-strong: #1b9cd8;
   --gs-accent-text: #0c7197;
@@ -640,6 +641,8 @@ button {
 }
 
 .gs-confbar-fill {
+  /* span 은 inline 이라 block 으로 바꿔야 width 가 적용된다. */
+  display: block;
   height: 100%;
   border-radius: var(--gs-r-pill);
   background: var(--gs-accent);
@@ -822,13 +825,16 @@ button {
   cursor: pointer;
 }
 
+/* 라이트는 흰 글자 대비(4.5:1 이상)를 위해 accent-strong 대신 accent-text 를 쓴다. */
 .gs-btn-filled {
-  border: 1px solid var(--gs-accent-strong);
-  background: var(--gs-accent-strong);
+  border: 1px solid var(--gs-accent-text);
+  background: var(--gs-accent-text);
   color: #ffffff;
 }
 
 .dark .gs-btn-filled {
+  border-color: var(--gs-accent-strong);
+  background: var(--gs-accent-strong);
   color: #0e1a22;
 }
 
