@@ -275,7 +275,7 @@ async def _recognition_worker(
             frame_queue.task_done()
 
 
-def _close_word_and_recognize(session_id: str, word_generation: int):
+def _close_word_and_recognize(session_id: str, word_generation: int, frame_token: object | None = None):
     """구간을 닫고 단어까지 판정한다. executor 에서 돈다.
 
     end_word 안의 특징 변환(30fps 복원 -> build_features -> 60프레임)과
@@ -285,7 +285,7 @@ def _close_word_and_recognize(session_id: str, word_generation: int):
     인식 모델이 없으면 recognition 이 None 이다 - 구간은 정상적으로
     닫히고 좌표 수집도 계속된다. 단어만 주장하지 않는다.
     """
-    segment = word_store.end_word(session_id, word_generation)
+    segment = word_store.end_word(session_id, word_generation, frame_token=frame_token)
     try:
         recognition = recognize_word_segment(segment.sequence)
     except RecognitionModelUnavailableError as exc:
@@ -416,6 +416,15 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         "closed" | "too_short" | "out_of_frame" | "not_open".
         """
         loop = asyncio.get_running_loop()
+        try:
+            token = word_store.begin_close(session_id, word_generation)
+        except WordSessionClosed:
+            return "not_open"
+        if token is False:
+            return "not_open"
+        drain_started = loop.time()
+        await whep_pull_service.drain_word(session_id, token, WORD_DRAIN_TIMEOUT_SECONDS)
+        drain_remaining = max(0.0, WORD_DRAIN_TIMEOUT_SECONDS - (loop.time() - drain_started))
 
         # 큐에 남은 프레임을 먼저 소진한다. dev-0.2 frame 경로는 ACK 를
         # 먼저 보내고 인식은 워커가 나중에 하므로, 여기서 바로 닫으면
@@ -427,12 +436,12 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
         # 30장일 때 5초가 걸린다. 그동안 결과를 못 받느니 몇 장 빠진 채로
         # 답을 주는 편이 낫다. 세마포어를 잡기 전에 기다려야 워커가
         # 세마포어를 못 얻어 서로 막히는 일이 없다.
-        if WORD_DRAIN_TIMEOUT_SECONDS > 0 and not frame_queue.empty():
+        if drain_remaining > 0 and not frame_queue.empty():
             pending = frame_queue.qsize()
             try:
                 await asyncio.wait_for(
                     frame_queue.join(),
-                    timeout=WORD_DRAIN_TIMEOUT_SECONDS,
+                    timeout=drain_remaining,
                 )
             except asyncio.TimeoutError:
                 logger.warning(
@@ -454,6 +463,7 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     _close_word_and_recognize,
                     session_id,
                     word_generation,
+                    token,
                 )
         except (WordNotStarted, WordSessionClosed):
             return "not_open"
@@ -1002,6 +1012,14 @@ async def stream_recognition_frames(websocket: WebSocket, session_id: str):
                     close_reason = "session_invalid"
                     await websocket.close(code=1008)
                     return
+
+                if started_stream_id is not None and not await whep_pull_service.is_ready(session_id):
+                    await _send_json(websocket, send_lock, error_message(
+                        WORD_SCHEMA_VERSION, session_id, "stream_not_ready",
+                        "Video is not ready. Wait for video reception and try again.",
+                        client_message_id, retryable=True,
+                    ), activity)
+                    continue
 
                 try:
                     word_store.start_word(session_id, word_generation)
