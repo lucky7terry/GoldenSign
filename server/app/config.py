@@ -233,5 +233,7 @@ TTS_RATE_LIMIT_GLOBAL = _env_int("TTS_RATE_LIMIT_GLOBAL", 60)
 # 캐시 파일 수 상한. 넘으면 오래 안 쓴 것부터 지운다.
 TTS_CACHE_MAX_FILES = _env_int("TTS_CACHE_MAX_FILES", 2000)
 
-# Reset consecutive connection failures after sustained decoded video receipt.
-WHEP_RETRY_RESET_SECONDS = _env_float("WHEP_RETRY_RESET_SECONDS", 30.0)
+# 디코딩 프레임을 이 시간 이상 받은 연결이 끊기면 실패 횟수를 초기화한다.
+# 11/18 로그에서 연결당 영상 시간이 0.7~5.5초(연결 직후 잠깐)와 8.7~22초(실제 수신)로
+# 갈려서 그 사이인 5초로 둔다. 1초처럼 낮추면 잠깐 오는 연결도 성공으로 쳐서 재시도가 끝나지 않는다.
+WHEP_RETRY_RESET_SECONDS = _env_float("WHEP_RETRY_RESET_SECONDS", 5.0)
