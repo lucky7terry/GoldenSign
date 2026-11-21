@@ -3,7 +3,8 @@ import inspect
 import ipaddress
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from collections import Counter
 from datetime import datetime, timezone
 from time import monotonic
 from urllib.parse import urljoin, urlparse
@@ -17,6 +18,7 @@ from app.config import (
     WHEP_KEYFRAME_REQUEST_INTERVAL_SECONDS,
     WHEP_MAX_RETRIES,
     WHEP_RETRY_DELAY_SECONDS,
+    WHEP_RETRY_RESET_SECONDS,
     WHEP_STUN_SERVER_URLS,
 )
 from app.constants import WEBRTC_SCHEMA_VERSION, WORD_SCHEMA_VERSION
@@ -39,6 +41,7 @@ def _recognize_whep_frame(
     word_generation: int,
     video_frame,
     captured_at_ms: float | None,
+    frame_token: object | None = None,
 ):
     from app.services.model_service import (
         get_model_health_status,
@@ -54,6 +57,7 @@ def _recognize_whep_frame(
             session_id,
             word_generation,
             captured_at_ms,
+            frame_token,
         ),
         get_model_health_status(),
     )
@@ -128,6 +132,30 @@ class _FrameProcessingState:
         self.last_processed_log_at = monotonic()
 
 
+@dataclass(eq=False)
+class _ReceivedFrame:
+    frame: object
+    generation: int | None
+    token: object
+    done: asyncio.Future
+    counts: Counter
+    execution: asyncio.Future | None = None
+    cancellation_requested: bool = False
+    drain_timed_out: bool = False
+
+    def finish(self, reason: str | None = None):
+        if not self.done.done():
+            # Cancelling the asyncio waiter does not stop its executor thread.
+            if reason == "cancelled" and self.execution is not None:
+                if not self.cancellation_requested:
+                    self.cancellation_requested = True
+                    self.counts["cancellation_requested"] += 1
+                return
+            if reason:
+                self.counts[reason] += 1
+            self.done.set_result(None)
+
+
 @dataclass
 class WhepStreamHandle:
     """WHEP 스트림 연결 하나의 상태와 제어 핸들.
@@ -156,6 +184,14 @@ class WhepStreamHandle:
     # 프레임을 하나 처리할 때마다 부른다. WebSocket 유휴 판정용.
     on_frame: Callable[[], None] | None = None
     task: asyncio.Task | None = None
+    ready: bool = False
+    last_received_at: float | None = None
+    first_received_at: float | None = None
+    stable: bool = False
+    received_total: int = 0
+    processed_total: int = 0
+    pending: set = field(default_factory=set)
+    segment_counts: dict = field(default_factory=dict)
 
 
 class WhepPullService:
@@ -288,10 +324,80 @@ class WhepPullService:
         async with self._lock:
             return self._streams.get(session_id)
 
+    async def is_ready(self, session_id: str) -> bool:
+        handle = await self._get_stream(session_id)
+        return bool(handle and handle.ready and not handle.stop_event.is_set()
+                    and handle.last_received_at is not None
+                    and monotonic() - handle.last_received_at < WHEP_FRAME_IDLE_TIMEOUT_SECONDS)
+
+    async def drain_word(self, session_id: str, token: object, timeout: float) -> None:
+        handle = await self._get_stream(session_id)
+        if handle is None or token is False:
+            return
+        items = [item for item in handle.pending if item.token is token]
+        pending = [item.done for item in items]
+        remaining = pending
+        if pending and timeout > 0:
+            _, remaining = await asyncio.wait(pending, timeout=timeout)
+        for item in items:
+            if item.done in remaining:
+                item.drain_timed_out = True
+        counts = handle.segment_counts.pop(token, Counter())
+        logger.info("WHEP word frame summary", extra={
+            "session_id": session_id, "stream_id": handle.stream_id,
+            "received": counts["received"], "processed": counts["processed"],
+            "buffered": counts["buffered"], "queue_replaced": counts["queue_replaced"],
+            "validation_failed": counts["validation_failed"],
+            "processing_failed": counts["processing_failed"],
+            "not_buffered": counts["not_buffered"], "cancelled": counts["cancelled"],
+            "cancellation_requested": counts["cancellation_requested"],
+            "pending_at_close": len(pending), "pending_after_drain": len(remaining),
+            "last_frame_age_seconds": (None if handle.last_received_at is None
+                else round(monotonic() - handle.last_received_at, 3)),
+        })
+
+    def _admit_frame(self, handle, frame):
+        from app.services.word_segment_service import word_store
+        generation = _current_word_generation(handle.session_id)
+        token = word_store.frame_token(handle.session_id, generation) if generation is not None else False
+        counts = handle.segment_counts.setdefault(token, Counter()) if token is not False else Counter()
+        counts["received"] += 1
+        item = _ReceivedFrame(frame, generation, token,
+                              asyncio.get_running_loop().create_future(), counts)
+        handle.pending.add(item)
+        item.done.add_done_callback(lambda _: handle.pending.discard(item))
+        return item
+
+    async def _log_receive_health(self, handle, peer_connection, video_track):
+        stats_fields = {}
+        try:
+            for receiver in self._video_receivers(peer_connection, video_track):
+                report = await asyncio.wait_for(receiver.getStats(), timeout=0.5)
+                for stat in report.values():
+                    if stat.type == "inbound-rtp" and stat.kind == "video":
+                        stats_fields.update(packets_received=stat.packetsReceived,
+                                            packets_lost=stat.packetsLost,
+                                            jitter=stat.jitter)
+        except Exception:
+            stats_fields["stats_unavailable"] = True
+        logger.info("WHEP receive health", extra={
+            "session_id": handle.session_id, "stream_id": handle.stream_id,
+            "received_total": handle.received_total, "processed_total": handle.processed_total,
+            "pending_frames": len(handle.pending),
+            "last_frame_age_seconds": (None if handle.last_received_at is None
+                else round(monotonic() - handle.last_received_at, 3)),
+            **stats_fields,
+        })
+
     async def _run_stream(self, handle: WhepStreamHandle) -> None:
         try:
             last_error: Exception | None = None
-            for attempt in range(1, WHEP_MAX_RETRIES + 1):
+            attempt = 0
+            while attempt < WHEP_MAX_RETRIES:
+                handle.ready = False
+                handle.first_received_at = None
+                handle.stable = False
+                attempt += 1
                 if handle.stop_event.is_set():
                     return
                 try:
@@ -301,6 +407,9 @@ class WhepPullService:
                     raise
                 except Exception as exc:
                     last_error = exc
+                    handle.ready = False
+                    if handle.stable:
+                        attempt = 1
                     logger.warning(
                         "WHEP connection attempt failed",
                         extra={
@@ -308,6 +417,8 @@ class WhepPullService:
                             "stream_id": handle.stream_id,
                             "attempt": attempt,
                             "max_retries": WHEP_MAX_RETRIES,
+                            "reason": str(exc),
+                            "stable_reset": handle.stable,
                         },
                         exc_info=True,
                     )
@@ -465,6 +576,9 @@ class WhepPullService:
                 if not done:
                     self._raise_if_processing_task_done(processing_task)
                     now = monotonic()
+                    if now - last_log_at >= 5.0:
+                        await self._log_receive_health(handle, peer_connection, video_track)
+                        last_log_at = now
                     if connection_closed.is_set():
                         raise RuntimeError(
                             "WHEP connection closed while waiting for frames."
@@ -484,7 +598,7 @@ class WhepPullService:
                         )
                         last_keyframe_request_at = now
                     if now - last_frame_at >= frame_timeout:
-                        raise RuntimeError("WHEP video frames stopped.")
+                        raise RuntimeError("WHEP frame idle timeout" if first_frame_received else "WHEP first frame timeout")
                     continue
 
                 self._raise_if_processing_task_done(processing_task)
@@ -519,13 +633,25 @@ class WhepPullService:
                 now = monotonic()
                 last_frame_at = now
                 first_frame_received = True
-                self._replace_latest_video_frame(
-                    latest_frame_queue,
-                    frame_count,
-                    video_frame,
-                )
+                handle.ready = True
+                handle.received_total += 1
+                handle.last_received_at = now
+                if handle.first_received_at is None:
+                    handle.first_received_at = now
+                if now - handle.first_received_at >= WHEP_RETRY_RESET_SECONDS:
+                    handle.stable = True
+                item = self._admit_frame(handle, video_frame)
+                # Do not replace the last admitted frame while its word drains.
+                if item.token is False and any(
+                    pending.token is not False and not pending.done.done()
+                    for pending in handle.pending
+                ):
+                    item.finish("not_buffered")
+                else:
+                    self._replace_latest_video_frame(latest_frame_queue, frame_count, item)
 
                 if frame_count == 1 or now - last_log_at >= 5.0:
+                    await self._log_receive_health(handle, peer_connection, video_track)
                     logger.info(
                         "Received WHEP video frames",
                         extra={
@@ -546,10 +672,15 @@ class WhepPullService:
             )
             return
         finally:
+            handle.ready = False
             recv_task.cancel()
             await asyncio.gather(recv_task, return_exceptions=True)
             processing_task.cancel()
             await asyncio.gather(processing_task, return_exceptions=True)
+            while not latest_frame_queue.empty():
+                _, queued = latest_frame_queue.get_nowait()
+                if isinstance(queued, _ReceivedFrame):
+                    queued.finish("cancelled")
 
     @staticmethod
     def _raise_if_processing_task_done(processing_task: asyncio.Task) -> None:
@@ -573,7 +704,9 @@ class WhepPullService:
     ) -> None:
         if latest_frame_queue.full():
             try:
-                latest_frame_queue.get_nowait()
+                _, discarded = latest_frame_queue.get_nowait()
+                if isinstance(discarded, _ReceivedFrame):
+                    discarded.finish("queue_replaced")
             except asyncio.QueueEmpty:
                 pass
         latest_frame_queue.put_nowait((frame_count, video_frame))
@@ -633,6 +766,8 @@ class WhepPullService:
                 )
                 in_flight.add(task)
                 task.add_done_callback(_on_done)
+                if isinstance(video_frame, _ReceivedFrame):
+                    task.add_done_callback(lambda _, item=video_frame: item.finish("cancelled"))
             if stopped:
                 raise stopped[0]
         finally:
@@ -641,7 +776,40 @@ class WhepPullService:
             if in_flight:
                 await asyncio.gather(*in_flight, return_exceptions=True)
 
-    async def _process_one_video_frame(
+    @staticmethod
+    def _complete_extraction(handle, item, execution):
+        # This callback owns completion and consumes exceptions even if the
+        # network task has already been cancelled during reconnect/stop.
+        try:
+            result, _ = execution.result()
+        except asyncio.CancelledError:
+            item.execution = None
+            item.finish("cancelled")
+            return
+        except ValueError:
+            outcome = "validation_failed"
+        except Exception:
+            outcome = "processing_failed"
+        else:
+            handle.processed_total += 1
+            item.counts["processed"] += 1
+            outcome = "buffered" if (result.get("word") or {}).get("buffered") else "not_buffered"
+        item.finish(outcome)
+        if item.cancellation_requested or item.drain_timed_out:
+            logger.info("WHEP extraction completed after waiter ended", extra={
+                "session_id": handle.session_id, "stream_id": handle.stream_id,
+                "outcome": outcome, "cancellation_requested": item.cancellation_requested,
+                "drain_timed_out": item.drain_timed_out,
+            })
+
+    async def _process_one_video_frame(self, handle, state, frame_count, video_frame):
+        try:
+            await self._process_received_frame(handle, state, frame_count, video_frame)
+        finally:
+            if isinstance(video_frame, _ReceivedFrame):
+                video_frame.finish("cancelled")
+
+    async def _process_received_frame(
         self,
         handle: WhepStreamHandle,
         state: "_FrameProcessingState",
@@ -653,21 +821,33 @@ class WhepPullService:
         WhepFrameProcessingStopped 만 밖으로 나간다(세션이 닫힘). 나머지
         오류는 기록하고 이 프레임만 버린다 — 예전 루프의 continue 와 같다.
         """
+        item = video_frame if isinstance(video_frame, _ReceivedFrame) else None
+        if item is not None:
+            video_frame = item.frame
         try:
             captured_at_ms = _frame_timestamp_ms(video_frame)
-            word_generation = _current_word_generation(handle.session_id)
+            word_generation = item.generation if item else _current_word_generation(handle.session_id)
             if word_generation is None:
                 return
             loop = asyncio.get_running_loop()
-            result, model_status = await loop.run_in_executor(
+            execution = loop.run_in_executor(
                 None,
                 _recognize_whep_frame,
                 handle.session_id,
                 word_generation,
                 video_frame,
                 captured_at_ms,
+                *([item.token] if item else []),
             )
+            if item:
+                item.execution = execution
+                execution.add_done_callback(
+                    lambda completed: self._complete_extraction(handle, item, completed)
+                )
+            result, model_status = await asyncio.shield(execution)
         except ValueError:
+            if item:
+                item.finish("validation_failed")
             logger.exception(
                 "WHEP frame validation failed",
                 extra={
@@ -678,6 +858,8 @@ class WhepPullService:
             )
             return
         except Exception as exc:
+            if item:
+                item.finish("processing_failed")
             if _is_word_session_closed(exc):
                 raise WhepFrameProcessingStopped(
                     "Recognition session closed."

@@ -420,6 +420,7 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 |---|---|---|
 | `word_already_started` | 이미 열린 구간에 `word_start` 가 또 왔다 | false |
 | `word_not_started` | 열린 구간이 없는데 `word_end` 가 왔다 | false |
+| `stream_not_ready` | WHEP 영상 준비 중·재연결 중이거나 최근 프레임이 없음. 구간은 열리지 않으며 잠시 후 재시도 | true |
 | `word_too_short` | 구간 프레임이 `WORD_MIN_FRAMES`(기본 8) 미만 | true |
 | `word_out_of_frame` | 얼굴이나 손이 구간 대부분에서 화면 밖이었다 | true |
 | `word_recognition_failed` | 구간을 닫는 중 추론이 실패했다 (라벨 파일 문제, 텐서플로 런타임 오류, 입력 shape 불일치) | true |
@@ -427,7 +428,7 @@ WORD_MAX_SECONDS(기본 8초)가 지나면 서버가 알아서 닫고 결과를 
 `word_too_short`, `word_out_of_frame`, `word_recognition_failed` 로 거절해도
 **구간은 닫힌다.** 앱은 다시 `word_start` 부터 보내면 된다.
 
-`word_out_of_frame` 은 얼굴이 보인 프레임 비율이 `WORD_MIN_FACE_RATIO`(0.5)
+`word_out_of_frame` 은 얼굴이 보인 프레임 비율이 `WORD_MIN_FACE_RATIO`(0.3)
 미만이거나, 두 손 중 하나라도 보인 프레임 비율이
 `WORD_MIN_HAND_RATIO`(0.2) 미만일 때 나간다. 양손을 요구하지 않는 것은 한 손
 수어에서 다른 손이 화면 밖인 것이 정상이기 때문이다. `message` 에 두 비율이
@@ -489,7 +490,7 @@ ack 를 보내지 않는 이유: 앱은 `result` 를 받는 순간 구간을 닫
 | `WORD_MIN_FRAMES` | `8` | 이보다 적으면 `word_too_short`. 이슈 [#42](https://github.com/mentraconsulting/golden-sign/issues/42)에서 10을 제안했으나, 실측(영상 5개, 8~12프레임, 5/5 정답, 확신도 0.765~0.809)으로 8이 정확도를 유지하면서 짧은 단어를 덜 거절함을 확인하여 8로 결정 |
 | `WORD_TARGET_FRAMES` | `60` | 모델 입력 길이. 학습이 60이다 |
 | `WORD_SOURCE_FPS` | `30.0` | 되돌릴 격자의 프레임레이트. 원본 영상과 같게 둔다 |
-| `WORD_MIN_FACE_RATIO` | `0.5` | 얼굴이 보인 프레임 비율이 이보다 낮으면 `word_out_of_frame` |
+| `WORD_MIN_FACE_RATIO` | `0.3` | 얼굴이 보인 프레임 비율이 이보다 낮으면 `word_out_of_frame` |
 | `WORD_MIN_HAND_RATIO` | `0.2` | 두 손 중 하나라도 보인 프레임 비율이 이보다 낮으면 `word_out_of_frame`. 얼굴 기준보다 낮다 — 아래 `word_out_of_frame` 설명 참고 |
 | `RECOGNITION_CONFIDENCE_THRESHOLD` | `0.5` | 이 아래면 단어를 주장하지 않는다 |
 | `RECOGNITION_MARGIN_THRESHOLD` | `0.15` | 2위와의 격차가 이 아래면 주장하지 않는다 |
@@ -761,3 +762,22 @@ status 로 정직하게 내야 한다. 빈 200 을 주면 앱은 재생에 성�
 | `CLIENT_LOG_MAX_FIELDS` | `20` | `fields` 에서 로그로 옮기는 키 수 상한 |
 | `CLIENT_LOG_MAX_VALUE_CHARS` | `200` | 문자열 값을 자르는 길이 |
 | `CLIENT_LOG_MAX_PER_SECOND` | `5` | 한 세션이 1초에 남길 수 있는 건수 |
+
+
+### WHEP 영상 준비 및 구간 종료
+
+- `stream_start_accepted`는 연결 요청 수락이며 영상 준비 완료를 뜻하지 않는다.
+- WHEP를 시작한 세션의 `word_start`는 최근 디코딩 프레임이 없거나 재연결 중이면
+  `stream_not_ready` (`retryable: true`)로 거절한다. 요청의 `client_message_id`를 그대로
+  돌려주며 앱은 해당 입력 구간을 정리하고 잠시 후 재시도를 안내한다.
+  WHEP를 사용하지 않는 기존 프레임 업로드 경로에는 이 조건을 적용하지 않는다.
+- WHEP 프레임은 수신 당시의 내부 구간 토큰에 귀속된다. 구간 종료 요청부터 새 프레임의
+  유입을 막고, 이미 받은 프레임만 `WORD_DRAIN_TIMEOUT_SECONDS` 한도 안에서 기다린다.
+  제한 시간을 넘겨 끝난 이전 구간의 처리는 다음 구간에 저장되지 않는다.
+- `WHEP word frame summary` 로그는 구간별 수신·처리·저장 수, 큐 교체, 검증/처리 실패,
+  미저장 및 취소 수, 종료 전후 대기 작업 수, 마지막 프레임 경과 시간을 기록한다.
+- `WHEP_RETRY_RESET_SECONDS` 기본값은 5초다. 연결에서 디코딩 프레임을 이 기간 동안
+  수신한 뒤 끊기면 그 실패를 1회로 세어 재시도 예산을 회복한다. 프레임 유휴 타임아웃은
+  그대로 적용하며, 최대 시도 횟수와 재시도 간격의 기본값은 5회/1초를 유지한다.
+
+`WHEP receive health`는 영상 정지 중에도 주기적으로 패킷 수·손실·jitter와 누적 수신/처리 수를 기록한다. 패킷 통계는 연결별, 프레임 누계는 스트림 핸들별이며 재연결 시 범위 차이에 유의한다.

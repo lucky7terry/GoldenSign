@@ -389,6 +389,8 @@ def coverage_ratios(frames: list[list[float]]) -> tuple[float, float]:
 
 @dataclass
 class _WordState:
+    token: object = field(default_factory=object)
+    closing: bool = False
     frames: list[list[float]] = field(default_factory=list)
     timestamps_ms: list[float | None] = field(default_factory=list)
     dropped_after_cap: int = 0
@@ -532,14 +534,28 @@ class WordSegmentStore:
     def start_word(self, session_id: str, generation: int | None = None) -> None:
         """새 단어 구간을 연다.
 
-        이미 열려 있으면 그 구간을 버리고 새로 연다. 사용자가 끝 표시 없이
-        다시 시작을 누른 경우이므로, 앞 구간은 결과를 낼 가치가 없다.
+        이미 열려 있으면 WordAlreadyStarted로 거절해 기존 구간을 보존한다.
         """
         with self._lock:
             state = self._require_state(session_id, generation)
             if state.word is not None:
                 raise WordAlreadyStarted("A word segment is already open.")
             state.word = _WordState()
+
+    def frame_token(self, session_id: str, generation: int | None = None):
+        """Capture ownership at receipt, before asynchronous extraction."""
+        with self._lock:
+            state = self._require_state(session_id, generation)
+            return state.word.token if state.word and not state.word.closing else False
+
+    def begin_close(self, session_id: str, generation: int | None = None):
+        """Stop admitting new WHEP frames; already admitted frames may finish."""
+        with self._lock:
+            state = self._require_state(session_id, generation)
+            if state.word is None or state.word.closing:
+                return False
+            state.word.closing = True
+            return state.word.token
 
     def abort_word(
         self,
@@ -562,6 +578,7 @@ class WordSegmentStore:
         feature_vector: list[float],
         captured_at_ms: float | None = None,
         generation: int | None = None,
+        frame_token: object | None = None,
     ) -> WordAppendResult:
         """열린 구간에 프레임 한 장을 넣는다.
 
@@ -584,7 +601,7 @@ class WordSegmentStore:
         with self._lock:
             state = self._require_state(session_id, generation)
             word = state.word
-            if word is None:
+            if word is None or (frame_token is not None and frame_token is not word.token):
                 return WordAppendResult(
                     buffered=False,
                     frame_count=0,
@@ -614,13 +631,14 @@ class WordSegmentStore:
         self,
         session_id: str,
         generation: int | None = None,
+        frame_token: object | None = None,
     ) -> WordSegment:
         """구간을 닫고 모델 입력 (target_frames, 420) 으로 만들어 돌려준다."""
         with self._lock:
             state = self._require_state(session_id, generation)
             word = state.word
-            if word is None:
-                raise WordNotStarted("No word segment is open.")
+            if word is None or (frame_token is not None and frame_token is not word.token):
+                raise WordNotStarted("The requested word segment is no longer open.")
 
             frame_count = len(word.frames)
             if frame_count < self.min_frames:

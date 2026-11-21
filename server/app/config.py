@@ -136,7 +136,7 @@ RECOGNITION_MARGIN_THRESHOLD = _env_probability(
 # 판정하기 전에 "보이지 않았다"를 따로 알리는 쪽이 낫다.
 #
 # 실기에서 얼굴이 보인 정상 구간도 손 비율이 0.22~0.48 이라 손 기준을 낮게 둔다.
-WORD_MIN_FACE_RATIO = _env_probability("WORD_MIN_FACE_RATIO", 0.5)
+WORD_MIN_FACE_RATIO = _env_probability("WORD_MIN_FACE_RATIO", 0.3)
 WORD_MIN_HAND_RATIO = _env_probability("WORD_MIN_HAND_RATIO", 0.2)
 
 # 단어 구간을 닫기 전에 큐에 남은 프레임을 기다리는 최대 시간. 0 이면
@@ -232,3 +232,8 @@ TTS_RATE_LIMIT_PER_IP = _env_int("TTS_RATE_LIMIT_PER_IP", 20)
 TTS_RATE_LIMIT_GLOBAL = _env_int("TTS_RATE_LIMIT_GLOBAL", 60)
 # 캐시 파일 수 상한. 넘으면 오래 안 쓴 것부터 지운다.
 TTS_CACHE_MAX_FILES = _env_int("TTS_CACHE_MAX_FILES", 2000)
+
+# 디코딩 프레임을 이 시간 이상 받은 연결이 끊기면 실패 횟수를 초기화한다.
+# 11/18 로그에서 연결당 영상 시간이 0.7~5.5초(연결 직후 잠깐)와 8.7~22초(실제 수신)로
+# 갈려서 그 사이인 5초로 둔다. 1초처럼 낮추면 잠깐 오는 연결도 성공으로 쳐서 재시도가 끝나지 않는다.
+WHEP_RETRY_RESET_SECONDS = _env_float("WHEP_RETRY_RESET_SECONDS", 5.0)

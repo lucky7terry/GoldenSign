@@ -89,6 +89,7 @@ def _recognition_result(
     session_id: str | None = None,
     word_generation: int | None = None,
     captured_at_ms: float | None = None,
+    frame_token: object | None = None,
 ):
     """한 프레임의 좌표 추출 결과.
 
@@ -113,6 +114,7 @@ def _recognition_result(
             build_openpose_feature_vector(keypoints),
             captured_at_ms,
             word_generation,
+            frame_token,
         )
         payload["word"] = {
             "buffered": append_result.buffered,
@@ -151,6 +153,7 @@ def recognize_frame_from_image_bytes(
     session_id: str | None = None,
     word_generation: int | None = None,
     captured_at_ms: float | None = None,
+    frame_token: object | None = None,
 ):
     if not image_bytes:
         raise FrameValidationError(
@@ -171,6 +174,7 @@ def recognize_frame_from_image_bytes(
         session_id,
         word_generation,
         captured_at_ms,
+        frame_token,
     )
 
 
@@ -179,6 +183,7 @@ def recognize_frame_from_image(
     session_id: str | None = None,
     word_generation: int | None = None,
     captured_at_ms: float | None = None,
+    frame_token: object | None = None,
 ):
     if image is None or image.size == 0:
         raise FrameValidationError(
@@ -199,4 +204,5 @@ def recognize_frame_from_image(
         session_id,
         word_generation,
         captured_at_ms,
+        frame_token,
     )

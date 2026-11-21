@@ -537,6 +537,7 @@ const MAX_WORD_DIAGS = 10
 /** 구간을 닫는 서버 오류. 이 코드들만 진단 표에 한 줄로 남긴다. */
 const WORD_DIAG_ERROR_CODES = new Set([
   "word_too_short",
+  "stream_not_ready",
   "word_out_of_frame",
   "word_not_started",
   "word_recognition_failed",
@@ -1281,7 +1282,8 @@ registerMiniapp((session) => {
     // 단어 구간 오류는 echo 된 id 로 지금 구간의 것인지 먼저 가린다. 아니면
     // 지금 구간을 건드리지 않고 로그와 진단 표 기록만 남긴다.
     if (
-      (err.code === "word_too_short" ||
+      (err.code === "stream_not_ready" ||
+        err.code === "word_too_short" ||
         err.code === "word_out_of_frame" ||
         err.code === "word_recognition_failed") &&
       !segmentMatches(err.clientMessageId)
@@ -1305,6 +1307,10 @@ registerMiniapp((session) => {
     // 구간이 닫혔고 다시 눌러야 하는 오류에서만 채운다. 읽을 문구는 code 마다 다르다.
     let announcement: string | undefined
     switch (err.code) {
+      case "stream_not_ready":
+        clearWordSegment()
+        announcement = "영상 연결을 준비 중입니다. 잠시 후 다시 시도해 주세요."
+        break
       case "word_too_short":
         // 8프레임 미만. 서버는 이미 닫았으므로 앱도 닫는다.
         console.warn("[Word] 구간이 너무 짧습니다.")
