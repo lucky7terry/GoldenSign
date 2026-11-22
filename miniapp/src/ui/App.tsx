@@ -170,11 +170,10 @@ function describeError(snap: Snapshot): string {
   if (snap.ai.state === "ready") alive.push("인식 서버")
   if (snap.glasses.wifiConnected === true) alive.push("안경 WiFi")
 
+  // 안경 WiFi 미연결은 오류 원인이 아니다 — whip 중계에서는 꺼져 있는 것이 정상이다.
   let cause: string
   if (snap.ai.state === "error") {
     cause = snap.ai.message ?? "인식 서버에 연결하지 못했습니다"
-  } else if (snap.glasses.wifiConnected === false) {
-    cause = "안경이 WiFi에 연결되어 있지 않습니다"
   } else {
     cause = snap.stream.message ?? "카메라 스트림을 시작하지 못했습니다"
   }
@@ -196,12 +195,6 @@ function describeErrorCard(snap: Snapshot): {title: string; body: string; action
     actions = [
       "잠시 뒤 안경 버튼을 길게 눌러 다시 시도해 주세요",
       "계속 안 되면 폰의 인터넷 연결을 확인해 주세요",
-    ]
-  } else if (snap.glasses.wifiConnected === false) {
-    title = "안경이 WiFi에 연결되어 있지 않습니다"
-    actions = [
-      "안경을 WiFi에 연결해 주세요",
-      "연결한 뒤 안경 버튼을 길게 눌러 다시 시도해 주세요",
     ]
   } else {
     title = snap.stream.message ?? "카메라 스트림을 시작하지 못했습니다"
@@ -255,6 +248,13 @@ function describeGlasses(snap: Snapshot): StateView {
   const battery = snap.glasses.battery
   const suffix = battery === null || battery === undefined ? "" : ` · ${battery}%`
 
+  // whip 중계 중에는 안경이 자기 핫스팟을 열어 WiFi 미연결이 정상이다.
+  if (
+    (snap.stream.state === "starting_stream" || snap.stream.state === "streaming") &&
+    snap.glasses.wifiConnected === false
+  ) {
+    return {label: `핫스팟 중계 중${suffix}`, detail: "", tone: "streaming"}
+  }
   if (snap.glasses.wifiConnected === true) {
     return {label: `WiFi 연결됨${suffix}`, detail: "", tone: "streaming"}
   }
