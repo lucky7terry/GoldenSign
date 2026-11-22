@@ -550,6 +550,7 @@ function SummaryQuestionCard({record, index}: {record: SessionRecord; index: num
 
 const DIAG_KIND_LABEL: Record<string, string> = {
   recognized: "인식",
+  stream_not_ready: "영상 준비 중",
   low_confidence: "확신 부족",
   out_of_frame: "화면 이탈",
   too_short: "너무 짧음",

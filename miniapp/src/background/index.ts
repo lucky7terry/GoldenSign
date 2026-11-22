@@ -1308,6 +1308,7 @@ registerMiniapp((session) => {
     switch (err.code) {
       case "stream_not_ready":
         clearWordSegment()
+        rejected = true
         announcement = "영상 연결을 준비 중입니다. 잠시 후 다시 시도해 주세요."
         break
       case "word_too_short":
