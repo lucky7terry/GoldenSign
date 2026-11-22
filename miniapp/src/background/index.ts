@@ -2300,6 +2300,9 @@ registerMiniapp((session) => {
       if (typeof resolved?.video?.fps === "number") startedFields.fps = resolved.video.fps
       if (typeof resolved?.video?.width === "number") startedFields.width = resolved.video.width
       if (typeof resolved?.video?.height === "number") startedFields.height = resolved.video.height
+      // 서버·브라우저 동시 재생 점검용으로 성공 경로에만 URL 원문을 남긴다(서버가 200자에서 자른다).
+      startedFields.whep_url = webrtcUrl
+      startedFields.whep_url_len = webrtcUrl.length
       report("stream_start", "info", startedFields)
     } catch (err) {
       // 호출부의 catch 는 setState("error") 만 하고 끝난다. 예외로 끝난 시작을
