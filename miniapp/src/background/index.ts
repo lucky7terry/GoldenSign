@@ -2300,9 +2300,10 @@ registerMiniapp((session) => {
       if (typeof resolved?.video?.fps === "number") startedFields.fps = resolved.video.fps
       if (typeof resolved?.video?.width === "number") startedFields.width = resolved.video.width
       if (typeof resolved?.video?.height === "number") startedFields.height = resolved.video.height
-      // 서버·브라우저 동시 재생 점검용으로 성공 경로에만 URL 원문을 남긴다(서버가 200자에서 자른다).
-      startedFields.whep_url = webrtcUrl
-      startedFields.whep_url_len = webrtcUrl.length
+      // 재생 URL 원문 대신 호스트와 uid 앞 8자만 남겨 스트림을 대조한다.
+      startedFields.whep_host = parts.hostname
+      const uidSegment = /^[a-z]+:\/\/[^/]+\/([^/?#]+)/i.exec(webrtcUrl)?.[1]
+      if (uidSegment !== undefined) startedFields.whep_uid_prefix = uidSegment.slice(0, 8)
       report("stream_start", "info", startedFields)
     } catch (err) {
       // 호출부의 catch 는 setState("error") 만 하고 끝난다. 예외로 끝난 시작을
