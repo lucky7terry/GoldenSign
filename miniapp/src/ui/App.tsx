@@ -16,6 +16,7 @@
 import {Fragment, useEffect, useState} from "react"
 import {MiniappHeader, useRpc, useSafeArea} from "@mentra/miniapp/ui"
 import type {AnswerWord, Channels, SessionRecord, Snapshot, WordDiagEntry} from "../shared/channels"
+import {HOTSPOT_NOT_JOINED_MESSAGE} from "../shared/messages"
 import {QUESTIONS, QUESTION_COUNT} from "../shared/questions"
 import {buildCandidates} from "../shared/sentence"
 import {START_ANNOUNCEMENT, FRAMING_ANNOUNCEMENT} from "../background/tts"
@@ -170,11 +171,10 @@ function describeError(snap: Snapshot): string {
   if (snap.ai.state === "ready") alive.push("인식 서버")
   if (snap.glasses.wifiConnected === true) alive.push("안경 WiFi")
 
+  // 안경 WiFi 미연결은 오류 원인이 아니다 — whip 중계에서는 꺼져 있는 것이 정상이다.
   let cause: string
   if (snap.ai.state === "error") {
     cause = snap.ai.message ?? "인식 서버에 연결하지 못했습니다"
-  } else if (snap.glasses.wifiConnected === false) {
-    cause = "안경이 WiFi에 연결되어 있지 않습니다"
   } else {
     cause = snap.stream.message ?? "카메라 스트림을 시작하지 못했습니다"
   }
@@ -197,18 +197,19 @@ function describeErrorCard(snap: Snapshot): {title: string; body: string; action
       "잠시 뒤 안경 버튼을 길게 눌러 다시 시도해 주세요",
       "계속 안 되면 폰의 인터넷 연결을 확인해 주세요",
     ]
-  } else if (snap.glasses.wifiConnected === false) {
-    title = "안경이 WiFi에 연결되어 있지 않습니다"
-    actions = [
-      "안경을 WiFi에 연결해 주세요",
-      "연결한 뒤 안경 버튼을 길게 눌러 다시 시도해 주세요",
-    ]
   } else {
     title = snap.stream.message ?? "카메라 스트림을 시작하지 못했습니다"
-    actions = [
-      "안경 버튼을 길게 눌러 다시 시도해 주세요",
-      "계속 안 되면 미니앱을 닫았다가 다시 열어 주세요",
-    ]
+    // 핫스팟 안내문은 background 와 공유하는 상수라 문구 비교가 어긋나지 않는다.
+    actions =
+      snap.stream.message === HOTSPOT_NOT_JOINED_MESSAGE
+        ? [
+            "iPhone 연결 팝업이나 WiFi 설정에서 MentraLive 핫스팟에 연결해 주세요",
+            "연결한 뒤 안경 버튼을 길게 눌러 다시 시도해 주세요",
+          ]
+        : [
+            "안경 버튼을 길게 눌러 다시 시도해 주세요",
+            "계속 안 되면 미니앱을 닫았다가 다시 열어 주세요",
+          ]
   }
 
   const body =
@@ -255,6 +256,13 @@ function describeGlasses(snap: Snapshot): StateView {
   const battery = snap.glasses.battery
   const suffix = battery === null || battery === undefined ? "" : ` · ${battery}%`
 
+  // whip 중계 중에는 안경이 자기 핫스팟을 열어 WiFi 미연결이 정상이다.
+  if (
+    (snap.stream.state === "starting_stream" || snap.stream.state === "streaming") &&
+    snap.glasses.wifiConnected === false
+  ) {
+    return {label: `핫스팟 중계 중${suffix}`, detail: "", tone: "streaming"}
+  }
   if (snap.glasses.wifiConnected === true) {
     return {label: `WiFi 연결됨${suffix}`, detail: "", tone: "streaming"}
   }
@@ -550,6 +558,7 @@ function SummaryQuestionCard({record, index}: {record: SessionRecord; index: num
 
 const DIAG_KIND_LABEL: Record<string, string> = {
   recognized: "인식",
+  stream_not_ready: "영상 준비 중",
   low_confidence: "확신 부족",
   out_of_frame: "화면 이탈",
   too_short: "너무 짧음",

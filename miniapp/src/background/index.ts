@@ -54,6 +54,7 @@ import {
   type WifiData,
 } from "@mentra/miniapp/background"
 import type {Channels, Mode, Screen, SessionRecord, Snapshot} from "../shared/channels"
+import {HOTSPOT_NOT_JOINED_MESSAGE} from "../shared/messages"
 import {QUESTION_COUNT} from "../shared/questions"
 import {buildCandidates} from "../shared/sentence"
 import {
@@ -279,10 +280,6 @@ const STREAM_ATTEMPTS: ReadonlyArray<{name: string; note: string; options: Start
     options: {ingest: "whip", video: VIDEO_CONFIG, sound: false},
   },
 ]
-
-/** 사용자에게 WiFi 설정을 유도하기 전에 기다리는 한도. */
-const WIFI_WAIT_MS = 5000
-const WIFI_POLL_MS = 250
 
 /**
  * 롱프레스를 포기하기 전에 AI 소켓을 기다리는 한도.
@@ -595,7 +592,7 @@ registerMiniapp((session) => {
   /** 안경 WiFi 최신 상태. 첫 onWifi 전달 전까지 undefined 다. */
   let latestWifi: WifiData | undefined
   /**
-   * 시작 시퀀스(WiFi 대기 → startStream)가 도는 동안 true.
+   * 시작 시퀀스(AI 대기 → startStream)가 도는 동안 true.
    * `appState` 와 따로 두는 이유는 시퀀스가 두 상태에 걸쳐 있고, 그 사이의 두
    * 번째 롱프레스가 병렬 실행을 시작해서는 안 되기 때문이다.
    */
@@ -927,12 +924,15 @@ registerMiniapp((session) => {
     sendBroadcast(channel, next)
   }
 
+  /** 다음 상태 변경까지 유지할 스트림 안내문. 인자 없는 publishStreamState() 가 지우지 못한다. */
+  let stickyStreamMessage: string | null = null
+
   /** 현재 시점의 appState 와 activeStream 짝을 그대로 방송한다. */
   function publishStreamState(message: string | null = null): void {
     patch("stream:state", {
       state: appState,
       streamId: activeStream?.streamId ?? null,
-      message,
+      message: message ?? stickyStreamMessage,
       lost: streamLost,
     })
   }
@@ -1309,6 +1309,7 @@ registerMiniapp((session) => {
     switch (err.code) {
       case "stream_not_ready":
         clearWordSegment()
+        rejected = true
         announcement = "영상 연결을 준비 중입니다. 잠시 후 다시 시도해 주세요."
         break
       case "word_too_short":
@@ -1680,6 +1681,8 @@ registerMiniapp((session) => {
     // 없이 버리므로 word_end 는 보내지 않는다.
     const leavingStreaming = appState === "streaming" && wordSegment !== undefined
     appState = next
+    // 상태가 바뀌면 이전 상태에 묶인 유지 안내문은 끝난다.
+    stickyStreamMessage = null
     // 정리를 appState 를 옮긴 뒤로 미룬다. 먼저 하면 clearWordSegment 안의
     // restoreLed 가 옛 상태의 불을 한 번 켰다가 곧바로 새 상태로 덮인다.
     if (leavingStreaming) {
@@ -1929,9 +1932,8 @@ registerMiniapp((session) => {
 
   // --- 안경 WiFi ------------------------------------------------------------
 
-  // 구독 시점의 현재 상태와 이후 모든 변경에서 발생한다. 실측상 정확한 값이
-  // 오기까지 약 2초 걸린다. 시작 시퀀스가 초기값으로 거절하지 않고 기다리는
-  // 이유가 이것이다.
+  // 구독 시점의 현재 상태와 이후 모든 변경에서 발생한다. whip 중계에서는 안경
+  // WiFi 미연결이 정상이라 진단 표시용으로만 쓴다.
   unsubscribers.push(
     session.glasses.onWifi((data) => {
       latestWifi = data
@@ -1962,8 +1964,8 @@ registerMiniapp((session) => {
   // --- 사전 점검 ---------------------------------------------------------------
 
   /**
-   * 하드 게이트. 카메라 없는 기기는 영영 스트리밍할 수 없으므로 WiFi 와 달리
-   * 기다리지 않고 막는다.
+   * 하드 게이트. 카메라 없는 기기는 영영 스트리밍할 수 없으므로 기다리지 않고
+   * 막는다.
    */
   function hasCameraOrLog(): boolean {
     const c = asRecord(session.capabilities)
@@ -1980,30 +1982,7 @@ registerMiniapp((session) => {
   }
 
   /**
-   * 안경 WiFi 를 기다린다(거절하지 않는다).
-   *
-   * onWifi 가 정확한 값을 주기까지 약 2초 걸리므로, 앱을 연 직후 한 번만 보면
-   * 멀쩡한 기기를 "연결 안 됨" 으로 보고한다. 그 탓에 버튼이 죽은 것처럼 보였다.
-   * 최신 값을 최대 5초 동안 폴링해서 해결한다.
-   */
-  async function waitForWifi(): Promise<boolean> {
-    const deadline = Date.now() + WIFI_WAIT_MS
-    console.log("[Stream] WiFi 대기 시작. 현재=", JSON.stringify(latestWifi))
-
-    while (Date.now() < deadline) {
-      if (latestWifi?.connected === true) {
-        console.log("[Stream] WiFi 확인됨:", JSON.stringify(latestWifi))
-        return true
-      }
-      await new Promise((resolve) => setTimeout(resolve, WIFI_POLL_MS))
-    }
-
-    console.warn(`[Stream] ${WIFI_WAIT_MS}ms 동안 WiFi 미연결. 마지막 값=`, JSON.stringify(latestWifi))
-    return false
-  }
-
-  /**
-   * AI 소켓을 기다린다(거절하지 않는다). waitForWifi 와 같은 모양이다.
+   * AI 소켓을 기다린다(거절하지 않는다).
    *
    * AiClient 는 비정상 종료 후 스스로 재연결하지만 "재연결 중" 상태가 없다.
    * 백오프 구간 전체가 `error` 로 보이므로 isReady() 한 번으로는 "죽었다" 와
@@ -2130,15 +2109,18 @@ registerMiniapp((session) => {
    * 스트림이 서지 못한 자리를 서버 로그에 남긴다. `step` 이 어디서 멈췄는지다.
    *
    * 서버 쪽에서는 어느 실패든 "stream_start 가 오지 않았다" 하나로 보인다.
-   * 카메라가 잡혀 있는 것과 WiFi 가 없는 것은 고칠 사람이 다르다.
+   * 카메라가 잡혀 있는 것과 핫스팟에 못 붙은 것은 고칠 사람이 다르다.
    */
   function reportStreamStartFailure(step: string, code: string, message: string): void {
-    report("stream_start", "error", {
+    const fields: ClientLogFields = {
       result: "fail",
       step,
       error_code: code,
       error_message: message,
-    })
+    }
+    // whip 중계 진단용 — 실패 시점의 안경 WiFi 상태를 함께 남긴다.
+    if (typeof latestWifi?.connected === "boolean") fields.glasses_wifi_connected = latestWifi.connected
+    report("stream_start", "error", fields)
   }
 
   /**
@@ -2178,31 +2160,21 @@ registerMiniapp((session) => {
         return
       }
 
-      // 1. Wi-Fi.
-      setState("waiting_wifi")
-      if (!(await waitForWifi())) {
-        // waiting_wifi 에 머문다. 사용자가 설정 흐름을 마친 뒤 롱프레스를 다시
-        // 누르면 그때 재시도된다.
-        void session.glasses
-          .requestWifiSetup("수어 인식을 위해 안경을 WiFi에 연결해주세요")
-          .then(() => console.log("[Stream] requestWifiSetup 호출됨"))
-          .catch((err) => logRequestError("[Stream] requestWifiSetup", err))
-        console.warn("[Stream] WiFi 설정 유도 후 대기 — 연결 뒤 롱프레스로 재시도 가능")
-        reportStreamStartFailure(
-          "wifi",
-          "wifi_not_connected",
-          `connected=${String(latestWifi?.connected)}`,
-        )
-        return
-      }
-
-      // 2. Mentra 스트림 시작. 실측 약 6~7초.
+      // 1. Mentra 스트림 시작. 실측 약 6~7초. 안경 WiFi 는 확인하지 않는다 —
+      // whip 은 안경이 자기 핫스팟을 열고 폰이 중계하므로 WiFi 가 필요 없다.
       setState("starting_stream")
       const attempt = await runStreamLadder()
       if (!attempt.ok) {
         setState("error")
         console.error("[Stream] 스트림 시작 실패 (rung A) — error 상태")
         reportStreamStartFailure("start_stream", attempt.errorCode, attempt.errorMessage)
+        // 폰이 안경 핫스팟에 합류하지 못한 실패는 착용자가 연결 팝업으로 고칠 수 있어 따로 안내한다.
+        // SDK 문구가 조금 달라져도 안내가 나가도록 "hotspot" 포함 여부로만 판정한다.
+        if (attempt.errorMessage.toLowerCase().includes("hotspot")) {
+          stickyStreamMessage = HOTSPOT_NOT_JOINED_MESSAGE
+          publishStreamState()
+          speakSafe(session.speaker, HOTSPOT_NOT_JOINED_MESSAGE, "hotspot_not_joined", reportTts)
+        }
         return
       }
       const {result, requestedFps} = attempt
@@ -2245,7 +2217,7 @@ registerMiniapp((session) => {
       activeStream = typeof streamId === "string" ? {streamId, webrtcUrl: undefined} : undefined
       publishStreamState()
 
-      // 3. WHEP URL 검증. 여기서 쓸 수 없는 값은 치명적 실패다 — 서버도 그것을
+      // 2. WHEP URL 검증. 여기서 쓸 수 없는 값은 치명적 실패다 — 서버도 그것을
       // 당길 수 없다.
       if (typeof webrtcUrl !== "string" || webrtcUrl.length === 0) {
         console.error("[Stream] webrtcUrl 이 없다 — 롤백한다. result.mode=", result?.mode)
@@ -2287,7 +2259,7 @@ registerMiniapp((session) => {
       // 검증된 URL 을 보관한다. 재연결 뒤 onReady 가 이걸로 재전송한다.
       activeStream = {streamId, webrtcUrl}
 
-      // 4. URL 을 AI 서버에 넘긴다.
+      // 3. URL 을 AI 서버에 넘긴다.
       // `ai.` 가 아니라 `ai?.` 인 이유: 예전의 `ai?.isReady() !== true` 가드는
       // 함수 끝까지 `ai` 를 좁혀 주었지만, waitForAi 는 평범한 boolean 을
       // 반환해서 TS 가 그 정보를 이어받지 못한다. 실제로 undefined 가 여기 올 수는
@@ -2304,7 +2276,7 @@ registerMiniapp((session) => {
         return
       }
 
-      // 5. 완료. 묶인 세션이 그 사이 끝났으면 이 시작은 무효다.
+      // 4. 완료. 묶인 세션이 그 사이 끝났으면 이 시작은 무효다.
       if (boundSession !== undefined && boundSession !== currentSession) {
         console.warn("[Stream] 묶인 세션이 끝났다 — 뒤늦게 켜진 스트림을 정리한다")
         await cleanupStream("세션 종료로 시작 무효", {notifyAi: true, fromOwnStart: true})
@@ -2331,6 +2303,12 @@ registerMiniapp((session) => {
       if (typeof resolved?.video?.fps === "number") startedFields.fps = resolved.video.fps
       if (typeof resolved?.video?.width === "number") startedFields.width = resolved.video.width
       if (typeof resolved?.video?.height === "number") startedFields.height = resolved.video.height
+      // 재생 URL 원문 대신 호스트와 uid 앞 8자만 남겨 스트림을 대조한다.
+      startedFields.whep_host = parts.hostname
+      const uidSegment = /^[a-z]+:\/\/[^/]+\/([^/?#]+)/i.exec(webrtcUrl)?.[1]
+      if (uidSegment !== undefined) startedFields.whep_uid_prefix = uidSegment.slice(0, 8)
+      if (typeof latestWifi?.connected === "boolean")
+        startedFields.glasses_wifi_connected = latestWifi.connected
       report("stream_start", "info", startedFields)
     } catch (err) {
       // 호출부의 catch 는 setState("error") 만 하고 끝난다. 예외로 끝난 시작을
@@ -2422,8 +2400,7 @@ registerMiniapp((session) => {
             // 일부러 넣지 않았다 — 거기서는 `ai` 를 아직 만들지도 않아 기다릴
             // 대상이 없다.
             //
-            // waiting_wifi 는 재시도 진입점이다. 사용자가 설정 흐름으로 WiFi 를
-            // 연결하고 돌아와 다시 누르는 자리다.
+            // waiting_wifi 는 더 이상 진입하지 않지만 분기는 호환용으로 남겨 둔다.
             //
             // 요약 화면에서는 시작하지 않는다. 스트림이 꺼진 요약에서의 길게
             // 누르기는 "처음으로"와 같다 — 세션을 넘기고 대기로 간다.
