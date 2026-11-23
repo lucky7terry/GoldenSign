@@ -54,6 +54,7 @@ import {
   type WifiData,
 } from "@mentra/miniapp/background"
 import type {Channels, Mode, Screen, SessionRecord, Snapshot} from "../shared/channels"
+import {HOTSPOT_NOT_JOINED_MESSAGE} from "../shared/messages"
 import {QUESTION_COUNT} from "../shared/questions"
 import {buildCandidates} from "../shared/sentence"
 import {
@@ -2111,12 +2112,15 @@ registerMiniapp((session) => {
    * 카메라가 잡혀 있는 것과 핫스팟에 못 붙은 것은 고칠 사람이 다르다.
    */
   function reportStreamStartFailure(step: string, code: string, message: string): void {
-    report("stream_start", "error", {
+    const fields: ClientLogFields = {
       result: "fail",
       step,
       error_code: code,
       error_message: message,
-    })
+    }
+    // whip 중계 진단용 — 실패 시점의 안경 WiFi 상태를 함께 남긴다.
+    if (typeof latestWifi?.connected === "boolean") fields.glasses_wifi_connected = latestWifi.connected
+    report("stream_start", "error", fields)
   }
 
   /**
@@ -2165,12 +2169,11 @@ registerMiniapp((session) => {
         console.error("[Stream] 스트림 시작 실패 (rung A) — error 상태")
         reportStreamStartFailure("start_stream", attempt.errorCode, attempt.errorMessage)
         // 폰이 안경 핫스팟에 합류하지 못한 실패는 착용자가 연결 팝업으로 고칠 수 있어 따로 안내한다.
-        if (attempt.errorMessage.includes("Glasses hotspot has no verified Wi-Fi address")) {
-          const guidance =
-            "휴대폰이 안경 핫스팟에 연결되지 않았어요. 연결 팝업에서 '연결'을 눌러 주세요."
-          stickyStreamMessage = guidance
+        // SDK 문구가 조금 달라져도 안내가 나가도록 "hotspot" 포함 여부로만 판정한다.
+        if (attempt.errorMessage.toLowerCase().includes("hotspot")) {
+          stickyStreamMessage = HOTSPOT_NOT_JOINED_MESSAGE
           publishStreamState()
-          speakSafe(session.speaker, guidance, "hotspot_not_joined", reportTts)
+          speakSafe(session.speaker, HOTSPOT_NOT_JOINED_MESSAGE, "hotspot_not_joined", reportTts)
         }
         return
       }
@@ -2304,6 +2307,8 @@ registerMiniapp((session) => {
       startedFields.whep_host = parts.hostname
       const uidSegment = /^[a-z]+:\/\/[^/]+\/([^/?#]+)/i.exec(webrtcUrl)?.[1]
       if (uidSegment !== undefined) startedFields.whep_uid_prefix = uidSegment.slice(0, 8)
+      if (typeof latestWifi?.connected === "boolean")
+        startedFields.glasses_wifi_connected = latestWifi.connected
       report("stream_start", "info", startedFields)
     } catch (err) {
       // 호출부의 catch 는 setState("error") 만 하고 끝난다. 예외로 끝난 시작을

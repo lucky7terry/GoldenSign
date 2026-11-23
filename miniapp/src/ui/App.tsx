@@ -16,6 +16,7 @@
 import {Fragment, useEffect, useState} from "react"
 import {MiniappHeader, useRpc, useSafeArea} from "@mentra/miniapp/ui"
 import type {AnswerWord, Channels, SessionRecord, Snapshot, WordDiagEntry} from "../shared/channels"
+import {HOTSPOT_NOT_JOINED_MESSAGE} from "../shared/messages"
 import {QUESTIONS, QUESTION_COUNT} from "../shared/questions"
 import {buildCandidates} from "../shared/sentence"
 import {START_ANNOUNCEMENT, FRAMING_ANNOUNCEMENT} from "../background/tts"
@@ -198,10 +199,17 @@ function describeErrorCard(snap: Snapshot): {title: string; body: string; action
     ]
   } else {
     title = snap.stream.message ?? "카메라 스트림을 시작하지 못했습니다"
-    actions = [
-      "안경 버튼을 길게 눌러 다시 시도해 주세요",
-      "계속 안 되면 미니앱을 닫았다가 다시 열어 주세요",
-    ]
+    // 핫스팟 안내문은 background 와 공유하는 상수라 문구 비교가 어긋나지 않는다.
+    actions =
+      snap.stream.message === HOTSPOT_NOT_JOINED_MESSAGE
+        ? [
+            "iPhone 연결 팝업이나 WiFi 설정에서 MentraLive 핫스팟에 연결해 주세요",
+            "연결한 뒤 안경 버튼을 길게 눌러 다시 시도해 주세요",
+          ]
+        : [
+            "안경 버튼을 길게 눌러 다시 시도해 주세요",
+            "계속 안 되면 미니앱을 닫았다가 다시 열어 주세요",
+          ]
   }
 
   const body =
